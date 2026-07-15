@@ -21,8 +21,6 @@ const COMPACT_FACTOR: usize = 4;
 pub struct Persister {
     events: Mutex<LineFile>,
     txs: Mutex<LineFile>,
-    /// How many newest events to restore into the in-memory ring on boot.
-    restore_cap: usize,
 }
 
 struct LineFile {
@@ -34,25 +32,22 @@ struct LineFile {
 }
 
 impl Persister {
-    pub fn open(dir: &Path, event_cap: usize, tx_cap: usize) -> Result<Persister> {
+    pub fn open(dir: &Path, tx_cap: usize) -> Result<Persister> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("cannot create data dir {}", dir.display()))?;
         Ok(Persister {
-            // Events: retain full history for infinite scroll. `event_cap` only
-            // bounds the in-memory ring / initial restore tail.
+            // Events: retain full history for infinite scroll. The in-memory
+            // ring is time-bounded separately (see EVENT_RETENTION_HOURS).
             events: Mutex::new(LineFile::open(dir.join("events.jsonl"), 0)?),
             txs: Mutex::new(LineFile::open(dir.join("txs.jsonl"), tx_cap)?),
-            restore_cap: event_cap.max(1),
         })
     }
 
-    /// Restore the newest events (oldest→newest order, ids intact).
-    pub fn load_events(&self) -> Vec<ChainEvent> {
-        let f = self.events.lock().unwrap();
-        read_tail(&f.path, self.restore_cap)
-            .into_iter()
-            .filter_map(|line| serde_json::from_str(&line).ok())
-            .collect()
+    /// Load events with `timestamp >= cutoff` (oldest→newest) for the memory ring.
+    pub fn load_events_since(&self, cutoff: i64) -> Vec<ChainEvent> {
+        let mut out = Vec::new();
+        self.for_each_event_since(cutoff, |ev| out.push(ev.clone()));
+        out
     }
 
     /// Events with `id < before_id`, newest page among those older events,
@@ -96,6 +91,26 @@ impl Persister {
                 Some((hash, entry))
             })
             .collect()
+    }
+
+    /// Stream events with `timestamp >= cutoff` (oldest first). Used to seed
+    /// the trending window without loading the entire history into memory.
+    pub fn for_each_event_since(&self, cutoff: i64, mut f: impl FnMut(&ChainEvent)) {
+        let path = self.events.lock().unwrap().path.clone();
+        let Ok(file) = File::open(&path) else {
+            return;
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(ev) = serde_json::from_str::<ChainEvent>(&line) else {
+                continue;
+            };
+            if ev.timestamp >= cutoff {
+                f(&ev);
+            }
+        }
     }
 
     pub fn append_event(&self, event: &ChainEvent) {

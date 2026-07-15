@@ -30,10 +30,13 @@ pub fn router(ctx: ServerCtx) -> Router {
         .route("/favicon.svg", get(favicon))
         .route("/ws", get(ws_upgrade))
         .route("/api/events", get(api_events))
+        .route("/api/buffer", get(api_buffer))
+        .route("/api/search", get(api_search))
         .route("/api/tx/{hash}", get(api_tx))
         .route("/api/asset/{unit}", get(api_asset))
         .route("/api/pool/{id}", get(api_pool))
         .route("/api/stats", get(api_stats))
+        .route("/api/trending", get(api_trending))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(ctx)
 }
@@ -68,7 +71,8 @@ async fn ws_client(mut socket: WebSocket, state: Arc<AppState>) {
 
     // Snapshot first so the feed is instantly populated, then live events.
     let mut rx = state.sender.subscribe();
-    let snapshot = state.snapshot(250).to_string();
+    // Keep the first paint short (~one viewport); older events load on scroll.
+    let snapshot = state.snapshot(25).to_string();
     if socket.send(Message::Text(snapshot.into())).await.is_err() {
         return;
     }
@@ -88,7 +92,7 @@ async fn ws_client(mut socket: WebSocket, state: Arc<AppState>) {
                     // Client fell behind; resync it with a fresh snapshot.
                     tracing::debug!("ws client lagged by {n}, resyncing");
                     rx = rx.resubscribe();
-                    let snap = state.snapshot(250).to_string();
+                    let snap = state.snapshot(25).to_string();
                     if socket.send(Message::Text(snap.into())).await.is_err() {
                         return;
                     }
@@ -97,6 +101,14 @@ async fn ws_client(mut socket: WebSocket, state: Arc<AppState>) {
             },
             _ = stats_tick.tick() => {
                 if socket.send(Message::Text(state.stats().to_string().into())).await.is_err() {
+                    return;
+                }
+                let trending = json!({
+                    "type": "trending",
+                    "terms": state.trending_top(),
+                })
+                .to_string();
+                if socket.send(Message::Text(trending.into())).await.is_err() {
                     return;
                 }
             }
@@ -125,10 +137,27 @@ struct EventsQuery {
     limit: Option<usize>,
 }
 
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+    /// Only return matches with id < before (for paging older hits).
+    before: Option<u64>,
+    limit: Option<usize>,
+}
+
 async fn api_events(State(ctx): State<ServerCtx>, Query(q): Query<EventsQuery>) -> Response {
     let before = q.before.unwrap_or(u64::MAX);
     let limit = q.limit.unwrap_or(100);
     Json(ctx.state.events_before(before, limit)).into_response()
+}
+
+/// Full in-memory retention window for client-side search indexing.
+async fn api_buffer(State(ctx): State<ServerCtx>) -> Response {
+    Json(ctx.state.retention_buffer()).into_response()
+}
+
+async fn api_search(State(ctx): State<ServerCtx>, Query(q): Query<SearchQuery>) -> Response {
+    Json(ctx.state.search_buffered(&q.q, q.before, q.limit.unwrap_or(5_000))).into_response()
 }
 
 async fn api_asset(State(ctx): State<ServerCtx>, Path(unit): Path<String>) -> Response {
@@ -144,4 +173,8 @@ async fn api_stats(State(ctx): State<ServerCtx>) -> Response {
     stats["tip"] = serde_json::to_value(&*ctx.state.tip.lock().unwrap()).unwrap_or_default();
     stats["network"] = json!(ctx.state.network);
     Json(stats).into_response()
+}
+
+async fn api_trending(State(ctx): State<ServerCtx>) -> Response {
+    Json(json!({ "terms": ctx.state.trending_top() })).into_response()
 }

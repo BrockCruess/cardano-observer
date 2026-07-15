@@ -34,8 +34,11 @@ and slot battles.
   feed never starts empty. Chain-sync then resumes from the last persisted
   block, **backfilling everything that happened while the server was down** -
   including forks: a rollback that occurred offline still gets its orphan
-  cards on the next start. Scroll (or search) further back through the full
-  on-disk history via infinite load-more.
+  cards on the next start. Scroll further back through the full on-disk
+  history via infinite load-more; search covers the in-memory retention
+  window (default 24h) after a background preload into the browser.
+- **Trending subjects.** A rolling top-10 ticker of asset / pool / CIP-20
+  keywords over the retention window; click a term to search.
 - **Full transaction modal.** Click any card for the complete transaction:
   inputs/outputs with amounts and asset chips, certificates, withdrawals,
   proposals, votes, metadata, raw JSON, and explorer links (mainnet or
@@ -52,14 +55,16 @@ and slot battles.
 - **Filters that stick.** Per-category chips, free-text search (tx / block /
   address / policy / ticker / DEX name), URL deep-links (`?q=minswap`,
   `?NUTS`, …), a minimum-₳ filter, layout and density toggles - all cached in
-  the browser's localStorage for your next visit. Searching a sparse window
-  offers **Load more history** so you can extend the scan without leaving the
-  tip.
+  the browser's localStorage for your next visit. Search runs over the
+  preloaded retention window in the browser (no per-query server scan).
 - **Reading-friendly.** Scroll down and the feed pauses; a "new events" pill
   counts what you're missing and snaps you back to the tip when clicked.
-- **Light on the host.** Builds to a single static binary (~6 MB) with a few
-  tens of MB of RAM for the ring buffers, no database of its own, no JS build
-  chain - the UI is three hand-written files embedded at compile time.
+- **Light on the host.** Builds to a single static binary (~6 MB) with no
+  database of its own and no JS build chain - the UI is three hand-written
+  files embedded at compile time. RAM scales with `EVENT_RETENTION_HOURS`
+  (and `TX_CACHE`): a 24h mainnet window is typically on the order of
+  hundreds of MB for the event buffer alone, plus a matching browser-side
+  copy for fast search.
 
 | Vertical layout | Horizontal layout |
 |---|---|
@@ -137,7 +142,7 @@ the browser after each rebuild).
 | `BIND` | `0.0.0.0:9070` | web UI listen address |
 | `DATA_DIR` | `./data` | persisted event/tx history + registry/pool caches (JSONL/JSON); `none` / `off` / `false` disables persistence |
 | `BACKFILL_HOURS` | `24` | resume chain-sync from the last persisted block if younger than this; `0` = start at tip |
-| `EVENT_BUFFER` | `3000` | events kept in memory / replayed to new browsers |
+| `EVENT_RETENTION_HOURS` | `24` | hours of events kept in memory for trending + fast search (full history still on disk) |
 | `TX_CACHE` | `4000` | transactions kept for the detail modal |
 | `DEMO` | `false` | synthetic event stream - try the UI with no node (persistence off) |
 | `RUST_LOG` | `info` | log level (`error` \| `warn` \| `info` \| `debug` \| `trace`) |
@@ -179,8 +184,10 @@ Blockfrost RYO  ◀── enrichment / pools ───────┘
   DRep/asset-fingerprint encoding, CIP-14/20/67 handling
 - `src/dex.rs` - DEX order / fill / cancel / LP detection from script
   credentials and datums
-- `src/state.rs` - event ring buffer, tx cache, orphan & battle bookkeeping,
-  broadcast channel
+- `src/state.rs` - time-bounded event buffer, tx cache, orphan & battle
+  bookkeeping, broadcast channel
+- `src/trending.rs` - rolling subject-keyword frequency over the retention
+  window
 - `src/persist.rs` - append-only JSONL history, restore + compaction
 - `src/enrich.rs` - Blockfrost lookups (assets, accounts, historical txs) with
   in-memory caches
@@ -188,7 +195,8 @@ Blockfrost RYO  ◀── enrichment / pools ───────┘
 - `src/pools.rs` - Blockfrost pool-metadata scrape → `pools.json`
 - `src/deleg.rs` - stake/DRep from→to tracker across live + restored events
 - `src/server.rs` - axum server: embedded UI, `/ws` stream, `/api/events`,
-  `/api/tx`, `/api/asset`, `/api/pool`, `/api/stats`
+  `/api/buffer`, `/api/trending`, `/api/tx`, `/api/asset`, `/api/pool`,
+  `/api/stats`
 - `static/` - the whole frontend: one HTML file, one stylesheet, one script;
   no frameworks, no build step
 
@@ -199,9 +207,9 @@ Blockfrost RYO  ◀── enrichment / pools ───────┘
   resolved inputs for historical lookups.
 - Event colors were chosen as a colorblind-checked categorical palette; every
   card also carries an icon and a text label, so color never stands alone.
-- The feed keeps the last ~90 block groups in the DOM and the server replays
-  the last 250 events to each new browser tab; older history is available via
-  infinite scroll / search load-more against persisted JSONL.
+- Each new tab gets a short tip snapshot (~25 events); scroll loads older
+  pages from disk. The browser also background-loads `/api/buffer` (the full
+  `EVENT_RETENTION_HOURS` window) so search stays local and fast.
 
 ## License
 

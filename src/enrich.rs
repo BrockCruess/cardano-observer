@@ -5,6 +5,7 @@
 use crate::config::Config;
 use crate::pools::{PoolCache, PoolEntry};
 use crate::registry::TokenRegistry;
+use crate::trending::KeywordMeta;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -84,6 +85,23 @@ impl Enricher {
 
     pub fn pool_cache_len(&self) -> usize {
         self.pool_cache.len()
+    }
+
+    /// Sync CIP-26 ticker/name for trending keyword extraction.
+    pub fn asset_label(&self, unit: &str) -> Option<String> {
+        let e = self.registry.get(unit)?;
+        e.ticker
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| e.name.clone().filter(|s| !s.is_empty()))
+    }
+
+    /// Sync pool ticker/name for trending keyword extraction.
+    pub fn pool_label(&self, pool_id: &str) -> Option<String> {
+        let e = self.pool_cache.get(pool_id)?;
+        e.ticker
+            .filter(|s| !s.is_empty())
+            .or_else(|| e.name.filter(|s| !s.is_empty()))
     }
 
     fn bf(&self, path: &str) -> Option<reqwest::RequestBuilder> {
@@ -204,6 +222,19 @@ impl Enricher {
         meta
     }
 
+}
+
+impl KeywordMeta for Enricher {
+    fn asset_label(&self, unit: &str) -> Option<String> {
+        Enricher::asset_label(self, unit)
+    }
+
+    fn pool_label(&self, pool_id: &str) -> Option<String> {
+        Enricher::pool_label(self, pool_id)
+    }
+}
+
+impl Enricher {
     async fn pool_from_blockfrost(&self, pool_id: &str) -> Option<Value> {
         let req = self.bf(&format!("/pools/{pool_id}/metadata"))?;
         let v: Value = req.send().await.ok()?.error_for_status().ok()?.json().await.ok()?;

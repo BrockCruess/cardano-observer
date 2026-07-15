@@ -186,6 +186,7 @@ let NETWORK = "mainnet";
 const feed = $("feed");
 const groups = new Map();      // block hash -> .block-group element
 const groupOrder = [];         // newest first
+const seenEventIds = new Set(); // dedupe when merging search hits into the feed
 const MAX_GROUPS = 50_000; // keep history while scrolling back; soft safety cap
 const pending = [];            // buffered events while user is reading
 let oldestEventId = null;      // smallest id currently in the feed
@@ -203,7 +204,34 @@ let searchPrimeGen = 0;
 let historyAbort = null;
 /** How many tip-side events the current search has already considered. */
 let searchScanned = 0;
+/** How many events the server currently holds in the retention window. */
+let bufferedEventCount = 0;
+/** Retention window reported by the server (hours). */
+let retentionHours = 24;
+/** Total matches for the active query (from local filter). */
+let searchMatchesTotal = 0;
+/** All matches for the active query (newest-first), held in JS — not all rendered. */
+let searchHitBuffer = [];
+/** How many buffer entries have been rendered into the DOM. */
+let searchHitOffset = 0;
+/** True when every buffered match has been rendered. */
+let searchHitsExhausted = false;
+
+/**
+ * Client-side copy of the server's 24h retention window.
+ * Loaded in the background after the tip snapshot; search runs against this.
+ */
+const retentionCache = new Map(); // id -> { ev, hay }
+let retentionReady = false;
+let retentionLoading = null; // Promise while /api/buffer is in flight
+let retentionLoadGen = 0; // bumped on reconnect so stale preloads don't notify
+let retentionWaiters = []; // resolvers waiting for ready
+
 const SEARCH_PRIME_LOOKBACK = 300;
+/** Older events fetched per scroll page (matches tip snapshot size). */
+const HISTORY_PAGE_SIZE = 25;
+/** Matches rendered per page — keeps the DOM/scrollbar bounded. */
+const SEARCH_PAGE_SIZE = 40;
 const catCounts = Object.fromEntries(CATS.map((c) => [c.id, 0]));
 const eventTimes = [];         // timestamps (ms) for epm/sparkline
 let sessionEvents = 0;
@@ -309,12 +337,9 @@ function buildToolbar() {
     clearTimeout(deb);
     deb = setTimeout(() => {
       applyFilters();
-      // Typed search: offer load-more if the loaded tip window has no hits.
-      // Wait for pool tickers before declaring empty (same grace as URL prime).
-      if (!searchPriming && !urlSearchPreset) {
-        searchScanned = Math.max(searchScanned, document.querySelectorAll("#feed .card").length);
-        armSearchEmptyGrace();
-        updateSearchEmptyPrompt();
+      // Auto-prime through the in-memory retention window (trending clicks + typed search).
+      if (!urlSearchPreset) {
+        runSearchPrime(document.querySelectorAll("#feed .card").length);
       }
     }, 180);
   };
@@ -619,7 +644,91 @@ function cardSearchText(ev) {
     if (meta?.ticker) bits.push(meta.ticker);
     if (meta?.name) bits.push(meta.name);
   }
+  // Asset registry tickers already fetched into assetMeta.
+  const assetLists = [d.assets?.items, d.want?.items].filter(Array.isArray);
+  for (const items of assetLists) {
+    for (const a of items) {
+      if (a?.name) bits.push(a.name);
+      const unit = a?.unit;
+      if (unit && assetMeta.has(unit)) {
+        const m = assetMeta.get(unit);
+        if (m?.ticker) bits.push(m.ticker);
+        if (m?.name) bits.push(m.name);
+      }
+    }
+  }
   return bits.filter(Boolean).join(" ").toLowerCase().slice(0, 4000);
+}
+
+/** Index one event into the client-side 24h retention cache. */
+function retentionIndex(ev) {
+  if (!ev || ev.id == null) return;
+  retentionCache.set(ev.id, { ev, hay: cardSearchText(ev) });
+}
+
+function retentionTrim() {
+  if (!retentionHours || retentionCache.size === 0) return;
+  const cutoff = Math.floor(Date.now() / 1000) - retentionHours * 3600;
+  for (const [id, row] of retentionCache) {
+    if ((row.ev.timestamp || 0) < cutoff) retentionCache.delete(id);
+  }
+}
+
+function notifyRetentionReady() {
+  retentionReady = true;
+  const waiters = retentionWaiters.splice(0);
+  for (const w of waiters) w();
+}
+
+function whenRetentionReady() {
+  if (retentionReady) return Promise.resolve();
+  return new Promise((resolve) => retentionWaiters.push(resolve));
+}
+
+/**
+ * Background-load the full 24h window into retentionCache. Does not block the
+ * tip snapshot / live feed. Search waits on whenRetentionReady() instead of
+ * hitting the server per query.
+ */
+function startRetentionPreload(force = false) {
+  if (!force && retentionLoading) return retentionLoading;
+  const gen = ++retentionLoadGen;
+  retentionReady = false;
+  retentionLoading = (async () => {
+    try {
+      const r = await fetch("/api/buffer");
+      if (!r.ok) throw new Error("buffer fetch failed");
+      if (gen !== retentionLoadGen) return;
+      const m = await r.json();
+      if (gen !== retentionLoadGen) return;
+      if (m.buffered != null) bufferedEventCount = Number(m.buffered) || bufferedEventCount;
+      if (m.retention_hours != null) retentionHours = Number(m.retention_hours) || retentionHours;
+      const events = m.events || [];
+      for (const ev of events) retentionIndex(ev);
+      retentionTrim();
+      bufferedEventCount = Math.max(bufferedEventCount, retentionCache.size);
+    } catch (e) {
+      if (gen === retentionLoadGen) console.warn("retention preload failed", e);
+    } finally {
+      if (gen === retentionLoadGen) {
+        notifyRetentionReady();
+        retentionLoading = null;
+      }
+    }
+  })();
+  return retentionLoading;
+}
+
+/** Local filter over the preloaded 24h cache. Returns newest-first matches. */
+function searchRetentionLocal(query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return [];
+  const hits = [];
+  for (const { ev, hay } of retentionCache.values()) {
+    if (hay.includes(q)) hits.push(ev);
+  }
+  hits.sort((a, b) => (b.id || 0) - (a.id || 0));
+  return hits;
 }
 
 function appendCardSearch(card, ...parts) {
@@ -647,6 +756,7 @@ function buildCard(ev) {
   card.className = "card" + (ev.kind === "block" ? " card-block" : "");
   card.dataset.category = ev.category;
   card.dataset.kind = ev.kind;
+  if (ev.id != null) card.dataset.eid = String(ev.id);
   if (ev.tx_hash) card.dataset.tx = ev.tx_hash;
   if (ev.data && ev.data.ada != null) card.dataset.ada = ev.data.ada;
 
@@ -700,7 +810,9 @@ function newGroup(blockHash, atEnd = false) {
 
 function noteEventId(ev) {
   if (ev?.id == null) return;
+  seenEventIds.add(ev.id);
   if (oldestEventId == null || ev.id < oldestEventId) oldestEventId = ev.id;
+  retentionIndex(ev);
 }
 
 function routeEvent(ev) {
@@ -828,22 +940,32 @@ $("newpill").onclick = () => {
 };
 addEventListener("scroll", () => {
   if (!isPaused() && pending.length) flushPending();
-  maybeLoadHistory();
+  onFeedScroll();
 }, { passive: true });
 feed.addEventListener("scroll", () => {
   if (!isPaused() && pending.length) flushPending();
-  maybeLoadHistory();
+  onFeedScroll();
 }, { passive: true });
 
-// Filtered feeds with few hits often aren't tall enough to scroll. Treat
-// wheel-down as "load more history" in that case (same chunk as the button).
+// Feeds that don't fill the viewport can't scroll — treat wheel-down as load-more.
 addEventListener("wheel", (e) => {
   if (e.deltaY <= 0) return;
-  if (!$("search").value.trim()) return;
-  if (searchPriming || searchExtending || historyLoading || historyExhausted) return;
+  if (searchPriming || searchExtending) return;
   if (visibleFeedFillsPage()) return;
-  extendSearchHistory();
+  if ($("search").value.trim()) extendSearchHistory();
+  else maybeLoadHistory();
 }, { passive: true });
+
+/** While searching, only page the match buffer — never crawl raw history. */
+function onFeedScroll() {
+  const q = $("search").value.trim();
+  if (q) {
+    if (searchPriming || searchExtending) return;
+    if (!visibleFeedFillsPage() || nearHistoryEnd()) extendSearchHistory();
+    return;
+  }
+  maybeLoadHistory();
+}
 
 function nearHistoryEnd() {
   if (settings.layout === "vertical") {
@@ -892,21 +1014,12 @@ function setSearchEmpty(on, scanned = searchScanned) {
   el.hidden = false;
   el.classList.add("show");
   const n = Math.max(1, scanned || SEARCH_PRIME_LOOKBACK);
-  if (historyExhausted) {
-    if (text) {
-      text.textContent = `No results found in the past ${fmtInt(n)} events. Beginning of recorded history.`;
-    }
-    if (btn) btn.hidden = true;
-  } else {
-    if (text) {
-      text.textContent = `No results found in the past ${fmtInt(n)} events.`;
-    }
-    if (btn) {
-      btn.hidden = false;
-      btn.disabled = false;
-      btn.textContent = "Load more history?";
-    }
+  const windowLabel = searchWindowLabel(n);
+  if (text) {
+    text.textContent = `No results found in ${windowLabel}.`;
   }
+  // Search is local over the preloaded 24h index — no server history crawl.
+  if (btn) btn.hidden = true;
 }
 
 function setSearchMore(on, scanned = searchScanned, matches = 0) {
@@ -922,22 +1035,39 @@ function setSearchMore(on, scanned = searchScanned, matches = 0) {
   el.hidden = false;
   el.classList.add("show");
   const n = Math.max(1, scanned || SEARCH_PRIME_LOOKBACK);
-  const matchLabel = `${fmtInt(matches)} match${matches === 1 ? "" : "es"}`;
-  if (historyExhausted) {
-    if (text) {
-      text.textContent = `${matchLabel} in the past ${fmtInt(n)} events. Beginning of recorded history.`;
-    }
-    if (btn) btn.hidden = true;
-  } else {
-    if (text) {
-      text.textContent = `${matchLabel} in the past ${fmtInt(n)} events.`;
-    }
-    if (btn) {
+  const windowLabel = searchWindowLabel(n);
+  const total = searchMatchesTotal > 0 ? searchMatchesTotal : matches;
+  const showing = `${fmtInt(matches)} of ${fmtInt(total)} match${total === 1 ? "" : "es"}`;
+  if (text) {
+    text.textContent = `${showing} in ${windowLabel}.`;
+  }
+  if (btn) {
+    if (searchHitOffset < searchHitBuffer.length) {
       btn.hidden = false;
       btn.disabled = false;
-      btn.textContent = "Load more history";
+      btn.textContent = "Load more matches";
+    } else {
+      btn.hidden = true;
     }
   }
+}
+
+function coveredRetentionWindow(scanned) {
+  return bufferedEventCount > 0 && scanned >= bufferedEventCount;
+}
+
+/** Human label for how far a search has looked: prefer “past 24 hours” once the buffer is covered. */
+function searchWindowLabel(scanned) {
+  if (coveredRetentionWindow(scanned) && retentionHours > 0) {
+    const h = retentionHours === 1 ? "1 hour" : `${retentionHours} hours`;
+    return `the past ${h} (${fmtInt(scanned)} events)`;
+  }
+  return `the past ${fmtInt(scanned)} events`;
+}
+
+function searchLookbackTarget() {
+  // Cover the full in-memory retention window, not just the tip snapshot (~25).
+  return Math.max(SEARCH_PRIME_LOOKBACK, bufferedEventCount || 0);
 }
 
 function hideSearchPrompts() {
@@ -986,6 +1116,7 @@ async function waitForEnrichment(gen, timeoutMs = SEARCH_EMPTY_GRACE_MS) {
 }
 
 function updateSearchEmptyPrompt() {
+  // Don't show the summary while the initial match list is still loading.
   if (searchPriming) {
     hideSearchPrompts();
     return;
@@ -995,11 +1126,15 @@ function updateSearchEmptyPrompt() {
     hideSearchPrompts();
     return;
   }
+  // Raw history crawls must not run during search; if a spinner is up, clear it.
+  if (historyLoading) {
+    abortHistoryLoad();
+  }
   const matches = visibleMatchCount();
   if (matches > 0) {
     setSearchEmpty(false);
     if (!searchPriming) setSearchPrime(false);
-    if (searchScanned > 0) {
+    if (searchScanned > 0 || searchMatchesTotal > 0) {
       setSearchMore(true, searchScanned, matches);
       if (searchExtending) {
         const btn = $("search-more-btn");
@@ -1014,7 +1149,7 @@ function updateSearchEmptyPrompt() {
     return;
   }
   setSearchMore(false);
-  if (searchScanned <= 0) {
+  if (searchScanned <= 0 && searchMatchesTotal <= 0) {
     setSearchEmpty(false);
     return;
   }
@@ -1036,6 +1171,15 @@ function updateSearchEmptyPrompt() {
   }
 }
 
+function abortHistoryLoad() {
+  if (historyAbort) {
+    try { historyAbort.abort(); } catch { /* ignore */ }
+    historyAbort = null;
+  }
+  historyLoading = false;
+  setHistoryLoading(false);
+}
+
 function cancelSearchPrime() {
   searchPrimeGen++;
   if (historyAbort) {
@@ -1045,6 +1189,10 @@ function cancelSearchPrime() {
   searchPriming = false;
   historyLoading = false;
   searchScanned = 0;
+  searchMatchesTotal = 0;
+  searchHitBuffer = [];
+  searchHitOffset = 0;
+  searchHitsExhausted = false;
   searchEmptyGraceUntil = 0;
   clearTimeout(emptyRecheckTimer);
   setSearchPrime(false);
@@ -1054,70 +1202,26 @@ function cancelSearchPrime() {
 }
 
 /**
- * Pull another SEARCH_PRIME_LOOKBACK chunk for the active search.
- * Used by both the empty-state and "already have matches" load-more controls.
+ * Load the next page of search matches from the in-memory hit buffer.
  */
 async function extendSearchHistory() {
-  if (searchPriming || searchExtending || historyLoading || historyExhausted) return;
+  if (searchPriming || searchExtending) return;
   if (!$("search").value.trim()) return;
-  const gen = ++searchPrimeGen;
-  const hadMatches = visibleMatchCount() > 0;
-  searchExtending = true;
-  const btns = [$("search-empty-more"), $("search-more-btn")].filter(Boolean);
-  for (const btn of btns) {
-    btn.disabled = true;
-    btn.textContent = "Loading…";
-  }
-  // Keep existing matches visible - only use the full-feed spinner when empty.
-  if (hadMatches) {
-    setSearchEmpty(false);
-    setSearchMore(true, searchScanned, visibleMatchCount());
-    const btn = $("search-more-btn");
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = "Loading…";
-    }
-  } else {
-    searchPriming = true;
-    hideSearchPrompts();
-    setSearchPrime(true);
-  }
+  if (historyLoading) abortHistoryLoad();
 
-  try {
-    const target = searchScanned + SEARCH_PRIME_LOOKBACK;
-    while (
-      gen === searchPrimeGen
-      && $("search").value.trim()
-      && searchScanned < target
-      && !historyExhausted
-      && oldestEventId != null
-    ) {
-      const batch = await fetchAndRouteHistoryPage();
-      if (gen !== searchPrimeGen) return;
-      if (!batch.length) break;
-      searchScanned += batch.length;
-      if (!hadMatches) {
-        armSearchEmptyGrace();
-        await waitForEnrichment(gen);
-        if (gen !== searchPrimeGen) return;
-      } else {
-        applyFilters();
-      }
-    }
-  } finally {
-    if (gen === searchPrimeGen) {
-      searchExtending = false;
-      searchPriming = false;
-      setSearchPrime(false);
-      applyFilters();
-      updateSearchEmptyPrompt();
-    } else {
-      searchExtending = false;
-    }
+  if (searchHitOffset < searchHitBuffer.length) {
+    renderSearchPage();
+    applyFilters();
+    updateSearchEmptyPrompt();
+    return;
   }
+  searchHitsExhausted = true;
+  updateSearchEmptyPrompt();
 }
 
 function maybeLoadHistory() {
+  // Active search pages matches from searchHitBuffer only.
+  if ($("search").value.trim()) return;
   if (searchPriming || searchExtending || historyLoading || historyExhausted || oldestEventId == null) return;
   if (!nearHistoryEnd()) return;
   loadHistory();
@@ -1132,7 +1236,7 @@ async function fetchAndRouteHistoryPage() {
   historyAbort = ac;
   let events = [];
   try {
-    const r = await fetch(`/api/events?before=${oldestEventId}&limit=100`, {
+    const r = await fetch(`/api/events?before=${oldestEventId}&limit=${HISTORY_PAGE_SIZE}`, {
       signal: ac.signal,
     });
     const m = await r.json();
@@ -1175,56 +1279,76 @@ async function loadHistory() {
   queueMicrotask(() => maybeLoadHistory());
 }
 
+function routeSearchHits(events) {
+  const fresh = (events || []).filter((ev) => ev?.id != null && !seenEventIds.has(ev.id));
+  if (!fresh.length) return 0;
+  // Historical insert expects oldest→newest within a batch.
+  routeHistoricalBatch(fresh);
+  prefetchUnitsFromEvents(fresh);
+  applyFilters();
+  return fresh.length;
+}
+
 /**
- * After a URL search preset loads, pull history until the viewport is full of
- * matches or we've considered SEARCH_PRIME_LOOKBACK events from the tip.
- * Cleared search (x) cancels via cancelSearchPrime().
+ * Render the next SEARCH_PAGE_SIZE *new* matches from searchHitBuffer into the DOM.
+ * Tip snapshot events are already in the feed (and in seenEventIds); skip those.
+ */
+function renderSearchPage() {
+  let added = 0;
+  while (added < SEARCH_PAGE_SIZE && searchHitOffset < searchHitBuffer.length) {
+    const page = searchHitBuffer.slice(searchHitOffset, searchHitOffset + SEARCH_PAGE_SIZE);
+    searchHitOffset += page.length;
+    // Buffer is newest-first; reverse so older cards stack below newer ones.
+    added += routeSearchHits(page.slice().reverse());
+  }
+  if (searchHitOffset >= searchHitBuffer.length) searchHitsExhausted = true;
+  return added;
+}
+
+/**
+ * Wait for the background 24h cache if needed, then filter locally and render
+ * the first DOM page. No per-search server round-trip.
  */
 async function runSearchPrime(snapshotCount) {
-  if (searchPriming) return;
   if (!$("search").value.trim()) return;
   const gen = ++searchPrimeGen;
+  abortHistoryLoad();
   searchPriming = true;
-  // Snapshot is already the tip window - count it toward the lookback cap.
-  let scanned = snapshotCount || 0;
-  searchScanned = scanned;
+  searchScanned = snapshotCount || 0;
+  searchMatchesTotal = 0;
+  searchHitBuffer = [];
+  searchHitOffset = 0;
+  searchHitsExhausted = false;
   armSearchEmptyGrace();
   setSearchPrime(true);
+  hideSearchPrompts();
   applyFilters();
-  // Let pool ticker/name fetches land before we decide the tip has no hits
-  // (otherwise ?ST3AK flashes "No results" then the match appears).
-  await waitForEnrichment(gen);
-  if (gen !== searchPrimeGen) return;
 
-  // Only fetch older pages if we still have lookback budget and the filtered
-  // view doesn't fill the viewport yet.
-  while (
-    gen === searchPrimeGen
-    && $("search").value.trim()
-    && scanned < SEARCH_PRIME_LOOKBACK
-    && !historyExhausted
-    && !visibleFeedFillsPage()
-    && oldestEventId != null
-  ) {
-    const batch = await fetchAndRouteHistoryPage();
-    if (gen !== searchPrimeGen) return;
-    if (!batch.length) break;
-    scanned += batch.length;
-    searchScanned = scanned;
-    await waitForEnrichment(gen);
+  // Tip paints immediately; search waits on the background retention preload.
+  if (!retentionReady) {
+    startRetentionPreload();
+    await whenRetentionReady();
     if (gen !== searchPrimeGen) return;
   }
 
+  await waitForEnrichment(gen);
   if (gen !== searchPrimeGen) return;
-  searchScanned = scanned;
+
+  const q = $("search").value.trim();
+  const hits = searchRetentionLocal(q);
+  searchHitBuffer = hits;
+  searchHitOffset = 0;
+  searchMatchesTotal = hits.length;
+  searchHitsExhausted = false;
+  searchScanned = Math.max(searchScanned, retentionCache.size, bufferedEventCount || 0);
+  renderSearchPage();
+  await waitForEnrichment(gen);
+  if (gen !== searchPrimeGen) return;
+
   searchPriming = false;
   setSearchPrime(false);
   applyFilters();
   updateSearchEmptyPrompt();
-  // Never kick off unbounded history crawl after a search prime.
-  if (!$("search").value.trim()) {
-    queueMicrotask(() => maybeLoadHistory());
-  }
 }
 
 function setHistoryLoading(on, exhausted = false) {
@@ -1417,6 +1541,16 @@ function paintAsset(chip, meta) {
     img.onerror = () => img.remove();
     chip.querySelector(".ph")?.replaceWith(img);
   }
+  // Keep registry tickers/names in the card search haystack.
+  const card = chip.closest(".card");
+  if (card) {
+    appendCardSearch(card, meta.ticker, meta.name);
+    const eid = Number(card.dataset.eid);
+    if (Number.isFinite(eid) && retentionCache.has(eid)) {
+      retentionIndex(retentionCache.get(eid).ev);
+    }
+    if ($("search").value.trim()) scheduleFilterRefresh();
+  }
 }
 
 const poolMeta = new Map(Object.entries(store.get("co_pools_v1", {})));
@@ -1480,6 +1614,10 @@ function paintPool(el, meta) {
   const card = el.closest(".card");
   if (card) {
     appendCardSearch(card, poolId, ticker, name);
+    const eid = Number(card.dataset.eid);
+    if (Number.isFinite(eid) && retentionCache.has(eid)) {
+      retentionIndex(retentionCache.get(eid).ev);
+    }
     if ($("search").value.trim()) scheduleFilterRefresh();
   }
   if (!ticker && !name) return; // leave truncated pool id as fallback
@@ -1706,9 +1844,12 @@ function connect() {
         NETWORK = m.network || NETWORK;
         $("net").textContent = NETWORK;
         setConn(m.source || "connected");
+        if (m.buffered != null) bufferedEventCount = Number(m.buffered) || 0;
+        if (m.retention_hours != null) retentionHours = Number(m.retention_hours) || 24;
         feed.innerHTML = "";
         groups.clear();
         groupOrder.length = 0;
+        seenEventIds.clear();
         oldestEventId = null;
         historyExhausted = false;
         historyLoading = false;
@@ -1721,17 +1862,25 @@ function connect() {
         setSearchPrime(false);
         hideSearchPrompts();
         searchScanned = 0;
+        searchMatchesTotal = 0;
+        searchHitBuffer = [];
+        searchHitOffset = 0;
+        searchHitsExhausted = false;
+        // Tip events re-index via noteEventId; full 24h window loads in the
+        // background without blocking the initial paint.
+        retentionCache.clear();
+        retentionReady = false;
         for (const ev of m.events || []) routeEvent(ev);
         setTip(m.tip);
+        if (m.trending) renderTrending(m.trending);
         applyFilters();
         prefetchUnitsFromEvents(m.events || []);
+        startRetentionPreload(true);
         {
           const snapN = (m.events || []).length;
           const wantPrime = !!(urlSearchPreset && $("search").value.trim());
-          queueMicrotask(() => {
-            if (wantPrime) runSearchPrime(snapN);
-            else maybeLoadHistory();
-          });
+          // Don't pad the tip with history on first paint — wait for scroll.
+          if (wantPrime) queueMicrotask(() => runSearchPrime(snapN));
         }
         break;
       case "event":
@@ -1744,6 +1893,11 @@ function connect() {
         setConn(m.source);
         break;
       case "stats":
+        if (m.buffered != null) bufferedEventCount = Number(m.buffered) || bufferedEventCount;
+        if (m.retention_hours != null) retentionHours = Number(m.retention_hours) || retentionHours;
+        break;
+      case "trending":
+        renderTrending(m.terms);
         break;
     }
   };
@@ -1754,6 +1908,61 @@ function connect() {
   };
   ws.onerror = () => ws.close();
 }
+
+/* ── Trending ticker ──────────────────────────────────────────────────── */
+
+let trendingTerms = [];
+let trendingSig = "";
+
+function renderTrending(terms) {
+  const bar = $("trending");
+  const track = $("trending-track");
+  if (!bar || !track) return;
+  const list = Array.isArray(terms) ? terms.filter((t) => t && t.term) : [];
+  const sig = list.map((t) => `${t.term}:${t.count}`).join("|");
+  if (sig === trendingSig) return;
+  trendingSig = sig;
+  trendingTerms = list;
+
+  if (!list.length) {
+    bar.hidden = true;
+    track.innerHTML = "";
+    track.classList.remove("marquee");
+    return;
+  }
+
+  const chips = list
+    .map((t, i) => {
+      const term = String(t.term);
+      return `<button type="button" class="trend-chip" data-term="${esc(term)}" title="Filter by “${esc(term)}”">
+        <span class="rank">${i + 1}</span><span>${esc(term)}</span><span class="n">${fmtInt(t.count)}</span>
+      </button>`;
+    })
+    .join("");
+
+  // Duplicate the row so the CSS marquee can loop seamlessly.
+  track.innerHTML = chips + chips;
+  track.classList.toggle("marquee", list.length >= 4);
+  // Slower when more terms so each stays readable.
+  const dur = Math.max(18, Math.min(48, 8 + list.length * 3.5));
+  track.style.setProperty("--trending-dur", dur + "s");
+  bar.hidden = false;
+}
+
+function applyTrendingTerm(term) {
+  const search = $("search");
+  if (!search || !term) return;
+  search.value = term;
+  search.focus();
+  // Mirror typed-search behaviour (filters + empty/history prompts).
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+$("trending-track")?.addEventListener("click", (e) => {
+  const btn = e.target.closest(".trend-chip");
+  if (!btn) return;
+  applyTrendingTerm(btn.dataset.term || btn.textContent);
+});
 
 /* ── Boot ─────────────────────────────────────────────────────────────── */
 

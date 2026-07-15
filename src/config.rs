@@ -15,7 +15,8 @@ pub struct Config {
     pub pool_cache_refresh: bool,
     pub network: Network,
     pub bind: String,
-    pub event_buffer: usize,
+    /// How many hours of events to keep in the in-memory ring (trending + fast search).
+    pub event_retention_hours: u64,
     pub tx_cache: usize,
     pub demo: bool,
     /// Directory for persisted events/txs; None disables persistence.
@@ -88,7 +89,10 @@ impl Config {
             ),
             network,
             bind: non_empty("BIND").unwrap_or_else(|| "0.0.0.0:9070".into()),
-            event_buffer: non_empty("EVENT_BUFFER").and_then(|v| v.parse().ok()).unwrap_or(3000),
+            event_retention_hours: non_empty("EVENT_RETENTION_HOURS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(24)
+                .max(1),
             tx_cache: non_empty("TX_CACHE").and_then(|v| v.parse().ok()).unwrap_or(4000),
             demo: matches!(non_empty("DEMO").as_deref(), Some("true") | Some("1") | Some("yes")),
             data_dir: match non_empty("DATA_DIR").as_deref() {

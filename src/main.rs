@@ -11,6 +11,7 @@ mod pools;
 mod registry;
 mod server;
 mod state;
+mod trending;
 
 use std::sync::Arc;
 
@@ -38,11 +39,7 @@ async fn main() -> anyhow::Result<()> {
     // the on-disk history of a real deployment.
     let persister = match (&config.data_dir, config.demo) {
         (Some(dir), false) => {
-            let p = persist::Persister::open(
-                std::path::Path::new(dir),
-                config.event_buffer,
-                config.tx_cache,
-            )?;
+            let p = persist::Persister::open(std::path::Path::new(dir), config.tx_cache)?;
             tracing::info!("persisting events to {dir}");
             Some(Arc::new(p))
         }
@@ -55,21 +52,22 @@ async fn main() -> anyhow::Result<()> {
             config::Network::Preprod => "preprod",
             config::Network::Preview => "preview",
         },
-        config.event_buffer,
+        config.event_retention_hours,
         config.tx_cache,
         persister.clone(),
     ));
     if let Some(p) = &persister {
-        let events = p.load_events();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let retention_cutoff = now - state.event_retention_secs();
+        let events = p.load_events_since(retention_cutoff);
         // Backfill: resume chain-sync from the last persisted blocks so
         // nothing that happened while the server was down is lost. Points
         // older than the backfill window are ignored (we restart at the tip
         // rather than replaying ancient history into a bounded buffer).
         if config.backfill_hours > 0 {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
             let cutoff = now - (config.backfill_hours as i64) * 3600;
             let blocks: Vec<model::BlockRef> = events
                 .iter()
@@ -87,6 +85,19 @@ async fn main() -> anyhow::Result<()> {
         state.restore(events, p.load_txs());
     }
     let enricher = Arc::new(enrich::Enricher::new(&config).await);
+    state.set_keyword_meta(enricher.clone());
+    // Seed trending from the in-memory retention window (already loaded above).
+    {
+        let buf = state.events.lock().unwrap();
+        let snap: Vec<_> = buf.iter().cloned().collect();
+        drop(buf);
+        tracing::info!(
+            "seeding trending from {} buffered events ({}h window)",
+            snap.len(),
+            config.event_retention_hours
+        );
+        state.seed_trending(snap);
+    }
     tracing::info!(
         "token registry ready ({} subjects); pool cache ready ({} pools)",
         enricher.registry_len(),
