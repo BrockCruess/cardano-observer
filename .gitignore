@@ -1,0 +1,22 @@
+# Cargo build output
+/target/
+
+# Runtime persistence & caches (events, txs, pools.json, token-registry.*)
+/data/
+
+# Local secrets / machine config (start scripts copy from .env.example)
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.claude/
+.cursor/
+*.rs.bk

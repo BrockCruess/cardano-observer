@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Cardano Observer - Live Event Feed</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header>
+  <div class="hdr-inner">
+    <div class="brand">
+      <img src="/cardano-logo.svg" class="brand-logo" alt="Cardano" aria-hidden="true">
+      <h1 aria-label="cardano observer">cardan<span class="brand-oo" aria-hidden="true"><span class="oo-l">o</span><span class="oo-r">o</span></span><span>bserver</span></h1>
+      <span class="net-badge" id="net">·</span>
+      <span class="conn connecting" id="conn"><span class="dot"></span><span id="conn-t">connecting</span></span>
+    </div>
+    <div class="stats">
+      <div class="tile"><div class="k">Block</div><div class="v" id="st-height">-</div></div>
+      <div class="tile"><div class="k">Slot</div><div class="v" id="st-slot">-</div></div>
+      <div class="tile epoch"><div class="k">Epoch</div><div class="v" id="st-epoch">-</div><div class="bar"><i id="st-epoch-bar" style="width:0%"></i></div></div>
+      <div class="tile"><div class="k">Events / min</div><div class="v" id="st-epm">-</div></div>
+      <div class="tile activity" title="events over the last 3 minutes">
+        <div><div class="k">Activity</div><div class="v" id="st-act">-</div></div>
+        <svg id="spark" width="110" height="34" viewBox="0 0 110 34" aria-label="event activity, last 3 minutes">
+          <path class="area" d=""></path><path class="line" d=""></path>
+        </svg>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div id="toolbar">
+  <div class="chips" id="chips"></div>
+  <div class="tb-right">
+    <input id="search" type="search" placeholder="filter: tx / block / pool ticker / pool id / address / policy…" autocomplete="off">
+    <select class="tb-select" id="min-ada" title="hide transactions below this amount">
+      <option value="0">any ₳</option>
+      <option value="10">≥ ₳10</option>
+      <option value="100">≥ ₳100</option>
+      <option value="1000">≥ ₳1k</option>
+      <option value="100000">≥ ₳100k</option>
+      <option value="1000000">≥ ₳1M</option>
+    </select>
+    <button class="tb-btn" id="layout-btn" title="toggle vertical / horizontal layout"></button>
+    <button class="tb-btn" id="compact-btn" title="toggle compact cards">compact</button>
+  </div>
+</div>
+
+<div id="feed-shell">
+  <main id="feed" class="vertical" aria-live="polite"></main>
+  <div id="search-prime" class="search-prime" hidden aria-busy="true" aria-label="Loading">
+    <span class="hist-spin" aria-hidden="true"></span>
+  </div>
+  <div id="search-empty" class="search-empty" hidden>
+    <p class="search-empty-t" id="search-empty-t"></p>
+    <button type="button" class="search-empty-btn" id="search-empty-more">Load more history?</button>
+  </div>
+  <div id="search-more" class="search-more" hidden>
+    <p class="search-more-t" id="search-more-t"></p>
+    <button type="button" class="search-empty-btn" id="search-more-btn">Load more history</button>
+  </div>
+</div>
+
+<button id="newpill">▲ <span id="newpill-n">0</span> new events</button>
+
+<footer>
+  <span class="stat" id="ft-session">-</span>
+  <span style="margin-left:auto">cardano-observer · by $brock</span>
+</footer>
+
+<div id="overlay">
+  <div id="modal" role="dialog" aria-modal="true">
+    <div class="m-head">
+      <h2 id="m-title">Transaction</h2>
+      <button class="m-close" id="m-close" aria-label="close">✕</button>
+    </div>
+    <div class="m-body" id="m-body"></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
