@@ -29,9 +29,12 @@
       <div class="tile"><div class="k">Slot</div><div class="v" id="st-slot">-</div></div>
       <div class="tile epoch"><div class="k">Epoch</div><div class="v" id="st-epoch">-</div><div class="bar"><i id="st-epoch-bar" style="width:0%"></i></div></div>
       <div class="tile"><div class="k">Events / min</div><div class="v" id="st-epm">-</div></div>
-      <div class="tile activity" title="events over the last 3 minutes">
-        <div><div class="k">Activity</div><div class="v" id="st-act">-</div></div>
-        <svg id="spark" width="110" height="34" viewBox="0 0 110 34" aria-label="event activity, last 3 minutes">
+      <div class="tile activity" title="event density over loaded history">
+        <div>
+          <div class="k">Activity <span class="hist-pill" id="st-hist" hidden></span></div>
+          <div class="v" id="st-act">-</div>
+        </div>
+        <svg id="spark" width="110" height="34" viewBox="0 0 110 34" aria-label="event activity over loaded history">
           <path class="area" d=""></path><path class="line" d=""></path>
         </svg>
       </div>

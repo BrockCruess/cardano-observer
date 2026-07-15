@@ -290,6 +290,21 @@ header {
 .tile.activity svg { display: block; }
 .tile.activity path.line { fill: none; stroke: var(--c-block); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .tile.activity path.area { fill: color-mix(in srgb, var(--c-block) 16%, transparent); stroke: none; }
+.hist-pill {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: none;
+  vertical-align: 1px;
+  color: var(--c-block);
+  background: color-mix(in srgb, var(--c-block) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c-block) 28%, transparent);
+}
+.hist-pill[hidden] { display: none !important; }
 
 /* ── Toolbar: filters ──────────────────────────────────────────────────── */
 

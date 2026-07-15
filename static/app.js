@@ -233,7 +233,12 @@ const HISTORY_PAGE_SIZE = 25;
 /** Matches rendered per page — keeps the DOM/scrollbar bounded. */
 const SEARCH_PAGE_SIZE = 40;
 const catCounts = Object.fromEntries(CATS.map((c) => [c.id, 0]));
-const eventTimes = [];         // timestamps (ms) for epm/sparkline
+/** Ids counted in catCounts / the session total (retention window + scrolled history). */
+const loadedEventIds = new Set();
+/** Older-than-retention events the user explicitly scrolled in (kept after trim). */
+const extraHistoryIds = new Set();
+/** id → unix seconds — drives activity sparkline over loaded history. */
+const loadedTimestamps = new Map();
 let sessionEvents = 0;
 
 /* ── Filter chips & toolbar ───────────────────────────────────────────── */
@@ -249,7 +254,6 @@ function applyFilters() {
   filterStyle.textContent = css;
   // min-ADA + search need per-card logic
   const q = $("search").value.trim().toLowerCase();
-  let visibleEvents = 0;
   for (const g of groupOrder) {
     let visible = 0;
     g.querySelectorAll(".card").forEach((card) => {
@@ -259,14 +263,13 @@ function applyFilters() {
       card.classList.toggle("f-hide", hide);
       if (!hide && settings.filters[card.dataset.category]) {
         visible++;
-        visibleEvents++;
       }
     });
     g.classList.toggle("f-hide", q !== "" && visible === 0);
   }
   store.set("co_filters_v1", settings.filters);
   store.set("co_minada_v1", settings.minAda);
-  updateVisibleEventCount(visibleEvents);
+  updateLoadedEventCount();
   if (!searchPriming && $("search").value.trim()) {
     updateSearchEmptyPrompt();
   } else if (!$("search").value.trim()) {
@@ -274,17 +277,74 @@ function applyFilters() {
   }
 }
 
-function updateVisibleEventCount(n) {
+/** Total events loaded for counting: 24h retention index + any older scrolled-in history. */
+function updateLoadedEventCount() {
   const el = $("ft-session");
   if (!el) return;
-  let shown = n;
-  if (shown == null) {
-    shown = 0;
-    document.querySelectorAll("#feed .card:not(.f-hide)").forEach((card) => {
-      if (settings.filters[card.dataset.category]) shown++;
-    });
+  const n = loadedEventIds.size;
+  const span = formatHistorySpan(loadedHistoryHours());
+  const unit = `event${n === 1 ? "" : "s"}`;
+  el.textContent = span
+    ? `${fmtInt(n)} ${unit} · ${span} loaded`
+    : `${fmtInt(n)} ${unit}`;
+}
+
+function resetLoadedCounts() {
+  loadedEventIds.clear();
+  extraHistoryIds.clear();
+  loadedTimestamps.clear();
+  for (const c of CATS) catCounts[c.id] = 0;
+  updateLoadedEventCount();
+  paintCatCounts();
+  refreshActivityMonitor();
+}
+
+function noteLoadedEvent(ev) {
+  if (!ev || ev.id == null || loadedEventIds.has(ev.id)) return;
+  loadedEventIds.add(ev.id);
+  const cat = ev.category;
+  if (cat) catCounts[cat] = (catCounts[cat] || 0) + 1;
+  if (ev.timestamp != null) loadedTimestamps.set(ev.id, Number(ev.timestamp) || 0);
+}
+
+function forgetLoadedEvent(ev) {
+  if (!ev || ev.id == null || !loadedEventIds.has(ev.id)) return;
+  // Scrolled-in history older than the retention window stays in the total.
+  if (extraHistoryIds.has(ev.id)) return;
+  loadedEventIds.delete(ev.id);
+  loadedTimestamps.delete(ev.id);
+  const cat = ev.category;
+  if (cat && catCounts[cat] > 0) catCounts[cat]--;
+}
+
+function loadedHistoryHours() {
+  let oldest = Infinity;
+  let newest = -Infinity;
+  for (const ts of loadedTimestamps.values()) {
+    if (!(ts > 0)) continue;
+    if (ts < oldest) oldest = ts;
+    if (ts > newest) newest = ts;
   }
-  el.textContent = `${fmtInt(shown)} event${shown === 1 ? "" : "s"}`;
+  if (!Number.isFinite(oldest) || newest < oldest) return 0;
+  return (newest - oldest) / 3600;
+}
+
+/** Compact span label: `12m`, `3.5h`, `24h`. */
+function formatHistorySpan(hours) {
+  if (!(hours > 0)) return "";
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))}m`;
+  if (hours < 10) {
+    const t = Math.round(hours * 10) / 10;
+    return `${t}h`;
+  }
+  return `${Math.round(hours)}h`;
+}
+
+function paintCatCounts() {
+  for (const c of CATS) {
+    const el = document.querySelector(`[data-cat-n="${c.id}"]`);
+    if (el) el.textContent = catCounts[c.id] ? fmtInt(catCounts[c.id]) : "";
+  }
 }
 
 /** Pre-fill search from the URL: `?minswap`, `?q=minswap`, or `?search=NUTS`. */
@@ -387,15 +447,7 @@ function buildToolbar() {
   };
 }
 
-function bumpCatCount(cat) {
-  catCounts[cat] = (catCounts[cat] || 0) + 1;
-}
-setInterval(() => {
-  for (const c of CATS) {
-    const el = document.querySelector(`[data-cat-n="${c.id}"]`);
-    if (el) el.textContent = catCounts[c.id] ? fmtInt(catCounts[c.id]) : "";
-  }
-}, 1200);
+setInterval(paintCatCounts, 1200);
 
 /* ── Card builders ────────────────────────────────────────────────────── */
 
@@ -664,13 +716,17 @@ function cardSearchText(ev) {
 function retentionIndex(ev) {
   if (!ev || ev.id == null) return;
   retentionCache.set(ev.id, { ev, hay: cardSearchText(ev) });
+  noteLoadedEvent(ev);
 }
 
 function retentionTrim() {
   if (!retentionHours || retentionCache.size === 0) return;
   const cutoff = Math.floor(Date.now() / 1000) - retentionHours * 3600;
   for (const [id, row] of retentionCache) {
-    if ((row.ev.timestamp || 0) < cutoff) retentionCache.delete(id);
+    if ((row.ev.timestamp || 0) < cutoff) {
+      retentionCache.delete(id);
+      forgetLoadedEvent(row.ev);
+    }
   }
 }
 
@@ -707,6 +763,9 @@ function startRetentionPreload(force = false) {
       for (const ev of events) retentionIndex(ev);
       retentionTrim();
       bufferedEventCount = Math.max(bufferedEventCount, retentionCache.size);
+      updateLoadedEventCount();
+      paintCatCounts();
+      refreshActivityMonitor();
     } catch (e) {
       if (gen === retentionLoadGen) console.warn("retention preload failed", e);
     } finally {
@@ -812,13 +871,17 @@ function noteEventId(ev) {
   if (ev?.id == null) return;
   seenEventIds.add(ev.id);
   if (oldestEventId == null || ev.id < oldestEventId) oldestEventId = ev.id;
+  // History scrolled in from before the retention window stays in the totals
+  // even after retentionTrim drops it from the search index.
+  if (retentionHours && ev.timestamp != null) {
+    const cutoff = Math.floor(Date.now() / 1000) - retentionHours * 3600;
+    if (ev.timestamp < cutoff) extraHistoryIds.add(ev.id);
+  }
   retentionIndex(ev);
 }
 
 function routeEvent(ev) {
   sessionEvents++;
-  bumpCatCount(ev.category);
-  eventTimes.push(Date.now());
   noteEventId(ev);
 
   if (ev.kind === "block") {
@@ -866,7 +929,6 @@ function routeHistoricalBatch(events) {
   const anchors = new Map();
   for (const ev of events) {
     sessionEvents++;
-    bumpCatCount(ev.category);
     noteEventId(ev);
 
     if (ev.kind === "rollback" || ev.kind === "slot_battle" || ev.kind === "orphaned_block") {
@@ -1386,18 +1448,56 @@ function setTip(tip) {
   $("st-epoch-bar").style.width = (tip.epoch_progress * 100).toFixed(2) + "%";
 }
 
-setInterval(() => {
-  const now = Date.now();
-  while (eventTimes.length && eventTimes[0] < now - 180_000) eventTimes.shift();
-  const perMin = eventTimes.filter((t) => t > now - 60_000).length;
-  $("st-epm").textContent = fmtInt(perMin);
-  $("st-act").textContent = fmtInt(eventTimes.length);
+/** Activity / epm over the full loaded history (chain timestamps), not live arrivals. */
+function refreshActivityMonitor() {
+  const stamps = [];
+  for (const ts of loadedTimestamps.values()) {
+    if (ts > 0) stamps.push(ts);
+  }
+  const hist = $("st-hist");
+  const actTile = document.querySelector(".tile.activity");
+  const sparkLine = document.querySelector("#spark .line");
+  const sparkArea = document.querySelector("#spark .area");
 
-  // sparkline: 36 × 5s buckets over 3 minutes
+  if (!stamps.length) {
+    $("st-epm").textContent = "-";
+    $("st-act").textContent = "-";
+    if (hist) {
+      hist.hidden = true;
+      hist.textContent = "";
+    }
+    if (actTile) actTile.title = "event density over loaded history";
+    if (sparkLine) sparkLine.setAttribute("d", "");
+    if (sparkArea) sparkArea.setAttribute("d", "");
+    return;
+  }
+
+  stamps.sort((a, b) => a - b);
+  const oldest = stamps[0];
+  const newest = stamps[stamps.length - 1];
+  const spanSec = Math.max(1, newest - oldest);
+  const hours = spanSec / 3600;
+  const spanMin = spanSec / 60;
+  const epm = stamps.length / Math.max(spanMin, 1 / 60);
+  $("st-epm").textContent = fmtInt(Math.round(epm));
+  $("st-act").textContent = fmtInt(stamps.length);
+
+  const label = formatHistorySpan(hours);
+  if (hist) {
+    hist.hidden = !label;
+    hist.textContent = label;
+  }
+  if (actTile) {
+    actTile.title = label
+      ? `event density over ${label} of loaded history`
+      : "event density over loaded history";
+  }
+
+  // Sparkline: density across the whole loaded span (36 buckets).
   const buckets = new Array(36).fill(0);
-  for (const t of eventTimes) {
-    const i = Math.floor((now - t) / 5000);
-    if (i >= 0 && i < 36) buckets[35 - i]++;
+  for (const ts of stamps) {
+    const i = Math.min(35, Math.floor(((ts - oldest) / spanSec) * 36));
+    buckets[i]++;
   }
   const max = Math.max(4, ...buckets);
   const W = 110, H = 34, P = 3;
@@ -1405,13 +1505,19 @@ setInterval(() => {
     P + (i * (W - 2 * P)) / 35,
     H - P - (v / max) * (H - 2 * P),
   ]);
-  const line = "M" + pts.map((p) => p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" L");
-  document.querySelector("#spark .line").setAttribute("d", line);
-  document.querySelector("#spark .area").setAttribute(
-    "d", line + ` L${(W - P).toFixed(1)} ${H - P} L${P} ${H - P} Z`
-  );
+  const line = "M" + pts.map((p) => `${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(" L");
+  if (sparkLine) sparkLine.setAttribute("d", line);
+  if (sparkArea) {
+    sparkArea.setAttribute(
+      "d",
+      `${line} L${(W - P).toFixed(1)} ${H - P} L${P} ${H - P} Z`
+    );
+  }
+}
 
-  updateVisibleEventCount();
+setInterval(() => {
+  refreshActivityMonitor();
+  updateLoadedEventCount();
 }, 2000);
 
 setInterval(() => {
@@ -1870,6 +1976,7 @@ function connect() {
         // background without blocking the initial paint.
         retentionCache.clear();
         retentionReady = false;
+        resetLoadedCounts();
         for (const ev of m.events || []) routeEvent(ev);
         setTip(m.tip);
         if (m.trending) renderTrending(m.trending);
@@ -1895,6 +2002,10 @@ function connect() {
       case "stats":
         if (m.buffered != null) bufferedEventCount = Number(m.buffered) || bufferedEventCount;
         if (m.retention_hours != null) retentionHours = Number(m.retention_hours) || retentionHours;
+        retentionTrim();
+        updateLoadedEventCount();
+        paintCatCounts();
+        refreshActivityMonitor();
         break;
       case "trending":
         renderTrending(m.terms);
