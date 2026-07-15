@@ -7,6 +7,8 @@ and burns, staking and pool certificates, governance actions, votes, DReps,
 reward withdrawals, metadata messages, and even chain forks, orphaned blocks
 and slot battles.
 
+**[Try it now!](https://observer.brock.tools/)**
+
 ![vertical feed](docs/screenshot-vertical.png)
 
 ## Features
