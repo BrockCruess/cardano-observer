@@ -86,6 +86,8 @@ async fn main() -> anyhow::Result<()> {
     }
     let enricher = Arc::new(enrich::Enricher::new(&config).await);
     state.set_keyword_meta(enricher.clone());
+    // Restored JSONL events predate registry stamping — fill decimals now.
+    state.stamp_buffered_assets();
     // Seed trending from the in-memory retention window (already loaded above).
     {
         let buf = state.events.lock().unwrap();
@@ -119,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
         let dex = Arc::new(dex::DexRegistry::new());
         if config.network == config::Network::Mainnet {
             tokio::spawn(dex.clone().refresh_vyfi_loop());
+            tokio::spawn(dex.clone().refresh_minswap_pools_loop());
         }
         tokio::spawn(ogmios::run(
             config.clone(),

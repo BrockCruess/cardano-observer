@@ -105,18 +105,15 @@ pub fn parse_block(
     ));
 
     // ── Per-transaction events ───────────────────────────────────────────
-    // DEX order placements are deferred until the end of the block so a
-    // place+fill in the same block collapses to a single Swap.
-    let mut dex_buf = crate::dex::BlockDexBuf::default();
+    // DEX: two-pass over the whole block so place+fill (any tx order) → one Swap.
+    let mut dex_txs: Vec<(&str, &Value)> = Vec::with_capacity(txs.len());
     for (tx_index, tx) in txs.iter().enumerate() {
         let Some(tx_hash) = tx.get("id").and_then(Value::as_str) else { continue };
         cached_txs.push((tx_hash.to_string(), tx.clone()));
         parse_tx(&b, tx, tx_hash, tx_index, network, deleg, &mut events);
-        for hit in dex.scan_tx(tx, tx_hash, height, &mut dex_buf) {
-            events.push(crate::dex::hit_to_event(hit, slot, height, &hash, tx_hash, timestamp));
-        }
+        dex_txs.push((tx_hash, tx));
     }
-    for (tx_hash, hit) in DexRegistry::flush_block(dex_buf) {
+    for (tx_hash, hit) in dex.scan_block(&dex_txs) {
         events.push(crate::dex::hit_to_event(hit, slot, height, &hash, &tx_hash, timestamp));
     }
 

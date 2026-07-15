@@ -25,10 +25,16 @@ and slot battles.
   (or height) you get a **slot battle** card naming winner and loser.
 - **DEX awareness.** Swap orders, batch settlements, cancellations, and LP
   deposits / redeems on every major Cardano DEX - Minswap (V1+V2), SundaeSwap
-  (V1+V3), WingRiders (V1+V2), MuesliSwap, Splash/Spectrum and VyFi - detected
-  from order-script credentials and pool NFTs, with buy / sell / swap /
-  deposit / redeem inferred from the deposited assets. No separate DEX
-  indexer needed.
+  (V1+V3), WingRiders (V1+V2), MuesliSwap, Splash/Spectrum, VyFi, CSWAP,
+  Genius Yield, ChadSwap, and Danogo - detected from order-script credentials
+  and pool NFTs, with buy / sell / swap / deposit / redeem inferred from the
+  deposited assets. No separate DEX indexer needed.
+  **CIP-26 filter:** swap / order / fill / cancel cards are only shown when
+  every involved native asset is in the Cardano token registry
+  (`token-registry.json`). Trades in unregistered tokens (and incomplete
+  one-sided asks) are dropped entirely so the feed stays readable. LP
+  deposit / redeem events are not filtered this way — LP share tokens are
+  rarely registered.
 - **History survives restarts.** Events and transaction details are persisted
   to append-only JSONL files (auto-compacted) and restored on startup, so the
   feed never starts empty. Chain-sync then resumes from the last persisted

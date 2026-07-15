@@ -320,6 +320,26 @@ header {
 
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 
+.chip-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface);
+  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+.chip-wrap:not(.on) { opacity: 0.62; }
+.chip-wrap:hover { border-color: var(--border-strong); opacity: 1; }
+.chip-wrap.on {
+  border-color: color-mix(in srgb, var(--c-dex) 55%, transparent);
+  background: color-mix(in srgb, var(--c-dex) 13%, var(--surface));
+}
+.chip-wrap.open {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--c-dex) 65%, transparent);
+}
+
 .chip {
   --c: var(--muted);
   display: inline-flex;
@@ -351,6 +371,116 @@ header {
 .chip.on svg { color: var(--c); }
 .chip:not(.on) { opacity: 0.62; }
 .chip:hover { border-color: var(--border-strong); opacity: 1; }
+
+/* Split DEX chip: main toggle + venue caret share one pill */
+.chip-dex-wrap .chip-dex {
+  border: none;
+  background: transparent;
+  border-radius: 99px 0 0 99px;
+  padding-right: 6px;
+  opacity: 1;
+}
+.chip-dex-wrap .chip-dex:not(.on) { color: var(--text-2); }
+.chip-dex-wrap.on .chip-dex {
+  color: var(--text);
+}
+.chip-dex-wrap.on .chip-dex svg { color: var(--c-dex); }
+.chip-dex-wrap .chip-dex:hover { border: none; background: transparent; }
+
+.chip-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 0 99px 99px 0;
+  padding: 0 8px 0 4px;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.chip-dex-wrap.on .chip-caret {
+  color: var(--text-2);
+}
+.chip-caret:hover,
+.chip-wrap.open .chip-caret {
+  color: var(--text);
+  background: color-mix(in srgb, var(--c-dex) 12%, transparent);
+}
+.chip-wrap.open .chip-caret svg {
+  transform: rotate(180deg);
+}
+.chip-caret svg {
+  display: block;
+  transition: transform 0.15s ease;
+}
+
+.dex-venue-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  width: max-content;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.dex-venue-menu[hidden] { display: none; }
+
+.dex-venue-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.dex-venue-opt:hover {
+  background: color-mix(in srgb, var(--c-dex) 12%, transparent);
+  color: var(--text);
+}
+.dex-venue-check {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--muted) 18%, transparent);
+  color: transparent;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+.dex-venue-opt.on .dex-venue-check {
+  border-color: color-mix(in srgb, var(--vote-yes) 55%, transparent);
+  background: color-mix(in srgb, var(--vote-yes) 22%, transparent);
+  color: var(--vote-yes);
+}
+.dex-venue-opt:not(.on) .dex-venue-check {
+  color: transparent;
+}
+.dex-venue-opt:not(.on) {
+  color: var(--muted);
+}
+.dex-venue-label { flex: none; }
 
 .tb-right { display: flex; gap: 8px; align-items: center; margin-left: auto; flex-wrap: wrap; }
 

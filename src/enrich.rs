@@ -96,6 +96,60 @@ impl Enricher {
             .or_else(|| e.name.clone().filter(|s| !s.is_empty()))
     }
 
+    /// Stamp CIP-26 decimals/ticker/name onto every `{unit, qty}` asset object in
+    /// an event so the UI can format quantities without a per-token round-trip.
+    pub fn stamp_event_assets(&self, event: &mut crate::model::ChainEvent) {
+        stamp_json_assets(&mut event.data, &self.registry);
+    }
+
+    /// Drop swap/order DEX events whose tokens are not in CIP-26 (no liquidity
+    /// signal worth showing). LP events are kept — share tokens are rarely registered.
+    pub fn keep_dex_event(&self, event: &crate::model::ChainEvent) -> bool {
+        if !matches!(
+            event.kind.as_str(),
+            "dex_order" | "dex_fill" | "dex_cancel"
+        ) {
+            return true;
+        }
+        let d = &event.data;
+        let side = d.get("side").and_then(Value::as_str).unwrap_or("");
+        let want_items = d
+            .get("want")
+            .and_then(|w| w.get("items"))
+            .and_then(Value::as_array);
+        let asset_items = d
+            .get("assets")
+            .and_then(|w| w.get("items"))
+            .and_then(Value::as_array);
+        let has_want = d.get("wantAda").is_some()
+            || want_items.map(|a| !a.is_empty()).unwrap_or(false);
+        let has_paid_tok = asset_items.map(|a| !a.is_empty()).unwrap_or(false);
+
+        // Incomplete ask — hide rather than show a one-sided card.
+        match side {
+            "buy" | "sell" if !has_want => return false,
+            "swap" if !has_paid_tok || !has_want => return false,
+            _ => {}
+        }
+
+        for items in [asset_items, want_items].into_iter().flatten() {
+            for a in items {
+                let Some(unit) = a.get("unit").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !unit.is_empty() && self.registry.get(unit).is_none() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Compact registry dump for the browser (unit → decimals/ticker/name).
+    pub fn registry_assets_json(&self) -> Value {
+        self.registry.to_assets_json()
+    }
+
     /// Sync pool ticker/name for trending keyword extraction.
     pub fn pool_label(&self, pool_id: &str) -> Option<String> {
         let e = self.pool_cache.get(pool_id)?;
@@ -132,7 +186,14 @@ impl Enricher {
                 meta = Some(merge_asset_meta(meta, reg));
             }
         }
-        let meta = meta.unwrap_or_else(|| json!({ "unit": unit }));
+        // Still unknown after registry + Blockfrost + HTTP: CIP-26 default is 0.
+        let mut meta = meta.unwrap_or_else(|| json!({ "unit": unit }));
+        if !meta_has_decimals(&Some(meta.clone())) {
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("decimals".into(), json!(0));
+                obj.insert("decimalsDefaulted".into(), json!(true));
+            }
+        }
         let mut cache = self.assets.lock().unwrap();
         if cache.len() >= CACHE_CAP {
             cache.clear();
@@ -356,6 +417,49 @@ fn meta_has_decimals(meta: &Option<Value>) -> bool {
         .and_then(|m| m.get("decimals"))
         .map(|d| !d.is_null())
         .unwrap_or(false)
+}
+
+/// Walk event JSON and attach registry decimals/ticker onto asset-like objects.
+fn stamp_json_assets(v: &mut Value, reg: &TokenRegistry) {
+    match v {
+        Value::Object(map) => {
+            let unit = map.get("unit").and_then(Value::as_str).map(str::to_string);
+            if let Some(unit) = unit {
+                if map.contains_key("qty") {
+                    if let Some(e) = reg.get(&unit) {
+                        // Omitted CIP-26 decimals ⇒ 0.
+                        map.insert("decimals".into(), json!(e.decimals.unwrap_or(0)));
+                        if let Some(t) = e.ticker.as_ref().filter(|s| !s.is_empty()) {
+                            map.insert("ticker".into(), json!(t));
+                        }
+                        let name_empty = map
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(|s| s.is_empty())
+                            .unwrap_or(true);
+                        if name_empty {
+                            if let Some(n) = e.name.as_ref().filter(|s| !s.is_empty()) {
+                                map.insert("name".into(), json!(n));
+                            }
+                        }
+                    } else if !map.contains_key("decimals") {
+                        // Not in CIP-26 (e.g. SONGMARKETCAP): Cardano default is 0.
+                        // Blockfrost may refine later via /api/asset.
+                        map.insert("decimals".into(), json!(0));
+                    }
+                }
+            }
+            for child in map.values_mut() {
+                stamp_json_assets(child, reg);
+            }
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                stamp_json_assets(child, reg);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Prefer fields already present on `base`; fill gaps from `extra`.

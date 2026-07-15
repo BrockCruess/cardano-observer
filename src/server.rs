@@ -34,6 +34,7 @@ pub fn router(ctx: ServerCtx) -> Router {
         .route("/api/search", get(api_search))
         .route("/api/tx/{hash}", get(api_tx))
         .route("/api/asset/{unit}", get(api_asset))
+        .route("/api/registry", get(api_registry))
         .route("/api/pool/{id}", get(api_pool))
         .route("/api/stats", get(api_stats))
         .route("/api/trending", get(api_trending))
@@ -162,6 +163,11 @@ async fn api_search(State(ctx): State<ServerCtx>, Query(q): Query<SearchQuery>) 
 
 async fn api_asset(State(ctx): State<ServerCtx>, Path(unit): Path<String>) -> Response {
     Json(ctx.enricher.asset(&unit).await).into_response()
+}
+
+/// Full in-memory CIP-26 map for browser-side quantity formatting.
+async fn api_registry(State(ctx): State<ServerCtx>) -> Response {
+    Json(ctx.enricher.registry_assets_json()).into_response()
 }
 
 async fn api_pool(State(ctx): State<ServerCtx>, Path(id): Path<String>) -> Response {

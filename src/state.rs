@@ -187,10 +187,16 @@ impl AppState {
 
     /// Assign an id, buffer, persist, and broadcast a single event.
     pub fn publish(&self, mut event: ChainEvent) {
+        let meta = self.meta_ref();
+        if let Some(e) = meta.as_ref() {
+            e.stamp_event_assets(&mut event);
+            if !e.keep_dex_event(&event) {
+                return;
+            }
+        }
         event.id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.counters.events.fetch_add(1, Ordering::Relaxed);
         {
-            let meta = self.meta_ref();
             let meta_ref = meta.as_ref().map(|e| e.as_ref() as &dyn KeywordMeta);
             self.trending
                 .lock()
@@ -208,6 +214,21 @@ impl AppState {
             Self::trim_events(&mut buf, cutoff);
         }
         let _ = self.sender.send(msg);
+    }
+
+    /// Apply in-memory CIP-26 decimals/tickers onto every buffered event (boot).
+    pub fn stamp_buffered_assets(&self) {
+        let Some(enricher) = self.meta_ref() else { return };
+        let mut buf = self.events.lock().unwrap();
+        for ev in buf.iter_mut() {
+            enricher.stamp_event_assets(ev);
+        }
+        let before = buf.len();
+        buf.retain(|ev| enricher.keep_dex_event(ev));
+        let dropped = before - buf.len();
+        if dropped > 0 {
+            tracing::info!("dropped {dropped} DEX events with tokens outside CIP-26");
+        }
     }
 
     pub fn cache_tx(&self, hash: String, tx: Value, block: Value) {

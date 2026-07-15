@@ -66,9 +66,29 @@ impl TokenRegistry {
             "unit": unit,
             "name": e.name,
             "ticker": e.ticker,
-            "decimals": e.decimals,
+            // CIP-26: omitted decimals means 0 (base units = display units).
+            "decimals": e.decimals.unwrap_or(0),
             "source": "registry",
         }))
+    }
+
+    /// Browser bulk hydrate: subject → {decimals, ticker, name} (only useful rows).
+    pub fn to_assets_json(&self) -> Value {
+        let mut out = serde_json::Map::new();
+        for (subject, e) in &self.by_subject {
+            if e.decimals.is_none() && e.ticker.is_none() && e.name.is_none() {
+                continue;
+            }
+            out.insert(
+                subject.clone(),
+                json!({
+                    "decimals": e.decimals.unwrap_or(0),
+                    "ticker": e.ticker,
+                    "name": e.name,
+                }),
+            );
+        }
+        json!({ "assets": out, "count": out.len() })
     }
 
     /// Load `token-registry.json` if present; otherwise download + parse the zip

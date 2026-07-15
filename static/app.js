@@ -3,6 +3,20 @@
 
 /* ── Category & icon registry ─────────────────────────────────────────── */
 
+/** DEX venues emitted as `data.dex` — keep in sync with `src/dex.rs`. */
+const DEX_VENUES = [
+  "Minswap",
+  "SundaeSwap",
+  "WingRiders",
+  "MuesliSwap",
+  "Splash",
+  "VyFinance",
+  "CSWAP",
+  "GeniusYield",
+  "ChadSwap",
+  "Danogo",
+];
+
 const CATS = [
   { id: "block",       label: "Blocks" },
   { id: "token",       label: "Tokens" },
@@ -110,10 +124,53 @@ function fmtQty(qtyStr, decimals) {
   return decorateFrac((neg ? "-" : "") + out);
 }
 
-/** Format on-chain qty only when decimals are known - never invent M/B from raw units. */
+/** Format on-chain qty with known decimals. Unknown → placeholder until registry
+ *  meta lands (never show undivided raw units — those look like billions). */
 function fmtTokenQty(qtyStr, decimals) {
   if (decimals == null || decimals === "" || Number.isNaN(Number(decimals))) return "…";
   return fmtQty(qtyStr, Number(decimals));
+}
+
+/** Prefer event-stamped decimals, then the in-memory registry /api/registry map. */
+function registryMetaFor(unit) {
+  if (!unit) return null;
+  if (assetMeta.has(unit)) return assetMeta.get(unit);
+  if (unit.length <= 56) return null;
+  // Match server lookup_keys for CIP-68 label variants.
+  const policy = unit.slice(0, 56);
+  const name = unit.slice(56);
+  for (const prefix of ["000de140", "0014df10"]) {
+    if (name.startsWith(prefix)) {
+      const bare = policy + name.slice(prefix.length);
+      if (assetMeta.has(bare)) return assetMeta.get(bare);
+    } else {
+      const withP = policy + prefix + name;
+      if (assetMeta.has(withP)) return assetMeta.get(withP);
+    }
+  }
+  return null;
+}
+
+function tokenDecimals(a) {
+  if (a && a.decimals != null && a.decimals !== "") {
+    const n = Number(a.decimals);
+    if (Number.isFinite(n)) return n;
+  }
+  const meta = registryMetaFor(a?.unit || "");
+  if (meta?.decimals != null) {
+    const n = Number(meta.decimals);
+    if (Number.isFinite(n)) return n;
+  }
+  // After registry hydrate: unregistered tokens (SONGMARKETCAP etc.) use CIP-26 default 0.
+  if (registryReady && a?.qty != null && a?.unit) return 0;
+  return null;
+}
+
+function tokenLabel(a) {
+  if (!a) return "";
+  const meta = registryMetaFor(a.unit || "");
+  return a.ticker || meta?.ticker || a.name || meta?.name
+    || (a.fingerprint ? short(a.fingerprint, 8, 4) : short(a.unit, 8, 4));
 }
 
 function timeAgo(ts) {
@@ -169,6 +226,11 @@ const store = {
 const settings = {
   // Merge over defaults so categories added in later versions start visible
   filters: { ...Object.fromEntries(CATS.map((c) => [c.id, true])), ...store.get("co_filters_v1", {}) },
+  // Per-venue DEX toggles (true = include). Unknown venues stay visible.
+  dexVenues: {
+    ...Object.fromEntries(DEX_VENUES.map((d) => [d, true])),
+    ...store.get("co_dex_venues_v1", {}),
+  },
   layout: store.get("co_layout_v1", "vertical"),
   // Mobile defaults to compact; desktop stays roomy unless the user toggled it.
   compact: store.get(
@@ -179,6 +241,11 @@ const settings = {
   ),
   minAda: store.get("co_minada_v1", 0),
 };
+
+function dexVenueEnabled(venue) {
+  if (!venue) return true;
+  return settings.dexVenues[venue] !== false;
+}
 
 /* ── Global state ─────────────────────────────────────────────────────── */
 
@@ -252,7 +319,7 @@ function applyFilters() {
     .join("\n");
   const minL = settings.minAda * 1e6;
   filterStyle.textContent = css;
-  // min-ADA + search need per-card logic
+  // min-ADA + search + DEX venue need per-card logic
   const q = $("search").value.trim().toLowerCase();
   for (const g of groupOrder) {
     let visible = 0;
@@ -260,6 +327,7 @@ function applyFilters() {
       let hide = false;
       if (minL > 0 && card.dataset.category === "transaction" && Number(card.dataset.ada || 0) < minL) hide = true;
       if (q && !(card.dataset.search || "").includes(q)) hide = true;
+      if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) hide = true;
       card.classList.toggle("f-hide", hide);
       if (!hide && settings.filters[card.dataset.category]) {
         visible++;
@@ -269,6 +337,7 @@ function applyFilters() {
   }
   store.set("co_filters_v1", settings.filters);
   store.set("co_minada_v1", settings.minAda);
+  store.set("co_dex_venues_v1", settings.dexVenues);
   updateLoadedEventCount();
   if (!searchPriming && $("search").value.trim()) {
     updateSearchEmptyPrompt();
@@ -363,9 +432,99 @@ function searchFromUrl() {
   return "";
 }
 
+function buildDexVenueMenu(menu) {
+  menu.innerHTML = "";
+  for (const venue of DEX_VENUES) {
+    const on = dexVenueEnabled(venue);
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "dex-venue-opt" + (on ? " on" : "");
+    row.setAttribute("role", "menuitemcheckbox");
+    row.setAttribute("aria-checked", on ? "true" : "false");
+    row.innerHTML =
+      `<span class="dex-venue-check" aria-hidden="true">${on ? "✓" : ""}</span>` +
+      `<span class="dex-venue-label">${esc(venue)}</span>`;
+    row.onclick = (e) => {
+      e.stopPropagation();
+      settings.dexVenues[venue] = !dexVenueEnabled(venue);
+      buildDexVenueMenu(menu);
+      applyFilters();
+    };
+    menu.appendChild(row);
+  }
+}
+
+function buildDexChip(chips) {
+  const wrap = document.createElement("div");
+  wrap.className = "chip-wrap chip-dex-wrap";
+
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "chip chip-dex" + (settings.filters.dex ? " on" : "");
+  b.style.setProperty("--c", "var(--c-dex)");
+  b.innerHTML =
+    `${iconFor("dex", "dex")}<span>DEX</span><span class="n" data-cat-n="dex"></span>`;
+  b.title = "show/hide DEX";
+  b.onclick = () => {
+    settings.filters.dex = !settings.filters.dex;
+    b.classList.toggle("on", settings.filters.dex);
+    wrap.classList.toggle("on", settings.filters.dex);
+    applyFilters();
+  };
+
+  const caret = document.createElement("button");
+  caret.type = "button";
+  caret.className = "chip-caret";
+  caret.setAttribute("aria-label", "Filter by DEX venue");
+  caret.setAttribute("aria-haspopup", "menu");
+  caret.setAttribute("aria-expanded", "false");
+  caret.innerHTML =
+    `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">` +
+    `<path fill="currentColor" d="M4.2 6.2a.75.75 0 0 1 1.06 0L8 8.94l2.74-2.74a.75.75 0 1 1 1.06 1.06l-3.27 3.27a.75.75 0 0 1-1.06 0L4.2 7.26a.75.75 0 0 1 0-1.06z"/></svg>`;
+
+  const menu = document.createElement("div");
+  menu.className = "dex-venue-menu";
+  menu.setAttribute("role", "menu");
+  menu.hidden = true;
+  buildDexVenueMenu(menu);
+
+  const closeMenu = () => {
+    menu.hidden = true;
+    wrap.classList.remove("open");
+    caret.setAttribute("aria-expanded", "false");
+  };
+  const openMenu = () => {
+    buildDexVenueMenu(menu);
+    menu.hidden = false;
+    wrap.classList.add("open");
+    caret.setAttribute("aria-expanded", "true");
+  };
+
+  caret.onclick = (e) => {
+    e.stopPropagation();
+    if (menu.hidden) openMenu();
+    else closeMenu();
+  };
+
+  document.addEventListener("click", (e) => {
+    if (!wrap.contains(e.target)) closeMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeMenu();
+  });
+
+  wrap.classList.toggle("on", settings.filters.dex);
+  wrap.append(b, caret, menu);
+  chips.appendChild(wrap);
+}
+
 function buildToolbar() {
   const chips = $("chips");
   for (const c of CATS) {
+    if (c.id === "dex") {
+      buildDexChip(chips);
+      continue;
+    }
     const b = document.createElement("button");
     b.className = "chip" + (settings.filters[c.id] ? " on" : "");
     b.style.setProperty("--c", `var(--c-${c.id})`);
@@ -464,10 +623,8 @@ function assetChipsHtml(assets) {
   const chips = assets.items
     .map((a) => {
       const unit = a.unit || "";
-      const meta = unit ? assetMeta.get(unit) : null;
-      const label = meta?.ticker || meta?.name || a.name
-        || (a.fingerprint ? short(a.fingerprint, 10, 4) : short(a.unit, 10, 4));
-      const decimals = meta?.decimals != null ? Number(meta.decimals) : null;
+      const decimals = tokenDecimals(a);
+      const label = tokenLabel(a);
       return `<span class="asset" data-unit="${esc(unit)}" title="${esc(a.policy)}.${esc(a.nameHex)}">
         <span class="ph">◆</span><span class="t">${esc(label)}</span><span class="q" data-qty="${esc(a.qty)}">${fmtTokenQty(a.qty, decimals)}</span></span>`;
     })
@@ -485,25 +642,47 @@ function dexAmtToken(assets, min) {
   const a = assets && assets.items && assets.items[0];
   if (!a) return "";
   const unit = a.unit || "";
-  const meta = unit ? assetMeta.get(unit) : null;
-  const decimals = meta?.decimals != null ? Number(meta.decimals) : null;
-  const label = meta?.ticker || meta?.name || a.name
-    || (a.fingerprint ? short(a.fingerprint, 8, 4) : short(a.unit, 8, 4));
+  const decimals = tokenDecimals(a);
+  const label = tokenLabel(a);
   const qty = `<span class="q" data-qty="${esc(a.qty)}">${fmtTokenQty(a.qty, decimals)}</span>`;
   const name = `<span class="t">${esc(label)}</span>`;
-  // data-unit lets enrichAssets apply on-chain token decimals (fixes 344.35M → 344.35).
   return `<b class="dex-amt" data-unit="${esc(unit)}">${min ? "≥" : ""}${qty} ${name}</b>`;
 }
 function dexAmtTokens(assets) {
   const items = (assets && assets.items) || [];
   return items.map((a) => {
     const unit = a.unit || "";
-    const meta = unit ? assetMeta.get(unit) : null;
-    const decimals = meta?.decimals != null ? Number(meta.decimals) : null;
-    const label = meta?.ticker || meta?.name || a.name
-      || (a.fingerprint ? short(a.fingerprint, 8, 4) : short(a.unit, 8, 4));
+    const decimals = tokenDecimals(a);
+    const label = tokenLabel(a);
     return `<b class="dex-amt" data-unit="${esc(unit)}"><span class="q" data-qty="${esc(a.qty)}">${fmtTokenQty(a.qty, decimals)}</span> <span class="t">${esc(label)}</span></b>`;
   }).join(" + ");
+}
+
+/** CIP-26 known: server-stamped ticker, or client registry hydrate. */
+function cip26Known(a) {
+  if (!a) return false;
+  if (a.ticker && String(a.ticker).trim()) return true;
+  return !!registryMetaFor(a.unit || "");
+}
+
+/** Hide swap/order DEX cards when any token is outside CIP-26 (or ask is missing). */
+function keepDexEvent(ev) {
+  const kind = ev.kind || "";
+  if (kind !== "dex_order" && kind !== "dex_fill" && kind !== "dex_cancel") return true;
+  const d = ev.data || {};
+  const side = d.side || "";
+  const wantItems = (d.want && d.want.items) || [];
+  const assetItems = (d.assets && d.assets.items) || [];
+  const hasWant = d.wantAda != null || wantItems.length > 0;
+  if ((side === "buy" || side === "sell") && !hasWant) return false;
+  if (side === "swap" && (!assetItems.length || !hasWant)) return false;
+  for (const a of assetItems) {
+    if (!cip26Known(a)) return false;
+  }
+  for (const a of wantItems) {
+    if (!cip26Known(a)) return false;
+  }
+  return true;
 }
 /** Paid → want flow for buy / sell / swap / fill; LP shows deposited amounts. */
 function dexFlowHtml(d) {
@@ -515,9 +694,8 @@ function dexFlowHtml(d) {
   }
   const wantAda = d.wantAda != null ? dexAmtAda(d.wantAda, d.wantMin) : "";
   const wantTok = dexAmtToken(d.want, d.wantMin);
-  const want = wantAda || wantTok || (d.wantQty != null && d.wantQty !== ""
-    ? `<b>${d.wantMin ? "≥" : ""}${fmtTokenQty(d.wantQty, null)}</b>`
-    : "");
+  // Unresolved / unregistered wants: omit (never show a fake "token" label).
+  const want = wantAda || wantTok;
   const paidTok = dexAmtToken(d.assets);
   let paid = "";
   if (d.side === "buy") paid = paidAda;
@@ -715,6 +893,7 @@ function cardSearchText(ev) {
 /** Index one event into the client-side 24h retention cache. */
 function retentionIndex(ev) {
   if (!ev || ev.id == null) return;
+  if (!keepDexEvent(ev)) return;
   retentionCache.set(ev.id, { ev, hay: cardSearchText(ev) });
   noteLoadedEvent(ev);
 }
@@ -818,6 +997,7 @@ function buildCard(ev) {
   if (ev.id != null) card.dataset.eid = String(ev.id);
   if (ev.tx_hash) card.dataset.tx = ev.tx_hash;
   if (ev.data && ev.data.ada != null) card.dataset.ada = ev.data.ada;
+  if (ev.category === "dex" && ev.data?.dex) card.dataset.dex = String(ev.data.dex);
 
   const title = ev.kind === "block"
     ? `Block <span class="height">${fmtInt(ev.height)}</span>`
@@ -881,6 +1061,7 @@ function noteEventId(ev) {
 }
 
 function routeEvent(ev) {
+  if (!keepDexEvent(ev)) return;
   sessionEvents++;
   noteEventId(ev);
 
@@ -928,6 +1109,7 @@ function routeHistoricalBatch(events) {
   // already on screen for that block.
   const anchors = new Map();
   for (const ev of events) {
+    if (!keepDexEvent(ev)) continue;
     sessionEvents++;
     noteEventId(ev);
 
@@ -1058,7 +1240,9 @@ function setSearchPrime(on) {
 function visibleMatchCount() {
   let n = 0;
   document.querySelectorAll("#feed .card:not(.f-hide)").forEach((card) => {
-    if (settings.filters[card.dataset.category]) n++;
+    if (!settings.filters[card.dataset.category]) return;
+    if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return;
+    n++;
   });
   return n;
 }
@@ -1529,6 +1713,8 @@ setInterval(() => {
 /* ── Asset & pool metadata enrichment ─────────────────────────────────── */
 
 const assetMeta = new Map(Object.entries(store.get("co_assets_v2", {})));
+/** True after /api/registry hydrate finishes (misses can safely default to 0). */
+let registryReady = false;
 const assetInflight = new Set();
 const assetQueue = [];
 /** unit → Promise<meta> so many cards share one in-flight fetch. */
@@ -1544,6 +1730,49 @@ function persistAssetCache() {
     obj[k] = { name: v.name, ticker: v.ticker, decimals: v.decimals };
   }
   store.set("co_assets_v2", obj);
+}
+
+/** Hydrate assetMeta from the server's in-memory CIP-26 registry, then repaint. */
+async function loadRegistryMeta() {
+  try {
+    const r = await fetch("/api/registry");
+    if (!r.ok) return;
+    const m = await r.json();
+    const assets = m.assets || {};
+    let n = 0;
+    for (const [unit, meta] of Object.entries(assets)) {
+      if (!meta || typeof meta !== "object") continue;
+      const prev = assetMeta.get(unit) || {};
+      const decimals = meta.decimals == null || meta.decimals === ""
+        ? prev.decimals
+        : Number(meta.decimals);
+      assetMeta.set(unit, {
+        name: meta.name || prev.name || null,
+        ticker: meta.ticker || prev.ticker || null,
+        decimals: Number.isFinite(decimals) ? decimals : prev.decimals ?? null,
+        logo: prev.logo || null,
+      });
+      n++;
+    }
+    if (n) {
+      persistAssetCache();
+    }
+    registryReady = true;
+    document
+      .querySelectorAll(".asset[data-unit], .dex-amt[data-unit]")
+      .forEach((chip) => {
+        const unit = chip.dataset.unit;
+        const meta = registryMetaFor(unit) || assetMeta.get(unit);
+        const decimals = meta?.decimals != null ? Number(meta.decimals) : (registryReady ? 0 : null);
+        if (decimals == null) return;
+        const painted = meta || { decimals: 0 };
+        if (painted.decimals == null) painted.decimals = 0;
+        paintAsset(chip, painted);
+      });
+  } catch (e) {
+    console.warn("registry hydrate failed", e);
+    registryReady = true; // still allow default-0 for unregistered
+  }
 }
 
 function enrichAssets(root) {
@@ -1590,17 +1819,18 @@ function fetchAssetMeta(unit) {
     try {
       const r = await fetch(`/api/asset/${unit}`);
       const m = await r.json();
-      const decimals = m.decimals == null || m.decimals === "" ? null : Number(m.decimals);
+      if (m.error) return null;
+      let decimals = m.decimals == null || m.decimals === "" ? null : Number(m.decimals);
+      // Server defaults missing metadata to 0; keep that so we never leave "…".
+      if (!Number.isFinite(decimals)) decimals = 0;
       const meta = {
         name: m.name || null,
         ticker: m.ticker || null,
-        decimals: Number.isFinite(decimals) ? decimals : null,
+        decimals,
         logo: m.logo || null,
       };
-      if (meta.decimals != null) {
-        assetMeta.set(unit, meta);
-        persistAssetCache();
-      }
+      assetMeta.set(unit, meta);
+      persistAssetCache();
       return meta;
     } catch {
       return null;
@@ -2079,4 +2309,5 @@ $("trending-track")?.addEventListener("click", (e) => {
 
 buildToolbar();
 applyFilters();
+loadRegistryMeta();
 connect();
