@@ -135,10 +135,13 @@ impl AppState {
             return;
         }
         let cutoff = Self::retention_cutoff(Self::now_unix(), self.event_retention_secs);
-        let kept: Vec<ChainEvent> = events
+        let mut kept: Vec<ChainEvent> = events
             .into_iter()
             .filter(|e| e.timestamp >= cutoff)
             .collect();
+        // Keep ring in chain order. Disk order alone is wrong if events were
+        // ever appended out of slot order (e.g. a one-off historical inject).
+        kept.sort_by(|a, b| a.slot.cmp(&b.slot).then_with(|| a.id.cmp(&b.id)));
         tracing::info!(
             "restored {} events (≤{}h window) and {} cached txs from disk",
             kept.len(),

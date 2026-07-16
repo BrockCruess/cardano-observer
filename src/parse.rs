@@ -5,6 +5,7 @@
 //! the sync loop on an unexpected shape.
 
 use crate::config::Network;
+use crate::dapp::DappRegistry;
 use crate::deleg::DelegationTracker;
 use crate::dex::DexRegistry;
 use crate::model::ChainEvent;
@@ -59,6 +60,7 @@ pub fn parse_block(
     timestamp: i64,
     network: Network,
     dex: &DexRegistry,
+    dapp: &DappRegistry,
     deleg: &DelegationTracker,
 ) -> Option<ParsedBlock> {
     let hash = block.get("id")?.as_str()?.to_string();
@@ -105,16 +107,19 @@ pub fn parse_block(
     ));
 
     // ── Per-transaction events ───────────────────────────────────────────
-    // DEX: two-pass over the whole block so place+fill (any tx order) → one Swap.
-    let mut dex_txs: Vec<(&str, &Value)> = Vec::with_capacity(txs.len());
+    // DEX / dApp: two-pass over the whole block so place+fill (any tx order) → one Swap.
+    let mut scan_txs: Vec<(&str, &Value)> = Vec::with_capacity(txs.len());
     for (tx_index, tx) in txs.iter().enumerate() {
         let Some(tx_hash) = tx.get("id").and_then(Value::as_str) else { continue };
         cached_txs.push((tx_hash.to_string(), tx.clone()));
         parse_tx(&b, tx, tx_hash, tx_index, network, deleg, &mut events);
-        dex_txs.push((tx_hash, tx));
+        scan_txs.push((tx_hash, tx));
     }
-    for (tx_hash, hit) in dex.scan_block(&dex_txs) {
+    for (tx_hash, hit) in dex.scan_block(&scan_txs) {
         events.push(crate::dex::hit_to_event(hit, slot, height, &hash, &tx_hash, timestamp));
+    }
+    for (tx_hash, hit) in dapp.scan_block(&scan_txs) {
+        events.push(crate::dapp::hit_to_event(hit, slot, height, &hash, &tx_hash, timestamp));
     }
 
     Some(ParsedBlock { hash, height, slot, events, txs: cached_txs })

@@ -24,6 +24,7 @@
   --c-pool: #d55181;
   --c-metadata: #2596c9;
   --c-dex: #c45ae0;
+  --c-dapp: #3d9ead;
   --c-alert: #e5534b;
 
   --vote-yes: #2ea043;
@@ -711,6 +712,7 @@ header {
 .card[data-category="governance"] { --evc: var(--c-governance); }
 .card[data-category="metadata"] { --evc: var(--c-metadata); }
 .card[data-category="dex"] { --evc: var(--c-dex); }
+.card[data-category="dapp"] { --evc: var(--c-dapp); }
 .card[data-category="alert"] { --evc: var(--c-alert); }
 
 .ev-icon {

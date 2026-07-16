@@ -392,6 +392,44 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
             }),
         ));
     }
+    if rng.gen_bool(0.10) {
+        let (event_type, title, iag, ada) = match rng.gen_range(0..9u8) {
+            0 => ("stake_delegation", "Stake Delegation - Iagon", rng.gen_range(10_000..2_000_000u64) * 1_000_000, 2_000_000u64),
+            1 => ("node_registration", "Node Registration - Iagon", 0u64, 2_000_000u64),
+            2 => ("node_pledge", "Node Pledge - Iagon", rng.gen_range(50_000..5_000_000u64) * 1_000_000, 2_000_000u64),
+            3 => ("earnings_claim", "Earnings Claim - Iagon", rng.gen_range(100..50_000u64) * 1_000_000, 1_500_000u64),
+            4 => ("node_retirement", "Node Retirement - Iagon", 0u64, 2_000_000u64),
+            5 => ("stake_withdrawal", "Stake Withdrawal - Iagon", rng.gen_range(10_000..2_000_000u64) * 1_000_000, 2_000_000u64),
+            6 => ("position_listing", "Position Listing - Iagon", rng.gen_range(5_000..500_000u64) * 1_000_000, 2_000_000u64),
+            7 => ("position_sale", "Position Sale - Iagon", rng.gen_range(5_000..500_000u64) * 1_000_000, rng.gen_range(20..500u64) * 1_000_000),
+            _ => ("subscription", "Subscription - Iagon", 0u64, rng.gen_range(5..50u64) * 1_000_000),
+        };
+        let mut data = json!({
+            "dapp": "Iagon",
+            "eventType": event_type,
+            "ada": ada,
+        });
+        if iag > 0 {
+            let obj = data.as_object_mut().unwrap();
+            obj.insert("iag".into(), json!(iag));
+            obj.insert(
+                "assets".into(),
+                json!({
+                    "items": [{
+                        "unit": "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114494147",
+                        "policy": "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114",
+                        "nameHex": "494147",
+                        "name": "IAG",
+                        "qty": iag.to_string(),
+                        "ticker": "IAG",
+                        "decimals": 6,
+                    }],
+                    "more": 0
+                }),
+            );
+        }
+        state.publish(mk("dapp_activity", "dapp", title.into(), data));
+    }
 
     // Cache a plausible raw tx so the detail modal has something to show.
     let inputs: Vec<Value> = (0..n_in)

@@ -2,6 +2,7 @@
 //! feeds parsed events into `AppState`. Reconnects forever with backoff.
 
 use crate::config::{Config, Network};
+use crate::dapp::DappRegistry;
 use crate::deleg::{self, DelegationTracker};
 use crate::dex::DexRegistry;
 use crate::enrich::Enricher;
@@ -22,13 +23,14 @@ pub async fn run(
     config: Config,
     state: Arc<AppState>,
     dex: Arc<DexRegistry>,
+    dapp: Arc<DappRegistry>,
     enricher: Arc<Enricher>,
     deleg: Arc<DelegationTracker>,
 ) {
     let mut backoff = 1u64;
     loop {
         state.set_status("connecting");
-        match sync_once(&config, &state, &dex, &enricher, &deleg).await {
+        match sync_once(&config, &state, &dex, &dapp, &enricher, &deleg).await {
             Ok(()) => backoff = 1,
             Err(e) => {
                 tracing::warn!("ogmios connection lost: {e:#}");
@@ -48,6 +50,7 @@ async fn sync_once(
     config: &Config,
     state: &Arc<AppState>,
     dex: &Arc<DexRegistry>,
+    dapp: &Arc<DappRegistry>,
     enricher: &Arc<Enricher>,
     deleg: &Arc<DelegationTracker>,
 ) -> Result<()> {
@@ -142,6 +145,7 @@ async fn sync_once(
                         result.get("tip"),
                         config.network,
                         dex,
+                        dapp,
                         enricher,
                         deleg,
                     )
@@ -175,6 +179,7 @@ async fn handle_forward(
     tip: Option<&Value>,
     network: Network,
     dex: &Arc<DexRegistry>,
+    dapp: &Arc<DappRegistry>,
     enricher: &Arc<Enricher>,
     deleg: &Arc<DelegationTracker>,
 ) {
@@ -183,7 +188,7 @@ async fn handle_forward(
         .and_then(Value::as_u64)
         .map(|s| tm.slot_to_unix(s))
         .unwrap_or(0);
-    let Some(mut parsed) = parse::parse_block(block, timestamp, network, dex, deleg) else {
+    let Some(mut parsed) = parse::parse_block(block, timestamp, network, dex, dapp, deleg) else {
         return;
     };
 

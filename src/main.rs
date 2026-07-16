@@ -1,4 +1,5 @@
 mod config;
+mod dapp;
 mod demo;
 mod deleg;
 mod dex;
@@ -134,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(demo::run(state.clone()));
     } else {
         let dex = Arc::new(dex::DexRegistry::new());
+        let dapp = Arc::new(dapp::DappRegistry::new());
         if config.network == config::Network::Mainnet {
             tokio::spawn(dex.clone().refresh_vyfi_loop());
             tokio::spawn(dex.clone().refresh_minswap_pools_loop());
@@ -142,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
             config.clone(),
             state.clone(),
             dex,
+            dapp,
             enricher.clone(),
             deleg,
         ));

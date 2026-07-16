@@ -9,7 +9,7 @@ pub struct ChainEvent {
     /// Machine-readable event kind, e.g. "transaction", "gov_vote"
     pub kind: String,
     /// Color/filter family: block | transaction | token | mint | staking |
-    /// pool | governance | metadata | dex | alert
+    /// pool | governance | metadata | dex | dapp | alert
     pub category: String,
     pub slot: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

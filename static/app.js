@@ -17,6 +17,9 @@ const DEX_VENUES = [
   "Danogo",
 ];
 
+/** dApps emitted as `data.dapp` — keep in sync with `src/dapp/`. */
+const DAPP_APPS = ["Iagon"];
+
 /**
  * Governance subtype filters — CIP-1694 action types (proposals) plus other
  * governance event kinds. Ids match `data.actionType` / `kind` from the server.
@@ -49,6 +52,7 @@ const CATS = [
   { id: "token",       label: "Tokens" },
   { id: "transaction", label: "Transactions" },
   { id: "dex",         label: "DEX" },
+  { id: "dapp",        label: "dApp" },
   { id: "mint",        label: "Mint / Burn" },
   { id: "governance",  label: "Governance" },
   { id: "staking",     label: "Staking" },
@@ -94,6 +98,8 @@ const ICONS = {
   dex_lp: svg('<path d="M12 3v18"/><path d="M5 8h14"/><path d="M7 8c0 4 2.5 8 5 10"/><path d="M17 8c0 4-2.5 8-5 10"/><path d="M8 14h8"/>'),
   dex_lp_redeem: svg('<path d="M5 11v8h14v-8"/><path d="M12 16V4"/><path d="M8.5 7.5L12 4l3.5 3.5"/>'),
   dex_cancel: svg('<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>'),
+  dapp: svg('<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>'),
+  dapp_activity: svg('<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>'),
 };
 const iconFor = (kind, category, side, vote) => {
   if (kind === "dex_lp" && side === "redeem") return ICONS.dex_lp_redeem;
@@ -104,7 +110,7 @@ const iconFor = (kind, category, side, vote) => {
     if (v === "abstain") return ICONS.gov_vote_abstain;
     return ICONS.gov_vote;
   }
-  return ICONS[kind] || ICONS[{ token: "token_transfer", staking: "delegation", governance: "gov_proposal", metadata: "tx_metadata", alert: "slot_battle", dex: "dex", pool: "pool", mint: "mint" }[category]] || ICONS.transaction;
+  return ICONS[kind] || ICONS[{ token: "token_transfer", staking: "delegation", governance: "gov_proposal", metadata: "tx_metadata", alert: "slot_battle", dex: "dex", dapp: "dapp", pool: "pool", mint: "mint" }[category]] || ICONS.transaction;
 };
 
 /* ── Tiny helpers ─────────────────────────────────────────────────────── */
@@ -267,6 +273,11 @@ const settings = {
     ...Object.fromEntries(DEX_VENUES.map((d) => [d, true])),
     ...store.get("co_dex_venues_v1", {}),
   },
+  // Per-dApp toggles (true = include). Unknown dApps stay visible.
+  dappApps: {
+    ...Object.fromEntries(DAPP_APPS.map((d) => [d, true])),
+    ...store.get("co_dapp_apps_v1", {}),
+  },
   // Per-type governance toggles (true = include). Unknown types stay visible.
   govTypes: {
     ...Object.fromEntries(GOV_TYPES.map((g) => [g.id, true])),
@@ -286,6 +297,11 @@ const settings = {
 function dexVenueEnabled(venue) {
   if (!venue) return true;
   return settings.dexVenues[venue] !== false;
+}
+
+function dappAppEnabled(app) {
+  if (!app) return true;
+  return settings.dappApps[app] !== false;
 }
 
 function govTypeEnabled(type) {
@@ -384,6 +400,7 @@ function applyFilters() {
       if (minL > 0 && card.dataset.category === "transaction" && Number(card.dataset.ada || 0) < minL) hide = true;
       if (q && !(card.dataset.search || "").includes(q)) hide = true;
       if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) hide = true;
+      if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) hide = true;
       if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) hide = true;
       card.classList.toggle("f-hide", hide);
       if (!hide && settings.filters[card.dataset.category]) {
@@ -397,6 +414,7 @@ function applyFilters() {
   store.set("co_filters_v1", settings.filters);
   store.set("co_minada_v1", settings.minAda);
   store.set("co_dex_venues_v1", settings.dexVenues);
+  store.set("co_dapp_apps_v1", settings.dappApps);
   store.set("co_gov_types_v1", settings.govTypes);
   updateLoadedEventCount();
   if (!searchPriming && $("search").value.trim()) {
@@ -418,6 +436,7 @@ function countVisibleEvents() {
   document.querySelectorAll("#feed .block-group:not(.f-hide) .card:not(.f-hide)").forEach((card) => {
     if (!settings.filters[card.dataset.category]) return;
     if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return;
+    if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) return;
     if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) return;
     n++;
     const ts = Number(card.querySelector(".ev-time")?.dataset.ts || 0);
@@ -628,6 +647,18 @@ function buildToolbar() {
         options: DEX_VENUES,
         isEnabled: dexVenueEnabled,
         menuAria: "Filter by DEX venue",
+      });
+      continue;
+    }
+    if (c.id === "dapp") {
+      buildSplitFilterChip(chips, {
+        catId: "dapp",
+        label: "dApp",
+        iconKind: "dapp",
+        settingsKey: "dappApps",
+        options: DAPP_APPS,
+        isEnabled: dappAppEnabled,
+        menuAria: "Filter by dApp",
       });
       continue;
     }
@@ -964,6 +995,21 @@ function cardBody(ev) {
       const status = dexStatusPill(ev, d);
       return sub([flow, status]);
     }
+    case "dapp_activity": {
+      const iag = d.iag != null
+        ? `<b>${fmtTokenQty(d.iag, 6)}</b> IAG`
+        : "";
+      const nodeId = d.nodeId
+        ? `node id <span class="hash" title="Node ID">${esc(d.nodeId)}</span>`
+        : "";
+      const ada = d.ada ? `<b>${fmtAda(d.ada)}</b>` : "";
+      return sub([
+        `<span class="badge contract">${esc(d.dapp || "dApp")}</span>`,
+        nodeId,
+        iag,
+        ada,
+      ]);
+    }
     default:
       return esc(ev.summary || "");
   }
@@ -1128,6 +1174,7 @@ function eventPassesFeedFilters(ev) {
   if (!ev || !keepDexEvent(ev)) return false;
   if (!settings.filters[ev.category]) return false;
   if (ev.category === "dex" && !dexVenueEnabled(ev.data?.dex)) return false;
+  if (ev.category === "dapp" && !dappAppEnabled(ev.data?.dapp)) return false;
   if (ev.category === "governance") {
     const gt = govTypeKey(ev);
     if (gt && !govTypeEnabled(gt)) return false;
@@ -1143,7 +1190,82 @@ function feedFilterKey() {
     f: settings.filters,
     g: settings.govTypes,
     d: settings.dexVenues,
+    a: settings.dappApps,
     m: settings.minAda,
+  });
+}
+
+/** Newest-first by slot (chain order), then id within the same slot. */
+function sortEventsNewestFirst(events) {
+  events.sort((a, b) => (b.slot || 0) - (a.slot || 0) || (b.id || 0) - (a.id || 0));
+  return events;
+}
+
+function cmpSlotIdDesc(slotA, idA, slotB, idB) {
+  if (slotB !== slotA) return slotB - slotA;
+  return idB - idA;
+}
+
+/** Keep group sort keys in sync with the newest card they contain. */
+function syncGroupSortKey(g) {
+  let bestSlot = 0;
+  let bestId = 0;
+  g.querySelectorAll(".card").forEach((card) => {
+    const slot = Number(card.dataset.slot || 0);
+    const id = Number(card.dataset.eid || 0);
+    if (cmpSlotIdDesc(bestSlot, bestId, slot, id) > 0) {
+      bestSlot = slot;
+      bestId = id;
+    }
+  });
+  // Fall back to whatever was stamped at creation if cards aren't mounted yet.
+  if (!bestSlot) {
+    bestSlot = Number(g.dataset.slot || 0);
+    bestId = Number(g.dataset.eid || 0);
+  }
+  g.dataset.slot = String(bestSlot);
+  g.dataset.eid = String(bestId);
+}
+
+/**
+ * Re-order every block-group (and cards within) by slot.
+ * This is the source of truth — insertion path must never define feed order.
+ */
+function resortFeedBySlot() {
+  const items = [...feed.querySelectorAll(":scope > .block-group")];
+  for (const g of items) {
+    const host = g.querySelector(".group-events");
+    if (host) {
+      const cards = [...host.querySelectorAll(":scope > .card")];
+      cards.sort((a, b) => cmpSlotIdDesc(
+        Number(a.dataset.slot || 0),
+        Number(a.dataset.eid || 0),
+        Number(b.dataset.slot || 0),
+        Number(b.dataset.eid || 0),
+      ));
+      for (const c of cards) host.appendChild(c);
+    }
+    syncGroupSortKey(g);
+  }
+  items.sort((a, b) => cmpSlotIdDesc(
+    Number(a.dataset.slot || 0),
+    Number(a.dataset.eid || 0),
+    Number(b.dataset.slot || 0),
+    Number(b.dataset.eid || 0),
+  ));
+  for (const g of items) feed.appendChild(g);
+  groupOrder.length = 0;
+  groupOrder.push(...items);
+  pinHistoryLoader();
+}
+
+let feedResortQueued = false;
+function scheduleFeedResort() {
+  if (feedResortQueued) return;
+  feedResortQueued = true;
+  queueMicrotask(() => {
+    feedResortQueued = false;
+    resortFeedBySlot();
   });
 }
 
@@ -1153,8 +1275,7 @@ function collectFeedHits() {
   for (const { ev } of retentionCache.values()) {
     if (eventPassesFeedFilters(ev)) hits.push(ev);
   }
-  hits.sort((a, b) => (b.id || 0) - (a.id || 0));
-  return hits;
+  return sortEventsNewestFirst(hits);
 }
 
 function syncFeedHitOffset() {
@@ -1192,24 +1313,40 @@ function renderFeedPage() {
   }
   retentionHistoryDone = feedHitOffset >= feedHitBuffer.length;
   if (!batch.length) return 0;
-  // Buffer is newest-first; historical insert expects oldest→newest.
-  routeHistoricalBatch(batch.slice().reverse());
+  // Buffer is newest-first by slot; resortFeedBySlot is the final authority.
+  for (const ev of batch) routeEvent(ev);
+  resortFeedBySlot();
   prefetchUnitsFromEvents(batch);
   applyFilters();
   return batch.length;
 }
 
+/** Drop painted cards but keep the retention cache (filter / order rebuild). */
+function clearFeedDom() {
+  feed.querySelectorAll(".block-group").forEach((g) => g.remove());
+  groups.clear();
+  groupOrder.length = 0;
+  seenEventIds.clear();
+  oldestEventId = null;
+  feedHitOffset = 0;
+  retentionHistoryDone = false;
+  pinHistoryLoader();
+}
+
 /**
- * After retention preload or a filter change: refresh the page buffer and, if
- * the viewport is empty, paint a single page (never dump the whole window).
+ * After retention preload or a filter change: rebuild the visible feed from the
+ * slot-sorted hit buffer so cards never sit in the wrong chain order.
  */
 function onFeedFiltersChanged() {
   if ($("search").value.trim()) return;
   if (!retentionReady) return;
   ensureFeedHitBuffer(true);
-  if (!visibleFeedFillsPage() && feedHitOffset < feedHitBuffer.length) {
-    renderFeedPage();
+  clearFeedDom();
+  while (!visibleFeedFillsPage() && feedHitOffset < feedHitBuffer.length) {
+    if (!renderFeedPage()) break;
   }
+  resortFeedBySlot();
+  applyFilters();
 }
 
 /** Local text search over the preloaded 24h cache. Returns newest-first matches. */
@@ -1221,8 +1358,7 @@ function searchRetentionLocal(query) {
     if (!eventPassesFeedFilters(ev)) continue;
     if (hay.includes(q)) hits.push(ev);
   }
-  hits.sort((a, b) => (b.id || 0) - (a.id || 0));
-  return hits;
+  return sortEventsNewestFirst(hits);
 }
 
 function appendCardSearch(card, ...parts) {
@@ -1251,9 +1387,11 @@ function buildCard(ev) {
   card.dataset.category = ev.category;
   card.dataset.kind = ev.kind;
   if (ev.id != null) card.dataset.eid = String(ev.id);
+  if (ev.slot != null) card.dataset.slot = String(ev.slot);
   if (ev.tx_hash) card.dataset.tx = ev.tx_hash;
   if (ev.data && ev.data.ada != null) card.dataset.ada = ev.data.ada;
   if (ev.category === "dex" && ev.data?.dex) card.dataset.dex = String(ev.data.dex);
+  if (ev.category === "dapp" && ev.data?.dapp) card.dataset.dapp = String(ev.data.dapp);
   if (ev.category === "governance") {
     const gt = govTypeKey(ev);
     if (gt) card.dataset.govType = gt;
@@ -1286,27 +1424,25 @@ function buildCard(ev) {
 
 /* ── Feed assembly: block groups on the chain spine ───────────────────── */
 
-function newGroup(blockHash, atEnd = false) {
+function newGroup(blockHash, ev) {
   const g = document.createElement("div");
   g.className = "block-group";
   if (blockHash) g.dataset.block = blockHash;
+  g.dataset.slot = String(ev?.slot || 0);
+  g.dataset.eid = String(ev?.id || 0);
   const evs = document.createElement("div");
   evs.className = "group-events";
   g.appendChild(evs);
-  if (atEnd) {
-    feed.appendChild(g);
-    groupOrder.push(g);
-    pinHistoryLoader();
-  } else {
-    feed.prepend(g);
-    groupOrder.unshift(g);
-  }
+  // Temporary placement; scheduleFeedResort() establishes final slot order.
+  feed.prepend(g);
+  groupOrder.unshift(g);
   if (blockHash) groups.set(blockHash, g);
   while (groupOrder.length > MAX_GROUPS) {
-    const old = atEnd ? groupOrder.shift() : groupOrder.pop();
+    const old = groupOrder.pop();
     if (old?.dataset.block) groups.delete(old.dataset.block);
     old?.remove();
   }
+  pinHistoryLoader();
   return g;
 }
 
@@ -1325,13 +1461,15 @@ function noteEventId(ev) {
 
 function routeEvent(ev) {
   if (!keepDexEvent(ev)) return;
+  if (ev?.id != null && seenEventIds.has(ev.id)) return;
   sessionEvents++;
   noteEventId(ev);
 
   if (ev.kind === "block") {
     let g = ev.block_hash ? groups.get(ev.block_hash) : null;
-    if (!g) g = newGroup(ev.block_hash);
+    if (!g) g = newGroup(ev.block_hash, ev);
     g.prepend(buildCard(ev));
+    scheduleFeedResort();
     return;
   }
 
@@ -1357,22 +1495,25 @@ function routeEvent(ev) {
   }
 
   let g = ev.block_hash ? groups.get(ev.block_hash) : null;
-  if (!g) g = newGroup(ev.block_hash);
+  if (!g) g = newGroup(ev.block_hash, ev);
   g.querySelector(".group-events").appendChild(buildCard(ev));
+  scheduleFeedResort();
 }
 
-function standaloneCard(ev, atEnd = false) {
-  const g = newGroup(null, atEnd);
+function standaloneCard(ev) {
+  const g = newGroup(null, ev);
   g.querySelector(".group-events").appendChild(buildCard(ev));
+  scheduleFeedResort();
 }
 
-/** Append a page of older events (oldest→newest) below the current feed. */
+/**
+ * Insert a page of events. Final order always comes from resortFeedBySlot().
+ */
 function routeHistoricalBatch(events) {
-  // Per-group insert anchor: older cards go before the first card that was
-  // already on screen for that block.
   const anchors = new Map();
   for (const ev of events) {
     if (!keepDexEvent(ev)) continue;
+    if (ev?.id != null && seenEventIds.has(ev.id)) continue;
     sessionEvents++;
     noteEventId(ev);
 
@@ -1381,14 +1522,14 @@ function routeHistoricalBatch(events) {
         const g = ev.block_hash && groups.get(ev.block_hash);
         if (g) g.classList.add("orphaned");
       }
-      standaloneCard(ev, true);
+      standaloneCard(ev);
       continue;
     }
 
     const key = ev.block_hash || `__id_${ev.id}`;
     let g = ev.block_hash ? groups.get(ev.block_hash) : null;
     const created = !g;
-    if (!g) g = newGroup(ev.block_hash, true);
+    if (!g) g = newGroup(ev.block_hash, ev);
 
     if (ev.kind === "block") {
       if (!g.querySelector(".card-block")) {
@@ -1406,6 +1547,7 @@ function routeHistoricalBatch(events) {
       host.insertBefore(card, anchors.get(key) || null);
     }
   }
+  resortFeedBySlot();
 }
 
 /* min-ADA / search / category filters must also apply to fresh cards */
@@ -1484,8 +1626,16 @@ function nearHistoryEnd() {
 
 /** True when visible (filter-matching) cards fill at least one viewport. */
 function visibleFeedFillsPage() {
-  const shown = document.querySelectorAll("#feed .card:not(.f-hide)");
-  if (!shown.length) return false;
+  let n = 0;
+  document.querySelectorAll("#feed .card").forEach((card) => {
+    if (card.classList.contains("f-hide")) return;
+    if (!settings.filters[card.dataset.category]) return;
+    if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return;
+    if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) return;
+    if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) return;
+    n++;
+  });
+  if (!n) return false;
   if (settings.layout === "vertical") {
     return document.documentElement.scrollHeight >= window.innerHeight + 48;
   }
@@ -1505,6 +1655,7 @@ function visibleMatchCount() {
   document.querySelectorAll("#feed .card:not(.f-hide)").forEach((card) => {
     if (!settings.filters[card.dataset.category]) return;
     if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return;
+    if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) return;
     if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) return;
     n++;
   });
