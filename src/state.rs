@@ -189,17 +189,22 @@ impl AppState {
     }
 
     /// Assign an id, buffer, persist, and broadcast a single event.
-    pub fn publish(&self, mut event: ChainEvent) {
+    ///
+    /// Returns the id assigned to the event, or `None` if it was dropped before
+    /// publishing (e.g. a DEX event for a token outside the CIP-26 registry).
+    /// Callers use the returned id to wire up child events' `parent_id`.
+    pub fn publish(&self, mut event: ChainEvent) -> Option<u64> {
         let meta = self.meta_ref();
         if let Some(e) = meta.as_ref() {
             e.stamp_event_assets(&mut event);
             e.stamp_event_dreps(&mut event);
             e.stamp_event_gov_actions(&mut event);
             if !e.keep_dex_event(&event) {
-                return;
+                return None;
             }
         }
         event.id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let assigned_id = event.id;
         self.counters.events.fetch_add(1, Ordering::Relaxed);
         {
             let meta_ref = meta.as_ref().map(|e| e.as_ref() as &dyn KeywordMeta);
@@ -219,6 +224,7 @@ impl AppState {
             Self::trim_events(&mut buf, cutoff);
         }
         let _ = self.sender.send(msg);
+        Some(assigned_id)
     }
 
     /// Apply in-memory CIP-26 decimals/tickers onto every buffered event (boot).

@@ -633,6 +633,63 @@ header {
   background: var(--evc, var(--muted));
 }
 
+/* ── Child event hierarchy: indent + guide line under the parent tx ─────── */
+#feed.vertical { --child-indent: 22px; --child-guide: 10px; }
+
+#feed.vertical .group-events .card.ev-child {
+  margin-left: var(--child-indent);
+}
+/* Repurpose the block-spine connector into a guide up to the parent tx:
+   a continuous vertical line down the run of children, plus an elbow tick. */
+#feed.vertical .group-events .card.ev-child::before {
+  left: calc(-1 * var(--child-guide));
+  top: -6px;         /* bridge the 6px gap so consecutive children join up */
+  bottom: 0;
+  width: 2px;
+  height: auto;
+  transform: none;
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+#feed.vertical .group-events .card.ev-child::after {
+  left: calc(-1 * var(--child-guide));
+  top: 50%;
+  width: var(--child-guide);
+  height: 2px;
+  border-radius: 0;
+  transform: translateY(-50%);
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+
+/* ── Light-cone hover highlighting ──────────────────────────────────────── */
+/* Everything dims; the hovered tx and its past/future light cone stay lit.
+   Always use the card's category color (--evc). Inset-only so the glow cannot
+   paint onto neighboring cards. */
+#feed.lc-active .card {
+  opacity: 0.26;
+  filter: saturate(0.55);
+  transition: opacity 0.12s ease, filter 0.12s ease, box-shadow 0.12s ease,
+              border-color 0.12s ease;
+}
+#feed.lc-active .block-group::before,
+#feed.lc-active .block-group::after {
+  opacity: 0.4;
+}
+#feed.lc-active .card.lc-self,
+#feed.lc-active .card.lc-past,
+#feed.lc-active .card.lc-future {
+  opacity: 1;
+  filter: none;
+  border-color: color-mix(in srgb, var(--evc, #ffffff) 55%, var(--border));
+  border-left-color: var(--evc, #ffffff);
+  /* Inset glow stays inside the card so it cannot stain siblings. */
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--evc, #ffffff) 40%, transparent),
+              inset 0 0 22px color-mix(in srgb, var(--evc, #ffffff) 14%, transparent);
+}
+#feed.lc-active .card.lc-self {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--evc, #ffffff) 55%, transparent),
+              inset 0 0 28px color-mix(in srgb, var(--evc, #ffffff) 18%, transparent);
+}
+
 /* ── Horizontal layout ─────────────────────────────────────────────────── */
 
 #feed.horizontal {

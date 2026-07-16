@@ -6,6 +6,11 @@ use serde_json::Value;
 pub struct ChainEvent {
     /// Monotonic id assigned by the server (clients use it for ordering/dedup)
     pub id: u64,
+    /// Id of the containing event (block for a transaction, transaction for its
+    /// child events), forming a block → transaction → detail hierarchy. `None`
+    /// for top-level events (blocks, rollbacks, slot battles).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<u64>,
     /// Machine-readable event kind, e.g. "transaction", "gov_vote"
     pub kind: String,
     /// Color/filter family: block | transaction | token | mint | staking |

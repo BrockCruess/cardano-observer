@@ -41,6 +41,7 @@ impl EventBuilder {
     ) -> ChainEvent {
         ChainEvent {
             id: 0, // assigned by state when published
+            parent_id: None, // wired up in the publish loop (see ogmios.rs)
             kind: kind.into(),
             category: category.into(),
             slot: self.slot,
@@ -158,6 +159,24 @@ fn parse_tx(
     let mut minted: Vec<(String, String, i128)> = Vec::new();
     collect_assets(tx.get("mint"), &mut minted);
 
+    // Distinct source tx-hashes of this tx's inputs — the edges of the spend
+    // graph used by the client for light-cone highlighting. Deduped (preserving
+    // order) and capped so a fan-in-heavy tx can't bloat the payload.
+    const MAX_INPUT_TXS: usize = 30;
+    let mut input_txs: Vec<&str> = Vec::new();
+    for i in inputs {
+        let Some(id) = i.get("transaction").and_then(|t| t.get("id")).and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if id != tx_hash && !input_txs.contains(&id) {
+            input_txs.push(id);
+            if input_txs.len() >= MAX_INPUT_TXS {
+                break;
+            }
+        }
+    }
+
     // ── Transaction event (always) ───────────────────────────────────────
     events.push(b.make(
         "transaction",
@@ -168,6 +187,7 @@ fn parse_tx(
         json!({
             "index": tx_index,
             "inputs": inputs.len(),
+            "inputTxs": input_txs,
             "outputs": outputs.len(),
             "ada": out_ada,
             "fee": fee,
@@ -648,5 +668,60 @@ pub fn gov_action_label(action_type: &str) -> &'static str {
         "noConfidence" => "No Confidence",
         "information" => "Info Action",
         _ => "Governance Action",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dapp::DappRegistry;
+    use crate::deleg::DelegationTracker;
+    use crate::dex::DexRegistry;
+
+    /// A tx spending two distinct earlier outputs (one of them twice) exposes
+    /// the deduped set of source tx-hashes on its `transaction` event so the
+    /// client can build the light-cone spend graph.
+    #[test]
+    fn transaction_event_carries_deduped_input_txs() {
+        let block = json!({
+            "id": "block0",
+            "slot": 100,
+            "height": 42,
+            "transactions": [{
+                "id": "txB",
+                "inputs": [
+                    { "transaction": { "id": "txA" }, "index": 0 },
+                    { "transaction": { "id": "txA" }, "index": 1 },
+                    { "transaction": { "id": "txC" }, "index": 0 },
+                ],
+                "outputs": [{ "value": { "ada": { "lovelace": 1_000_000 } } }],
+                "fee": { "ada": { "lovelace": 170_000 } },
+            }],
+        });
+        let parsed = parse_block(
+            &block,
+            1_700_000_000,
+            Network::Mainnet,
+            &DexRegistry::new(),
+            &DappRegistry::new(),
+            &DelegationTracker::new(),
+        )
+        .expect("block parses");
+
+        let tx = parsed
+            .events
+            .iter()
+            .find(|e| e.kind == "transaction")
+            .expect("transaction event present");
+        let input_txs: Vec<&str> = tx.data["inputTxs"]
+            .as_array()
+            .expect("inputTxs is an array")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        // Deduped, order-preserving: txA once, then txC.
+        assert_eq!(input_txs, vec!["txA", "txC"]);
+        // Block event is emitted first so the publish loop can parent txs to it.
+        assert_eq!(parsed.events.first().map(|e| e.kind.as_str()), Some("block"));
     }
 }

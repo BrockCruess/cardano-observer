@@ -48,6 +48,7 @@ pub fn hit_to_event(
 ) -> ChainEvent {
     ChainEvent {
         id: 0,
+        parent_id: None,
         kind: hit.kind.into(),
         category: "dapp".into(),
         slot,
