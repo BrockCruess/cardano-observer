@@ -3,9 +3,9 @@
 **A real-time chain event monitor for Cardano.** One lightweight Rust binary
 follows your node's chain tip through Ogmios and streams *every* on-chain event
 to a polished, zero-dependency web UI - transactions, token transfers, mints
-and burns, staking and pool certificates, governance actions, votes, DReps,
-reward withdrawals, metadata messages, and even chain forks, orphaned blocks
-and slot battles.
+and burns, DEX and dApp activity, staking and pool certificates, governance
+actions, votes, DReps, reward withdrawals, metadata messages, and even chain
+forks, orphaned blocks and slot battles.
 
 **[Try it now!](https://observer.brock.tools/)**
 
@@ -17,7 +17,7 @@ and slot battles.
   protocol, events reach the browser within milliseconds of the block arriving
   at your node.
 - **The feed *is* the chain.** Blocks are nodes on a glowing spine; every
-  event in a block hangs off it as a color-coded card. Events nest by
+  event in a block hangs off it as a colour-coded card. Events nest by
   causality - block → transaction → detail events (mint, transfer, swap,
   cert, metadata, …) - so children indent under their parent tx instead of
   floating as a flat list. Works vertically (mobile & desktop) and
@@ -25,7 +25,7 @@ and slot battles.
 - **Light-cone hover.** Hover any tx-scoped card to light its spend-graph
   neighborhood: the hovered transaction, its input ancestry (past), and the
   txs that spend its outputs (future) stay lit in each card's category
-  color while the rest of the feed dims. Built from `inputTxs` on
+  colour while the rest of the feed dims. Built from `inputTxs` on
   transaction events; the client graph covers the live stream plus the 24h
   retention preload and prunes with retention trim.
 - **Fork visibility.** Rollbacks are detected from the chain-sync protocol
@@ -42,8 +42,12 @@ and slot battles.
   every involved native asset is in the Cardano token registry
   (`token-registry.json`). Trades in unregistered tokens (and incomplete
   one-sided asks) are dropped entirely so the feed stays readable. LP
-  deposit / redeem events are not filtered this way — LP share tokens are
+  deposit / redeem events are not filtered this way - LP share tokens are
   rarely registered.
+- **dApp awareness.** Known dApp scripts are classified into a dedicated
+  category (currently [Iagon](https://docs.iagon.com/blockchain/on-chain-activity):
+  stake delegation, node registration / pledge / retirement, earnings claims,
+  position listings / sales, subscriptions, and stake withdrawals).
 - **History survives restarts.** Events and transaction details are persisted
   to append-only JSONL files (auto-compacted) and restored on startup, so the
   feed never starts empty. Chain-sync then resumes from the last persisted
@@ -59,17 +63,19 @@ and slot battles.
   proposals, votes, metadata, raw JSON, and explorer links (mainnet or
   `preprod.` / `preview.` Cardanoscan, Cexplorer, AdaStat). Served from an
   in-memory cache; falls back to Blockfrost for older transactions.
-- **Token & pool metadata.** Asset names, tickers, and decimals resolve from a
-  durable CIP-26 token-registry cache (`DATA_DIR/token-registry.json`),
+- **Token, pool & DRep metadata.** Asset names, tickers, and decimals resolve
+  from a durable CIP-26 token-registry cache (`DATA_DIR/token-registry.json`),
   re-downloaded daily at 00:00 UTC. Unregistered assets get a local stub (no
-  Blockfrost). Pool tickers come from a Blockfrost scrape into
-  `DATA_DIR/pools.json` (also refreshed daily), with per-miss fetches appended.
+  Blockfrost). Pool tickers and DRep names come from Blockfrost scrapes into
+  `DATA_DIR/pools.json` and `DATA_DIR/dreps.json` (also refreshed daily), with
+  per-miss fetches appended. CIP-108 governance action titles are fetched on
+  first sight into `DATA_DIR/gov-actions.json`.
 - **Delegation context.** Stake and vote re-delegations show **from → to**
   using an in-process tracker seeded from persisted history, with Blockfrost
   account lookups when the previous target is still unknown.
 - **Filters that stick.** Per-category chips, free-text search (tx / block /
   address / policy / ticker / DEX name), URL deep-links (`?q=minswap`,
-  `?NUTS`, …), a minimum-₳ filter, layout and density toggles - all cached in
+  `?BROCK`, …), a minimum-₳ filter, layout and density toggles - all cached in
   the browser's localStorage for your next visit. Search runs over the
   preloaded retention window in the browser (no per-query server scan).
 - **Reading-friendly.** Scroll down and the feed pauses; a "new events" pill
@@ -87,11 +93,12 @@ and slot battles.
 
 ## Event types
 
-| Category | Color | Events |
+| Category | Colour | Events |
 |---|---|---|
 | Blocks | blue | every block, with issuer pool, size, fees, output volume |
 | Transactions | teal | every transaction: amounts, fees, in/out counts, contract flag |
 | DEX | fuchsia | swap orders (buy/sell/swap), LP deposits/redeems, batch settlements, cancellations across all major DEXes |
+| dApp | teal-cyan | known dApp activity (e.g. Iagon stake / node / market / subscription events) |
 | Tokens | gold | native asset transfers, enriched with registry metadata |
 | Mint / Burn | orange | token mints and burns, incl. NFT name decoding (CIP-67/68 aware) |
 | Staking | green | delegations (with from→to when known), stake key (de)registrations, reward withdrawals |
@@ -105,17 +112,19 @@ and slot battles.
 - [Ogmios](https://ogmios.dev) attached to a `cardano-node` (**required** -
   this is the event source)
 - [Blockfrost RYO](https://github.com/blockfrost/blockfrost-backend-ryo)
-  (optional but recommended - token/pool metadata, account lookups, historical
-  txs, and the one-shot pool-ticker scrape into `pools.json`)
+  (optional but recommended - pool/DRep/gov-action metadata, account lookups,
+  historical txs, and the recurring pool/DRep scrapes into `pools.json` /
+  `dreps.json`)
 - [cardano-db-sync](https://github.com/IntersectMBO/cardano-db-sync) **if you
   run Blockfrost RYO** - RYO is an API over a db-sync database, so enrichment
   and historical tx lookups need that stack behind `BLOCKFROST_URL`. The
   observer itself does not talk to db-sync directly.
 - Rust 1.85+ to build (edition 2024)
 
-Without Blockfrost, the live feed still works from Ogmios alone; token/pool
-enrichment falls back to the on-disk CIP-26 registry cache, and older tx
-modals may be incomplete.
+Without Blockfrost, the live feed still works from Ogmios alone; token
+enrichment falls back to the on-disk CIP-26 registry cache, pool/DRep names
+stay incomplete until Blockfrost is configured, and older tx modals may be
+incomplete.
 
 ## Quick start
 
@@ -183,34 +192,44 @@ disabled in demo mode so synthetic events never pollute a real `DATA_DIR`.
 ## Architecture
 
 ```
-cardano-node ── Ogmios (chain-sync WS) ──▶ parse / DEX ──▶ ring buffer ──▶ WS fan-out ──▶ browser
-                                              │                  │
-                                              │                  └─ JSONL persist (DATA_DIR)
-                                              │
-                    ┌── token-registry.json ──┤
-                    │                         │
-Blockfrost RYO  ◀── enrichment / pools / dreps┘
+cardano-node ── Ogmios (chain-sync WS) ──▶ parse / DEX / dApp ──▶ ring buffer ──▶ WS fan-out ──▶ browser
+                                                    │                  │
+                                                    │                  └─ JSONL persist (DATA_DIR)
+                                                    │
+                      ┌── token-registry.json ──────┤
+                      │                             │
+Blockfrost RYO  ◀── enrichment / pools / dreps / gov┘
    └── cardano-db-sync (required by RYO)
 ```
 
+- `src/main.rs` - process entry: config, boot caches, spawn scrapes / daily
+  refresh / chain-sync (or demo), axum server
+- `src/config.rs` - `.env` / environment configuration
+- `src/model.rs` - shared event / block types
 - `src/ogmios.rs` - chain-sync client (find intersection at tip, pipelined
   `nextBlock`, automatic reconnect that resumes from the last seen blocks)
 - `src/parse.rs` - one Ogmios block → many typed events; bech32 stake/pool/
   DRep/asset-fingerprint encoding, CIP-14/20/67 handling
 - `src/dex.rs` - DEX order / fill / cancel / LP detection from script
   credentials and datums
+- `src/dapp/` - dApp detectors (`mod.rs` dispatcher; `iagon.rs` for Iagon)
 - `src/state.rs` - time-bounded event buffer, tx cache, orphan & battle
   bookkeeping, broadcast channel
 - `src/trending.rs` - rolling subject-keyword frequency over the retention
   window
 - `src/persist.rs` - append-only JSONL history, restore + compaction
-- `src/enrich.rs` - Blockfrost lookups (assets, accounts, historical txs) with
-  in-memory caches
-- `src/registry.rs` - CIP-26 token registry zip → durable slim cache
-- `src/pools.rs` - Blockfrost pool-metadata scrape → `pools.json`
-- `src/dreps.rs` - Blockfrost DRep scrape + registration-anchor fetch → `dreps.json`
-- `src/gov_actions.rs` - first-sight CIP-108 titles via Blockfrost → `gov-actions.json`
+- `src/enrich.rs` - CIP-26 stamps, pool/DRep/gov-action caches, Blockfrost
+  account / historical-tx lookups; background + daily scrapes
+- `src/registry.rs` - CIP-26 token registry zip → durable slim cache (daily
+  re-download)
+- `src/pools.rs` - Blockfrost pool-metadata scrape → `pools.json` (daily
+  refresh)
+- `src/dreps.rs` - Blockfrost DRep scrape (unpaged + active filters) +
+  registration-anchor fetch → `dreps.json` (daily refresh)
+- `src/gov_actions.rs` - first-sight CIP-108 titles via Ogmios/Blockfrost →
+  `gov-actions.json`
 - `src/deleg.rs` - stake/DRep from→to tracker across live + restored events
+- `src/demo.rs` - synthetic event stream when `DEMO=true`
 - `src/server.rs` - axum server: embedded UI, `/ws` stream, `/api/events`,
   `/api/buffer`, `/api/trending`, `/api/tx`, `/api/asset`, `/api/pool`,
   `/api/drep`, `/api/dreps`, `/api/gov-action`, `/api/gov-actions`, `/api/stats`
@@ -220,13 +239,19 @@ Blockfrost RYO  ◀── enrichment / pools / dreps┘
 ### Notes
 
 - The UI shows input *references* for live transactions (Ogmios doesn't
-  resolve them); configure Blockfrost (and therefore cardano-db-sync) to get fully
-  resolved inputs for historical lookups.
-- Event colors were chosen as a colorblind-checked categorical palette; every
-  card also carries an icon and a text label, so color never stands alone.
+  resolve them); configure Blockfrost (and therefore cardano-db-sync) to get
+  fully resolved inputs for historical lookups.
+- Event colours were chosen as a colourblind-checked categorical palette; every
+  card also carries an icon and a text label, so colour never stands alone.
 - Each new tab gets a short tip snapshot (~25 events); scroll loads older
   pages from disk. The browser also background-loads `/api/buffer` (the full
   `EVENT_RETENTION_HOURS` window) so search stays local and fast.
+
+## Acknowledgments
+
+Feed event hierarchy (block → transaction → detail events) and light-cone
+hover highlighting by
+[Pi Lanningham (@Quantumplation)](https://github.com/Quantumplation).
 
 ## License
 

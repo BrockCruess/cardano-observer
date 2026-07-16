@@ -3,7 +3,7 @@
 
 /* ── Category & icon registry ─────────────────────────────────────────── */
 
-/** DEX venues emitted as `data.dex` — keep in sync with `src/dex.rs`. */
+/** DEX venues emitted as `data.dex` - keep in sync with `src/dex.rs`. */
 const DEX_VENUES = [
   "Minswap",
   "SundaeSwap",
@@ -17,11 +17,11 @@ const DEX_VENUES = [
   "Danogo",
 ];
 
-/** dApps emitted as `data.dapp` — keep in sync with `src/dapp/`. */
+/** dApps emitted as `data.dapp` - keep in sync with `src/dapp/`. */
 const DAPP_APPS = ["Iagon"];
 
 /**
- * Governance subtype filters — CIP-1694 action types (proposals) plus other
+ * Governance subtype filters - CIP-1694 action types (proposals) plus other
  * governance event kinds. Ids match `data.actionType` / `kind` from the server.
  */
 const GOV_TYPES = [
@@ -91,7 +91,7 @@ const ICONS = {
   certificate: svg('<path d="M7 3h7l5 5v13H7V3z"/><path d="M14 3v5h5"/><path d="M10 13h5M10 16h5"/>'),
   rollback: svg('<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>'),
   orphaned_block: svg('<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M4.5 6L19.5 18" stroke-dasharray="2.5 2.5"/>'),
-  slot_battle: svg('<path d="M13 2L4.5 13.5h5.6L9 22l8.5-11.5h-5.6L13 2z"/>'),
+  slot_battle: svg('<path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><path d="M13 19l6-6M16 16l4 4M19 21l2-2"/><path d="M9.5 17.5L21 6V3h-3L6.5 14.5"/><path d="M11 19l-6-6M8 16l-4 4M5 21l-2-2"/>'),
   dex: svg('<circle cx="12" cy="12" r="9"/><path d="M8 10h7M12.5 7.5L15 10l-2.5 2.5"/><path d="M16 14.5H9M11.5 12l-2.5 2.5L11.5 17"/>'),
   dex_order: svg('<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>'),
   dex_fill: svg('<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16.5 9"/>'),
@@ -167,7 +167,7 @@ function fmtQty(qtyStr, decimals) {
 }
 
 /** Format on-chain qty with known decimals. Unknown → placeholder until registry
- *  meta lands (never show undivided raw units — those look like billions). */
+ *  meta lands (never show undivided raw units - those look like billions). */
 function fmtTokenQty(qtyStr, decimals) {
   if (decimals == null || decimals === "" || Number.isNaN(Number(decimals))) return "…";
   return fmtQty(qtyStr, Number(decimals));
@@ -398,7 +398,7 @@ function clearLightCone() {
 function litCards(hash, cls) {
   const key = (window.CSS && CSS.escape) ? CSS.escape(hash) : hash;
   for (const c of feed.querySelectorAll(`.card[data-tx="${key}"]`)) {
-    // One role per card — avoid stacked past+future shadows if a hash
+    // One role per card - avoid stacked past+future shadows if a hash
     // somehow appears in both cones.
     c.classList.remove("lc-self", "lc-past", "lc-future");
     c.classList.add(cls);
@@ -454,7 +454,7 @@ let bufferedEventCount = 0;
 let retentionHours = 24;
 /** Total matches for the active query (from local filter). */
 let searchMatchesTotal = 0;
-/** All matches for the active query (newest-first), held in JS — not all rendered. */
+/** All matches for the active query (newest-first), held in JS - not all rendered. */
 let searchHitBuffer = [];
 /** How many buffer entries have been rendered into the DOM. */
 let searchHitOffset = 0;
@@ -482,7 +482,7 @@ let retentionHistoryDone = false;
 const SEARCH_PRIME_LOOKBACK = 300;
 /** Events rendered into the DOM per scroll page (from the in-memory 24h buffer). */
 const FEED_PAGE_SIZE = 40;
-/** Matches rendered per search page — keeps the DOM/scrollbar bounded. */
+/** Matches rendered per search page - keeps the DOM/scrollbar bounded. */
 const SEARCH_PAGE_SIZE = 40;
 /** Older-than-24h disk pages (only after retention is exhausted). */
 const HISTORY_PAGE_SIZE = 40;
@@ -491,7 +491,7 @@ const catCounts = Object.fromEntries(CATS.map((c) => [c.id, 0]));
 const loadedEventIds = new Set();
 /** Older-than-retention events the user explicitly scrolled in (kept after trim). */
 const extraHistoryIds = new Set();
-/** id → unix seconds — drives activity sparkline over loaded history. */
+/** id → unix seconds - drives activity sparkline over loaded history. */
 const loadedTimestamps = new Map();
 let sessionEvents = 0;
 
@@ -634,7 +634,7 @@ function paintCatCounts() {
   }
 }
 
-/** Pre-fill search from the URL: `?minswap`, `?q=minswap`, or `?search=NUTS`. */
+/** Pre-fill search from the URL: `?minswap`, `?q=minswap`, or `?search=BROCK`. */
 function searchFromUrl() {
   const params = new URLSearchParams(location.search);
   for (const key of ["q", "search", "filter"]) {
@@ -1248,7 +1248,7 @@ function whenRetentionReady() {
 
 /**
  * Background-load the full 24h window into retentionCache.
- * The feed stays small — pages are served from this cache on scroll.
+ * The feed stays small - pages are served from this cache on scroll.
  */
 function startRetentionPreload(force = false) {
   if (!force && retentionLoading) return retentionLoading;
@@ -1347,7 +1347,7 @@ function syncGroupSortKey(g) {
 
 /**
  * Re-order every block-group (and cards within) by slot.
- * This is the source of truth — insertion path must never define feed order.
+ * This is the source of truth - insertion path must never define feed order.
  */
 /**
  * Order cards within a block group as a containment hierarchy: the block first,
@@ -1738,7 +1738,7 @@ feed.addEventListener("scroll", () => {
   onFeedScroll();
 }, { passive: true });
 
-// Feeds that don't fill the viewport can't scroll — treat wheel-down as load-more.
+// Feeds that don't fill the viewport can't scroll - treat wheel-down as load-more.
 addEventListener("wheel", (e) => {
   if (e.deltaY <= 0) return;
   if (searchPriming || searchExtending) return;
@@ -1747,7 +1747,7 @@ addEventListener("wheel", (e) => {
   else maybeLoadHistory();
 }, { passive: true });
 
-/** While searching, only page the match buffer — never crawl raw history. */
+/** While searching, only page the match buffer - never crawl raw history. */
 function onFeedScroll() {
   const q = $("search").value.trim();
   if (q) {
@@ -1821,7 +1821,7 @@ function setSearchEmpty(on, scanned = searchScanned) {
   if (text) {
     text.textContent = `No results found in ${windowLabel}.`;
   }
-  // Search is local over the preloaded 24h index — no server history crawl.
+  // Search is local over the preloaded 24h index - no server history crawl.
   if (btn) btn.hidden = true;
 }
 
@@ -2058,7 +2058,7 @@ async function loadHistory() {
     return;
   }
 
-  // Past the 24h window — fall through to disk history (one page per scroll).
+  // Past the 24h window - fall through to disk history (one page per scroll).
   retentionHistoryDone = true;
   const ac = new AbortController();
   historyAbort = ac;
@@ -2168,7 +2168,7 @@ function setHistoryLoading(on, exhausted = false, label = null) {
     el.className = "history-loader";
     el.setAttribute("aria-live", "polite");
   }
-  // Always pin to the bottom of the feed — history loads downward.
+  // Always pin to the bottom of the feed - history loads downward.
   feed.appendChild(el);
   if (on) {
     const text = label || "Loading older events…";
@@ -2977,7 +2977,7 @@ function connect() {
         {
           const snapN = (m.events || []).length;
           const wantPrime = !!(urlSearchPreset && $("search").value.trim());
-          // Don't pad the tip with history on first paint — wait for scroll.
+          // Don't pad the tip with history on first paint - wait for scroll.
           if (wantPrime) queueMicrotask(() => runSearchPrime(snapN));
         }
         break;
