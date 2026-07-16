@@ -313,6 +313,118 @@ function govTypeEnabled(type) {
 
 let NETWORK = "mainnet";
 const feed = $("feed");
+
+/* ── Light-cone hover: spend-graph highlighting ───────────────────────────
+ * txGraph maps a tx hash to its immediate spend neighbours:
+ *   ins  = txs whose outputs this tx spends (its direct past)
+ *   outs = txs that spend this tx's outputs (its direct future)
+ * Built incrementally from every ingested transaction event's data.inputTxs.
+ * On hover we BFS both directions to light the whole light cone and dim the
+ * rest of the feed. `seen` marks a tx we actually ingested (vs. a placeholder
+ * created only because a newer tx referenced it as an input).
+ */
+const txGraph = new Map(); // txHash -> { ins:Set, outs:Set, seen:bool }
+
+function txNode(h) {
+  let n = txGraph.get(h);
+  if (!n) { n = { ins: new Set(), outs: new Set(), seen: false }; txGraph.set(h, n); }
+  return n;
+}
+
+function indexTxGraph(ev) {
+  if (!ev || ev.kind !== "transaction" || !ev.tx_hash) return;
+  const node = txNode(ev.tx_hash);
+  node.seen = true;
+  const inputs = ev.data && ev.data.inputTxs;
+  if (Array.isArray(inputs)) {
+    for (const src of inputs) {
+      if (src === ev.tx_hash) continue;
+      node.ins.add(src);
+      txNode(src).outs.add(ev.tx_hash);
+    }
+  }
+}
+
+function gcTxNode(h) {
+  const n = txGraph.get(h);
+  if (n && !n.seen && n.ins.size === 0 && n.outs.size === 0) txGraph.delete(h);
+}
+
+// Drop a trimmed tx's edges so the graph stays bounded to the retention window.
+function unindexTxGraph(ev) {
+  if (!ev || ev.kind !== "transaction" || !ev.tx_hash) return;
+  const h = ev.tx_hash;
+  const node = txGraph.get(h);
+  if (!node) return;
+  for (const src of node.ins) {
+    const sn = txGraph.get(src);
+    if (sn) { sn.outs.delete(h); gcTxNode(src); }
+  }
+  node.ins.clear();
+  node.seen = false;
+  gcTxNode(h);
+}
+
+// BFS the spend graph in one direction ("ins" = past cone, "outs" = future).
+function coneReach(start, dir) {
+  const out = new Set();
+  const stack = [start];
+  const seen = new Set([start]);
+  let guard = 0;
+  while (stack.length && guard++ < 8000) {
+    const node = txGraph.get(stack.pop());
+    if (!node) continue;
+    for (const nx of node[dir]) {
+      if (seen.has(nx)) continue;
+      seen.add(nx);
+      out.add(nx);
+      stack.push(nx);
+    }
+  }
+  return out;
+}
+
+let lcTx = null;   // tx hash currently focused by hover
+let lcLit = [];    // cards currently carrying a light-cone class
+
+function clearLightCone() {
+  if (lcTx === null && lcLit.length === 0) return;
+  feed.classList.remove("lc-active");
+  for (const c of lcLit) c.classList.remove("lc-self", "lc-past", "lc-future");
+  lcLit = [];
+  lcTx = null;
+}
+
+function litCards(hash, cls) {
+  const key = (window.CSS && CSS.escape) ? CSS.escape(hash) : hash;
+  for (const c of feed.querySelectorAll(`.card[data-tx="${key}"]`)) {
+    c.classList.add(cls);
+    lcLit.push(c);
+  }
+}
+
+function showLightCone(hash) {
+  clearLightCone();
+  lcTx = hash;
+  if (!hash) return;
+  const past = coneReach(hash, "ins");
+  const future = coneReach(hash, "outs");
+  feed.classList.add("lc-active");
+  litCards(hash, "lc-self");
+  for (const h of past) if (h !== hash) litCards(h, "lc-past");
+  for (const h of future) if (h !== hash) litCards(h, "lc-future");
+}
+
+feed.addEventListener("mouseover", (e) => {
+  const card = e.target.closest && e.target.closest(".card");
+  if (!card || !feed.contains(card)) return;
+  const tx = card.dataset.tx || null;
+  if (tx === lcTx) return;      // still inside the same tx's cards
+  if (!tx) { clearLightCone(); return; } // blocks / rollbacks have no cone
+  showLightCone(tx);
+});
+feed.addEventListener("mouseleave", clearLightCone);
+
 const groups = new Map();      // block hash -> .block-group element
 const groupOrder = [];         // newest first
 const seenEventIds = new Set(); // dedupe when merging search hits into the feed
@@ -738,6 +850,7 @@ function buildToolbar() {
   setLayoutBtn();
   feed.className = settings.layout;
   layoutBtn.onclick = () => {
+    clearLightCone();
     settings.layout = settings.layout === "vertical" ? "horizontal" : "vertical";
     feed.className = settings.layout;
     store.set("co_layout_v1", settings.layout);
@@ -1103,6 +1216,7 @@ function retentionIndex(ev) {
   if (!ev || ev.id == null) return;
   if (!keepDexEvent(ev)) return;
   retentionCache.set(ev.id, { ev, hay: cardSearchText(ev) });
+  indexTxGraph(ev);
   noteLoadedEvent(ev);
 }
 
@@ -1112,6 +1226,7 @@ function retentionTrim() {
   for (const [id, row] of retentionCache) {
     if ((row.ev.timestamp || 0) < cutoff) {
       retentionCache.delete(id);
+      unindexTxGraph(row.ev);
       forgetLoadedEvent(row.ev);
     }
   }
@@ -1231,18 +1346,35 @@ function syncGroupSortKey(g) {
  * Re-order every block-group (and cards within) by slot.
  * This is the source of truth — insertion path must never define feed order.
  */
+/**
+ * Order cards within a block group as a containment hierarchy: the block first,
+ * then each transaction immediately followed by its own child events (mint,
+ * transfer, swap, …), transactions in chain (id) order. A child is keyed by its
+ * parent transaction's id so it always clusters directly under that parent, even
+ * for DEX/dApp events that arrive at the end of the block.
+ */
+function hierKey(card) {
+  const eid = Number(card.dataset.eid || 0);
+  const kind = card.dataset.kind;
+  if (kind === "block") return [-Infinity, 0, eid];
+  if (kind === "transaction") return [eid, 0, eid];
+  const parent = card.dataset.parent;
+  if (parent) return [Number(parent), 1, eid];
+  return [eid, 0, eid];
+}
+
+function cmpHierarchy(a, b) {
+  const ka = hierKey(a), kb = hierKey(b);
+  return (ka[0] - kb[0]) || (ka[1] - kb[1]) || (ka[2] - kb[2]);
+}
+
 function resortFeedBySlot() {
   const items = [...feed.querySelectorAll(":scope > .block-group")];
   for (const g of items) {
     const host = g.querySelector(".group-events");
     if (host) {
       const cards = [...host.querySelectorAll(":scope > .card")];
-      cards.sort((a, b) => cmpSlotIdDesc(
-        Number(a.dataset.slot || 0),
-        Number(a.dataset.eid || 0),
-        Number(b.dataset.slot || 0),
-        Number(b.dataset.eid || 0),
-      ));
+      cards.sort(cmpHierarchy);
       for (const c of cards) host.appendChild(c);
     }
     syncGroupSortKey(g);
@@ -1323,6 +1455,7 @@ function renderFeedPage() {
 
 /** Drop painted cards but keep the retention cache (filter / order rebuild). */
 function clearFeedDom() {
+  clearLightCone();
   feed.querySelectorAll(".block-group").forEach((g) => g.remove());
   groups.clear();
   groupOrder.length = 0;
@@ -1387,6 +1520,12 @@ function buildCard(ev) {
   card.dataset.category = ev.category;
   card.dataset.kind = ev.kind;
   if (ev.id != null) card.dataset.eid = String(ev.id);
+  if (ev.parent_id != null) card.dataset.parent = String(ev.parent_id);
+  // A tx-scoped event (mint, transfer, swap, …) is "part of" its transaction:
+  // indent it under its parent. Transactions and blocks stay at the base level.
+  if (ev.parent_id != null && ev.kind !== "block" && ev.kind !== "transaction") {
+    card.classList.add("ev-child");
+  }
   if (ev.slot != null) card.dataset.slot = String(ev.slot);
   if (ev.tx_hash) card.dataset.tx = ev.tx_hash;
   if (ev.data && ev.data.ada != null) card.dataset.ada = ev.data.ada;

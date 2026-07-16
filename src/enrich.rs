@@ -508,6 +508,7 @@ impl Enricher {
         }
         self.ensure_gov_action_titles(&[crate::model::ChainEvent {
             id: 0,
+            parent_id: None,
             kind: "gov_vote".into(),
             category: "governance".into(),
             slot: 0,

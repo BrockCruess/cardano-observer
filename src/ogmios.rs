@@ -221,13 +221,38 @@ async fn handle_forward(
     };
     let battle = state.note_block(block_ref);
 
-    for event in parsed.events {
-        state.publish(event);
+    // Publish in parse order (block first, then each tx's own event before its
+    // children) and wire up the containment hierarchy as ids are assigned:
+    // a transaction's parent is its block, and every other tx-scoped event's
+    // parent is its transaction.
+    let mut block_id: Option<u64> = None;
+    let mut tx_ids: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for mut event in parsed.events {
+        event.parent_id = match event.kind.as_str() {
+            "block" | "orphaned_block" => None,
+            "transaction" => block_id,
+            _ => event
+                .tx_hash
+                .as_deref()
+                .and_then(|h| tx_ids.get(h).copied())
+                .or(block_id),
+        };
+        let is_block = event.kind == "block";
+        let tx_hash = (event.kind == "transaction").then(|| event.tx_hash.clone()).flatten();
+        if let Some(id) = state.publish(event) {
+            if is_block {
+                block_id = Some(id);
+            }
+            if let Some(h) = tx_hash {
+                tx_ids.insert(h, id);
+            }
+        }
     }
 
     if let Some((loser, kind)) = battle {
         state.publish(ChainEvent {
             id: 0,
+            parent_id: None,
             kind: "slot_battle".into(),
             category: "alert".into(),
             slot: parsed.slot,
@@ -278,6 +303,7 @@ fn handle_rollback(state: &Arc<AppState>, tm: &TimeModel, slot: u64, point: Opti
 
     state.publish(ChainEvent {
         id: 0,
+        parent_id: None,
         kind: "rollback".into(),
         category: "alert".into(),
         slot,
@@ -302,6 +328,7 @@ fn handle_rollback(state: &Arc<AppState>, tm: &TimeModel, slot: u64, point: Opti
     for b in &orphaned {
         state.publish(ChainEvent {
             id: 0,
+            parent_id: None,
             kind: "orphaned_block".into(),
             category: "alert".into(),
             slot: b.slot,

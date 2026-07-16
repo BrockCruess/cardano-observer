@@ -48,6 +48,7 @@ pub async fn run(state: Arc<AppState>) {
         if let Some((loser, kind)) = battle {
             state.publish(ChainEvent {
                 id: 0,
+                parent_id: None,
                 kind: "slot_battle".into(),
                 category: "alert".into(),
                 slot,
@@ -93,6 +94,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
 
     let mk = |kind: &'static str, category: &'static str, title: String, data: Value| ChainEvent {
         id: 0,
+        parent_id: None,
         kind: kind.into(),
         category: category.into(),
         slot,
@@ -459,6 +461,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
 fn block_event(hash: &str, height: u64, slot: u64, now: i64, tx_count: usize, rng: &mut StdRng) -> ChainEvent {
     ChainEvent {
         id: 0,
+        parent_id: None,
         kind: "block".into(),
         category: "block".into(),
         slot,
@@ -489,6 +492,7 @@ fn emit_rollback(state: &Arc<AppState>, orphaned: &[BlockRef], to_slot: u64) {
     let now = unix_now();
     state.publish(ChainEvent {
         id: 0,
+        parent_id: None,
         kind: "rollback".into(),
         category: "alert".into(),
         slot: to_slot,
@@ -507,6 +511,7 @@ fn emit_rollback(state: &Arc<AppState>, orphaned: &[BlockRef], to_slot: u64) {
     for b in orphaned {
         state.publish(ChainEvent {
             id: 0,
+            parent_id: None,
             kind: "orphaned_block".into(),
             category: "alert".into(),
             slot: b.slot,

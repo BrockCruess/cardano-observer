@@ -27,6 +27,10 @@
   --c-dapp: #3d9ead;
   --c-alert: #e5534b;
 
+  /* light-cone hover: past = cool, future = warm */
+  --lc-past: #4aa3ff;
+  --lc-future: #f0a132;
+
   --vote-yes: #2ea043;
   --vote-no: #e5534b;
   --vote-abstain: #c98500;
@@ -631,6 +635,66 @@ header {
   border-radius: 50%;
   transform: translateY(-50%);
   background: var(--evc, var(--muted));
+}
+
+/* ── Child event hierarchy: indent + guide line under the parent tx ─────── */
+#feed.vertical { --child-indent: 22px; --child-guide: 10px; }
+
+#feed.vertical .group-events .card.ev-child {
+  margin-left: var(--child-indent);
+}
+/* Repurpose the block-spine connector into a guide up to the parent tx:
+   a continuous vertical line down the run of children, plus an elbow tick. */
+#feed.vertical .group-events .card.ev-child::before {
+  left: calc(-1 * var(--child-guide));
+  top: -6px;         /* bridge the 6px gap so consecutive children join up */
+  bottom: 0;
+  width: 2px;
+  height: auto;
+  transform: none;
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+#feed.vertical .group-events .card.ev-child::after {
+  left: calc(-1 * var(--child-guide));
+  top: 50%;
+  width: var(--child-guide);
+  height: 2px;
+  border-radius: 0;
+  transform: translateY(-50%);
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+
+/* ── Light-cone hover highlighting ──────────────────────────────────────── */
+/* Everything dims; the hovered tx and its past/future light cone stay lit,
+   with a cool tint for the past and a warm tint for the future. */
+#feed.lc-active .card {
+  opacity: 0.26;
+  filter: saturate(0.55);
+  transition: opacity 0.12s ease, filter 0.12s ease, box-shadow 0.12s ease;
+}
+#feed.lc-active .block-group::before,
+#feed.lc-active .block-group::after {
+  opacity: 0.4;
+}
+#feed.lc-active .card.lc-self,
+#feed.lc-active .card.lc-past,
+#feed.lc-active .card.lc-future {
+  opacity: 1;
+  filter: none;
+}
+#feed.lc-active .card.lc-past {
+  box-shadow: -3px 0 0 0 var(--lc-past),
+              0 0 0 1px color-mix(in srgb, var(--lc-past) 55%, transparent),
+              0 0 14px color-mix(in srgb, var(--lc-past) 30%, transparent);
+}
+#feed.lc-active .card.lc-future {
+  box-shadow: -3px 0 0 0 var(--lc-future),
+              0 0 0 1px color-mix(in srgb, var(--lc-future) 55%, transparent),
+              0 0 14px color-mix(in srgb, var(--lc-future) 30%, transparent);
+}
+#feed.lc-active .card.lc-self {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--evc, #ffffff) 70%, #ffffff),
+              0 0 20px color-mix(in srgb, var(--evc, #ffffff) 45%, transparent);
 }
 
 /* ── Horizontal layout ─────────────────────────────────────────────────── */
