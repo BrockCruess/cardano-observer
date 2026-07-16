@@ -398,6 +398,7 @@ function clearLightCone() {
 function litCards(hash, cls) {
   const key = (window.CSS && CSS.escape) ? CSS.escape(hash) : hash;
   for (const c of feed.querySelectorAll(`.card[data-tx="${key}"]`)) {
+    if (c.classList.contains("f-hide") || c.closest(".block-group.f-hide")) continue;
     // One role per card - avoid stacked past+future shadows if a hash
     // somehow appears in both cones.
     c.classList.remove("lc-self", "lc-past", "lc-future");
@@ -524,7 +525,10 @@ function applyFilters() {
     });
     // Collapse groups with nothing visible (category / venue / search filters),
     // so rare filtered events aren't separated by long empty spine stretches.
-    g.classList.toggle("f-hide", visible === 0);
+    // Orphaned blocks (and their detail events) are part of Forks & Battles —
+    // hide the whole group when that filter is off.
+    const hideOrphan = g.classList.contains("orphaned") && !settings.filters.alert;
+    g.classList.toggle("f-hide", visible === 0 || hideOrphan);
   }
   store.set("co_filters_v1", settings.filters);
   store.set("co_minada_v1", settings.minAda);
@@ -1214,10 +1218,16 @@ function cardSearchText(ev) {
   return bits.filter(Boolean).join(" ").toLowerCase().slice(0, 4000);
 }
 
+/** Block hashes marked orphaned — hidden with Forks & Battles filter off. */
+const orphanedBlocks = new Set();
+
 /** Index one event into the client-side 24h retention cache. */
 function retentionIndex(ev) {
   if (!ev || ev.id == null) return;
   if (!keepDexEvent(ev)) return;
+  if (ev.kind === "orphaned_block" && ev.block_hash) {
+    orphanedBlocks.add(ev.block_hash);
+  }
   retentionCache.set(ev.id, { ev, hay: cardSearchText(ev) });
   indexTxGraph(ev);
   noteLoadedEvent(ev);
@@ -1291,6 +1301,14 @@ function startRetentionPreload(force = false) {
 function eventPassesFeedFilters(ev) {
   if (!ev || !keepDexEvent(ev)) return false;
   if (!settings.filters[ev.category]) return false;
+  // Orphaned-block content is gated by Forks & Battles (not only alert cards).
+  if (
+    !settings.filters.alert
+    && ev.block_hash
+    && orphanedBlocks.has(ev.block_hash)
+  ) {
+    return false;
+  }
   if (ev.category === "dex" && !dexVenueEnabled(ev.data?.dex)) return false;
   if (ev.category === "dapp" && !dappAppEnabled(ev.data?.dapp)) return false;
   if (ev.category === "governance") {
@@ -2966,6 +2984,7 @@ function connect() {
         // Tip events re-index via noteEventId; full 24h window loads in the
         // background without blocking the initial paint.
         retentionCache.clear();
+        orphanedBlocks.clear();
         retentionReady = false;
         resetLoadedCounts();
         for (const ev of m.events || []) routeEvent(ev);
