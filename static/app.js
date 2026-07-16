@@ -398,6 +398,9 @@ function clearLightCone() {
 function litCards(hash, cls) {
   const key = (window.CSS && CSS.escape) ? CSS.escape(hash) : hash;
   for (const c of feed.querySelectorAll(`.card[data-tx="${key}"]`)) {
+    // One role per card — avoid stacked past+future shadows if a hash
+    // somehow appears in both cones.
+    c.classList.remove("lc-self", "lc-past", "lc-future");
     c.classList.add(cls);
     lcLit.push(c);
   }
@@ -411,7 +414,7 @@ function showLightCone(hash) {
   const future = coneReach(hash, "outs");
   feed.classList.add("lc-active");
   litCards(hash, "lc-self");
-  for (const h of past) if (h !== hash) litCards(h, "lc-past");
+  for (const h of past) if (h !== hash && !future.has(h)) litCards(h, "lc-past");
   for (const h of future) if (h !== hash) litCards(h, "lc-future");
 }
 
