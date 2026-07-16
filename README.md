@@ -17,8 +17,17 @@ and slot battles.
   protocol, events reach the browser within milliseconds of the block arriving
   at your node.
 - **The feed *is* the chain.** Blocks are nodes on a glowing spine; every
-  event in a block hangs off it as a color-coded card. Works vertically
-  (mobile & desktop) and horizontally (one column per block) - toggle anytime.
+  event in a block hangs off it as a color-coded card. Events nest by
+  causality - block → transaction → detail events (mint, transfer, swap,
+  cert, metadata, …) - so children indent under their parent tx instead of
+  floating as a flat list. Works vertically (mobile & desktop) and
+  horizontally (one column per block) - toggle anytime.
+- **Light-cone hover.** Hover any tx-scoped card to light its spend-graph
+  neighborhood: the hovered transaction, its input ancestry (past), and the
+  txs that spend its outputs (future) stay lit in each card's category
+  color while the rest of the feed dims. Built from `inputTxs` on
+  transaction events; the client graph covers the live stream plus the 24h
+  retention preload and prunes with retention trim.
 - **Fork visibility.** Rollbacks are detected from the chain-sync protocol
   itself: orphaned blocks are struck through and ribboned in place, a fork
   card explains the rollback, and when a competing block wins the same slot
