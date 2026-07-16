@@ -2,8 +2,10 @@
 //!
 //! Loads `dreps.json` from DATA_DIR when present (boot stays non-blocking).
 //! Missing / forced refreshes scrape Blockfrost `GET /governance/dreps` in the
-//! background; when the scrape finishes the in-memory map and on-disk file are
-//! replaced. A daily UTC-midnight job re-scrapes the same way. Misses are also
+//! background (Blockfrost only — no third-party indexers). Pages are fetched
+//! with retries and **no request timeout** so a slow RYO cannot abort the
+//! scrape; names are merged into the in-memory map (and disk) as each page
+//! lands. A daily UTC-midnight job re-scrapes the same way. Misses are also
 //! filled by `GET /governance/dreps/{id}/metadata`, registration anchors, and
 //! live `/api/drep` lookups.
 
@@ -17,14 +19,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const CACHE_FILE: &str = "dreps.json";
-const PAGE: usize = 100;
-const META_CONCURRENCY: usize = 16;
+/// Smaller pages keep each `/governance/dreps` call cheaper on slow RYO builds.
+const PAGE: usize = 20;
+const META_CONCURRENCY: usize = 4;
 const ANCHOR_CONCURRENCY: usize = 12;
-/// Self-hosted Blockfrost often needs minutes for `/governance/dreps` list pages.
-const DREP_LIST_PAGE_TIMEOUT: Duration = Duration::from_secs(300);
-const DREP_META_TIMEOUT: Duration = Duration::from_secs(60);
-/// Whole scrape client budget (many list pages + optional per-id metadata).
-const DREP_SCRAPE_CLIENT_TIMEOUT: Duration = Duration::from_secs(900);
+const DREP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cap between page retries so a wedged RYO is retried, not abandoned.
+const DREP_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DrepEntry {
@@ -168,7 +169,11 @@ impl DrepCache {
         }
     }
 
-    /// Replace the in-memory + on-disk cache with a fresh Blockfrost scrape.
+    /// Replace/merge the in-memory + on-disk cache with a Blockfrost scrape.
+    ///
+    /// Uses a client with **no request timeout** and retries each page until it
+    /// succeeds. Names are merged into the live map as pages arrive so the app
+    /// can use them before the full scrape completes.
     pub async fn refresh(
         &self,
         http: &reqwest::Client,
@@ -176,29 +181,23 @@ impl DrepCache {
         project_id: Option<&str>,
     ) -> Result<usize> {
         let scrape_http = reqwest::Client::builder()
-            .timeout(DREP_SCRAPE_CLIENT_TIMEOUT)
-            .connect_timeout(Duration::from_secs(15))
+            .connect_timeout(DREP_CONNECT_TIMEOUT)
+            .pool_idle_timeout(Duration::from_secs(90))
             .build()
             .unwrap_or_else(|_| http.clone());
         tracing::info!(
-            "drep cache: scraping Blockfrost (up to {}s per list page)…",
-            DREP_LIST_PAGE_TIMEOUT.as_secs()
+            "drep cache: scraping Blockfrost /governance/dreps (count={PAGE}, no request timeout, retry forever)…"
         );
-        let map = scrape_dreps(&scrape_http, blockfrost_url, project_id).await?;
-        let n = map.len();
+        let before = self.len();
+        scrape_dreps(self, &scrape_http, blockfrost_url, project_id).await?;
+        let n = self.len();
         if n == 0 {
             return Ok(0);
         }
-        {
-            let mut guard = self.by_id.lock().unwrap();
-            *guard = map;
-            if let Some(path) = &self.path {
-                if let Err(e) = save_cache(path, &guard) {
-                    tracing::warn!("could not write drep cache: {e:#}");
-                } else {
-                    tracing::info!("drep cache: wrote durable cache at {}", path.display());
-                }
-            }
+        if n > before {
+            tracing::info!("drep cache: scrape finished ({n} names, was {before})");
+        } else {
+            tracing::info!("drep cache: scrape finished ({n} names)");
         }
         Ok(n)
     }
@@ -326,127 +325,219 @@ fn bf_get(
     req
 }
 
-async fn scrape_dreps(
-    http: &reqwest::Client,
-    base: &str,
-    project_id: Option<&str>,
-) -> Result<HashMap<String, DrepEntry>> {
-    // Primary: GET /governance/dreps with embedded metadata.json_metadata.
-    match scrape_list_embedded(http, base, project_id).await {
-        Ok(m) if !m.is_empty() => {
-            tracing::info!("drep cache: used embedded metadata on /governance/dreps");
-            return Ok(m);
-        }
-        Ok(_) => tracing::warn!("drep cache: list had no names - fetching /metadata per id"),
-        Err(e) => tracing::warn!("drep cache: list scrape failed ({e:#}) - trying /metadata"),
-    }
-    scrape_list_and_metadata(http, base, project_id).await
+fn retry_backoff(attempt: u32) -> Duration {
+    // 1s, 2s, 4s, … capped.
+    let secs = (1u64 << attempt.min(5)).min(DREP_RETRY_BACKOFF_MAX.as_secs());
+    Duration::from_secs(secs)
 }
 
-/// Page `GET /governance/dreps` and read `metadata.json_metadata.body.givenName`.
-async fn scrape_list_embedded(
+/// GET JSON from Blockfrost with unlimited retries and no request timeout.
+/// Used for list pages that must eventually succeed.
+async fn bf_get_json_retry(
+    http: &reqwest::Client,
+    base: &str,
+    path: &str,
+    project_id: Option<&str>,
+    label: &str,
+) -> Result<Value> {
+    let mut attempt = 0u32;
+    loop {
+        match bf_get(http, base, path, project_id).send().await {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(ok) => match ok.json::<Value>().await {
+                    Ok(v) => return Ok(v),
+                    Err(e) => {
+                        tracing::warn!(
+                            "drep cache: {label} decode failed (attempt {}): {e:#} - retrying",
+                            attempt + 1
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        "drep cache: {label} HTTP error (attempt {}): {e:#} - retrying",
+                        attempt + 1
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "drep cache: {label} request failed (attempt {}): {e:#} - retrying",
+                    attempt + 1
+                );
+            }
+        }
+        tokio::time::sleep(retry_backoff(attempt)).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// Fetch one DRep's `/metadata`. Retries transport/5xx forever; 404/400 = no name.
+async fn fetch_drep_metadata_retry(
+    http: &reqwest::Client,
+    base: &str,
+    path: &str,
+    project_id: Option<&str>,
+) -> Option<DrepEntry> {
+    let mut attempt = 0u32;
+    loop {
+        match bf_get(http, base, path, project_id).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.as_u16() == 404 || status.as_u16() == 400 {
+                    return None;
+                }
+                if !status.is_success() {
+                    tracing::warn!(
+                        "drep cache: GET {path} HTTP {status} (attempt {}) - retrying",
+                        attempt + 1
+                    );
+                    tokio::time::sleep(retry_backoff(attempt)).await;
+                    attempt = attempt.saturating_add(1);
+                    continue;
+                }
+                match resp.json::<Value>().await {
+                    Ok(v) => return DrepEntry::from_blockfrost_meta(&v),
+                    Err(e) => {
+                        tracing::warn!(
+                            "drep cache: GET {path} decode failed (attempt {}): {e:#} - retrying",
+                            attempt + 1
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "drep cache: GET {path} failed (attempt {}): {e:#} - retrying",
+                    attempt + 1
+                );
+            }
+        }
+        tokio::time::sleep(retry_backoff(attempt)).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+async fn scrape_dreps(
+    cache: &DrepCache,
     http: &reqwest::Client,
     base: &str,
     project_id: Option<&str>,
-) -> Result<HashMap<String, DrepEntry>> {
-    let mut map = HashMap::with_capacity(4_096);
+) -> Result<()> {
+    // Primary: paginate GET /governance/dreps and read embedded metadata.
+    match scrape_list_embedded(cache, http, base, project_id).await {
+        Ok(true) => {
+            tracing::info!("drep cache: used embedded metadata on /governance/dreps");
+            return Ok(());
+        }
+        Ok(false) => {
+            tracing::warn!("drep cache: list had no embedded names - fetching /metadata per id")
+        }
+        Err(e) => tracing::warn!("drep cache: list scrape failed ({e:#}) - trying /metadata"),
+    }
+    scrape_list_and_metadata(cache, http, base, project_id).await
+}
+
+/// Page `GET /governance/dreps` and merge `metadata` names into `cache`.
+///
+/// Returns `Ok(true)` when the endpoint embeds a `metadata` field (even if some
+/// rows lack names). Returns `Ok(false)` when the build has no `metadata` field
+/// so the caller should fall back to per-id `/metadata`.
+async fn scrape_list_embedded(
+    cache: &DrepCache,
+    http: &reqwest::Client,
+    base: &str,
+    project_id: Option<&str>,
+) -> Result<bool> {
     let mut page = 1u32;
     let mut saw_metadata_field = false;
+    let mut named = 0usize;
     loop {
         let path = format!("/governance/dreps?count={PAGE}&page={page}");
-        let rows: Value = bf_get(http, base, &path, project_id)
-            .timeout(DREP_LIST_PAGE_TIMEOUT)
-            .send()
-            .await
-            .with_context(|| format!("GET {base}{path}"))?
-            .error_for_status()
-            .with_context(|| format!("governance/dreps HTTP error page {page}"))?
-            .json()
-            .await
-            .context("decode governance/dreps")?;
+        let label = format!("GET {path}");
+        let rows = bf_get_json_retry(http, base, &path, project_id, &label).await?;
         let Some(arr) = rows.as_array() else {
             break;
         };
         if arr.is_empty() {
             break;
         }
+        let mut batch = HashMap::new();
         for row in arr {
             let Some(id) = row.get("drep_id").and_then(Value::as_str) else {
                 continue;
             };
-            // Field present (even when null) means this Blockfrost build embeds metadata.
             if row.as_object().is_some_and(|o| o.contains_key("metadata")) {
                 saw_metadata_field = true;
             }
             if let Some(meta) = row.get("metadata") {
                 if let Some(entry) = DrepEntry::from_blockfrost_meta(meta) {
-                    map.insert(id.to_string(), entry);
+                    batch.insert(id.to_string(), entry);
                 }
             }
         }
+        named += batch.len();
+        cache.remember_many(batch);
+        tracing::info!(
+            "drep cache: list page {page} ({} rows, {named} names so far)",
+            arr.len()
+        );
         if arr.len() < PAGE {
             break;
         }
         page += 1;
-        if page % 10 == 0 {
-            tracing::info!("drep cache: list scrape - {} names so far…", map.len());
-        }
         // Older Blockfrost without a `metadata` field — fall through to per-id fetch.
         if page == 2 && !saw_metadata_field {
-            break;
+            return Ok(false);
         }
     }
-    Ok(map)
+    Ok(saw_metadata_field || named > 0)
 }
 
 async fn scrape_list_and_metadata(
+    cache: &DrepCache,
     http: &reqwest::Client,
     base: &str,
     project_id: Option<&str>,
-) -> Result<HashMap<String, DrepEntry>> {
+) -> Result<()> {
     let ids = list_drep_ids(http, base, project_id).await?;
     if ids.is_empty() {
         return Err(anyhow!("Blockfrost /governance/dreps returned no drep ids"));
     }
-    tracing::info!("drep cache: listed {} dreps - fetching metadata…", ids.len());
+    tracing::info!(
+        "drep cache: listed {} dreps - fetching /metadata (concurrency {META_CONCURRENCY})…",
+        ids.len()
+    );
 
-    let mut map = HashMap::with_capacity(ids.len());
-    let mut set = tokio::task::JoinSet::new();
+    let mut set: tokio::task::JoinSet<Option<(String, DrepEntry)>> =
+        tokio::task::JoinSet::new();
     let mut outstanding = 0usize;
     let mut done = 0usize;
+    let mut named = 0usize;
 
     for id in ids {
         while outstanding >= META_CONCURRENCY {
-            let Some(res) = set.join_next().await else { break };
+            let Some(res) = set.join_next().await else {
+                break;
+            };
             outstanding -= 1;
             done += 1;
             if let Ok(Some((did, entry))) = res {
-                map.insert(did, entry);
+                named += 1;
+                cache.remember(&did, entry);
             }
-            if done % 200 == 0 {
-                tracing::info!("drep cache: metadata {} done, {} names…", done, map.len());
+            if done % 50 == 0 {
+                tracing::info!("drep cache: metadata {done} done, {named} names…");
             }
         }
         let http = http.clone();
         let base = base.to_string();
-        let pid_header = project_id.map(str::to_string);
+        let pid = project_id.map(str::to_string);
         set.spawn(async move {
             let path = format!("/governance/dreps/{id}/metadata");
-            let mut req = http.get(format!("{base}{path}"));
-            if let Some(pid) = pid_header {
-                req = req.header("project_id", pid);
-            }
-            let v: Value = tokio::time::timeout(DREP_META_TIMEOUT, req.send())
+            fetch_drep_metadata_retry(&http, &base, &path, pid.as_deref())
                 .await
-                .ok()?
-                .ok()?
-                .error_for_status()
-                .ok()?
-                .json()
-                .await
-                .ok()?;
-            let entry = DrepEntry::from_blockfrost_meta(&v)?;
-            Some((id, entry))
+                .map(|entry| (id, entry))
         });
         outstanding += 1;
     }
@@ -454,14 +545,15 @@ async fn scrape_list_and_metadata(
     while let Some(res) = set.join_next().await {
         done += 1;
         if let Ok(Some((did, entry))) = res {
-            map.insert(did, entry);
+            named += 1;
+            cache.remember(&did, entry);
         }
-        if done % 200 == 0 {
-            tracing::info!("drep cache: metadata {} done, {} names…", done, map.len());
+        if done % 50 == 0 {
+            tracing::info!("drep cache: metadata {done} done, {named} names…");
         }
     }
 
-    Ok(map)
+    Ok(())
 }
 
 async fn list_drep_ids(
@@ -473,16 +565,8 @@ async fn list_drep_ids(
     let mut page = 1u32;
     loop {
         let path = format!("/governance/dreps?count={PAGE}&page={page}");
-        let rows: Value = bf_get(http, base, &path, project_id)
-            .timeout(DREP_LIST_PAGE_TIMEOUT)
-            .send()
-            .await
-            .with_context(|| format!("GET {base}{path}"))?
-            .error_for_status()
-            .with_context(|| format!("governance/dreps HTTP error page {page}"))?
-            .json()
-            .await
-            .context("decode governance/dreps")?;
+        let label = format!("GET {path}");
+        let rows = bf_get_json_retry(http, base, &path, project_id, &label).await?;
         let Some(arr) = rows.as_array() else {
             break;
         };
@@ -496,13 +580,11 @@ async fn list_drep_ids(
                 ids.push(id.to_string());
             }
         }
+        tracing::info!("drep cache: listed {} drep ids (page {page})", ids.len());
         if arr.len() < PAGE {
             break;
         }
         page += 1;
-        if page % 20 == 0 {
-            tracing::info!("drep cache: listed {} drep ids so far…", ids.len());
-        }
     }
     Ok(ids)
 }
@@ -613,3 +695,122 @@ pub async fn warm_from_events(
         tracing::info!("drep cache: learned {n} names from anchors");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn named_row(i: usize) -> Value {
+        // Long enough to pass is_lookup_drep_id length checks if needed later.
+        let id = format!("drep1test{:0>50}", i);
+        json!({
+            "drep_id": id,
+            "metadata": {
+                "json_metadata": {
+                    "body": { "givenName": format!("DRep {i}") }
+                }
+            }
+        })
+    }
+
+    fn page_body(start: usize, n: usize) -> Value {
+        Value::Array((start..start + n).map(named_row).collect())
+    }
+
+    #[test]
+    fn parses_embedded_blockfrost_metadata() {
+        let v = json!({
+            "url": "https://example.com/drep.json",
+            "json_metadata": {
+                "body": { "givenName": "Ada Lovelace" }
+            }
+        });
+        let e = DrepEntry::from_blockfrost_meta(&v).expect("parse");
+        assert_eq!(e.name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(e.url.as_deref(), Some("https://example.com/drep.json"));
+    }
+
+    #[tokio::test]
+    async fn scrape_paginates_and_updates_memory() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(query_param("count", "20"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(0, 20)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(query_param("count", "20"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(20, 20)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(query_param("count", "20"))
+            .and(query_param("page", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(40, 5)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DrepCache::load(Some(dir.path()));
+        assert_eq!(cache.len(), 0);
+
+        let http = reqwest::Client::new();
+        let n = cache.refresh(&http, &server.uri(), None).await.unwrap();
+        assert_eq!(n, 45);
+        assert_eq!(cache.len(), 45);
+        assert_eq!(
+            cache
+                .get(&format!("drep1test{:0>50}", 0))
+                .and_then(|e| e.name),
+            Some("DRep 0".into())
+        );
+        assert_eq!(
+            cache
+                .get(&format!("drep1test{:0>50}", 44))
+                .and_then(|e| e.name),
+            Some("DRep 44".into())
+        );
+        // Durable file written.
+        assert!(dir.path().join(CACHE_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn scrape_retries_until_page_succeeds() {
+        let server = MockServer::start().await;
+
+        // First two attempts for page 1 fail; third succeeds with a short page.
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(0, 3)))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DrepCache::load(Some(dir.path()));
+        let http = reqwest::Client::new();
+        let n = cache.refresh(&http, &server.uri(), None).await.unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(cache.len(), 3);
+    }
+}
+

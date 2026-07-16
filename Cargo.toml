@@ -24,6 +24,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zip = { version = "2", features = ["deflate"] }
 
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+
 [profile.release]
 lto = true
 codegen-units = 1
