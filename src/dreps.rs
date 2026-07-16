@@ -17,10 +17,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
 
 const CACHE_FILE: &str = "dreps.json";
-/// Smaller pages keep each `/governance/dreps` call cheaper on slow RYO builds.
-const PAGE: usize = 20;
+/// Blockfrost max page size — one round-trip per 100 DReps with embedded metadata.
+const PAGE: usize = 100;
 const META_CONCURRENCY: usize = 4;
 const ANCHOR_CONCURRENCY: usize = 12;
 const DREP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -100,6 +101,8 @@ impl DrepEntry {
 pub struct DrepCache {
     by_id: Mutex<HashMap<String, DrepEntry>>,
     path: Option<PathBuf>,
+    /// Only one bulk scrape at a time (boot + daily refresh must not stack).
+    scrape_lock: AsyncMutex<()>,
 }
 
 impl DrepCache {
@@ -173,13 +176,18 @@ impl DrepCache {
     ///
     /// Uses a client with **no request timeout** and retries each page until it
     /// succeeds. Names are merged into the live map as pages arrive so the app
-    /// can use them before the full scrape completes.
+    /// can use them before the full scrape completes. Only one scrape runs at a
+    /// time so we never pile concurrent `/governance/dreps` calls onto RYO.
     pub async fn refresh(
         &self,
         http: &reqwest::Client,
         blockfrost_url: &str,
         project_id: Option<&str>,
     ) -> Result<usize> {
+        let Ok(_guard) = self.scrape_lock.try_lock() else {
+            tracing::info!("drep cache: scrape already in progress - skipping");
+            return Ok(self.len());
+        };
         let scrape_http = reqwest::Client::builder()
             .connect_timeout(DREP_CONNECT_TIMEOUT)
             .pool_idle_timeout(Duration::from_secs(90))
@@ -221,6 +229,7 @@ impl DrepCache {
                 DrepCache {
                     by_id: Mutex::new(map),
                     path: Some(path),
+                    scrape_lock: AsyncMutex::new(()),
                 }
             }
             Ok(_) => {
@@ -231,6 +240,7 @@ impl DrepCache {
                 DrepCache {
                     by_id: Mutex::new(HashMap::new()),
                     path: Some(path),
+                    scrape_lock: AsyncMutex::new(()),
                 }
             }
             Err(_) if path.exists() => {
@@ -238,6 +248,7 @@ impl DrepCache {
                 DrepCache {
                     by_id: Mutex::new(HashMap::new()),
                     path: Some(path),
+                    scrape_lock: AsyncMutex::new(()),
                 }
             }
             Err(_) => {
@@ -248,6 +259,7 @@ impl DrepCache {
                 DrepCache {
                     by_id: Mutex::new(HashMap::new()),
                     path: Some(path),
+                    scrape_lock: AsyncMutex::new(()),
                 }
             }
         }
@@ -424,18 +436,22 @@ async fn scrape_dreps(
     base: &str,
     project_id: Option<&str>,
 ) -> Result<()> {
-    // Primary: paginate GET /governance/dreps and read embedded metadata.
+    // Primary + preferred: paginate GET /governance/dreps with embedded metadata
+    // (the fast path the RYO docs advertise). Only fall back to per-id /metadata
+    // when the list has no `metadata` field at all (older Blockfrost builds).
     match scrape_list_embedded(cache, http, base, project_id).await {
         Ok(true) => {
             tracing::info!("drep cache: used embedded metadata on /governance/dreps");
-            return Ok(());
+            Ok(())
         }
         Ok(false) => {
-            tracing::warn!("drep cache: list had no embedded names - fetching /metadata per id")
+            tracing::warn!(
+                "drep cache: /governance/dreps has no metadata field - fetching /metadata per id"
+            );
+            scrape_list_and_metadata(cache, http, base, project_id).await
         }
-        Err(e) => tracing::warn!("drep cache: list scrape failed ({e:#}) - trying /metadata"),
+        Err(e) => Err(e),
     }
-    scrape_list_and_metadata(cache, http, base, project_id).await
 }
 
 /// Page `GET /governance/dreps` and merge `metadata` names into `cache`.
@@ -739,25 +755,17 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/governance/dreps"))
-            .and(query_param("count", "20"))
+            .and(query_param("count", "100"))
             .and(query_param("page", "1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(0, 20)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(0, 100)))
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/governance/dreps"))
-            .and(query_param("count", "20"))
+            .and(query_param("count", "100"))
             .and(query_param("page", "2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(20, 20)))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/governance/dreps"))
-            .and(query_param("count", "20"))
-            .and(query_param("page", "3"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(40, 5)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(100, 5)))
             .expect(1)
             .mount(&server)
             .await;
@@ -768,8 +776,8 @@ mod tests {
 
         let http = reqwest::Client::new();
         let n = cache.refresh(&http, &server.uri(), None).await.unwrap();
-        assert_eq!(n, 45);
-        assert_eq!(cache.len(), 45);
+        assert_eq!(n, 105);
+        assert_eq!(cache.len(), 105);
         assert_eq!(
             cache
                 .get(&format!("drep1test{:0>50}", 0))
@@ -778,9 +786,9 @@ mod tests {
         );
         assert_eq!(
             cache
-                .get(&format!("drep1test{:0>50}", 44))
+                .get(&format!("drep1test{:0>50}", 104))
                 .and_then(|e| e.name),
-            Some("DRep 44".into())
+            Some("DRep 104".into())
         );
         // Durable file written.
         assert!(dir.path().join(CACHE_FILE).exists());

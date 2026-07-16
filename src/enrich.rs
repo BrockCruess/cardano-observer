@@ -122,12 +122,10 @@ impl Enricher {
             tracing::info!("drep cache: empty - background scrape starting");
         }
 
-        let pool_fut = async {
-            if !need_pools {
-                return;
-            }
+        // Pools then DReps sequentially so they don't contend for the same RYO.
+        if need_pools {
             let Some(base) = self.blockfrost_url.as_deref() else {
-                return;
+                return false;
             };
             let pid = self.project_id.as_deref();
             match self.pool_cache.refresh(&self.http, base, pid).await {
@@ -135,32 +133,28 @@ impl Enricher {
                 Ok(n) => tracing::info!("pool cache initial scrape done ({n} pools)"),
                 Err(e) => tracing::warn!("pool cache initial scrape failed: {e:#}"),
             }
+        }
+        if !need_dreps {
+            return false;
+        }
+        let Some(base) = self.blockfrost_url.as_deref() else {
+            return false;
         };
-        let drep_fut = async {
-            if !need_dreps {
-                return false;
+        let pid = self.project_id.as_deref();
+        match self.drep_cache.refresh(&self.http, base, pid).await {
+            Ok(0) => {
+                tracing::warn!("drep cache initial scrape returned 0 names");
+                false
             }
-            let Some(base) = self.blockfrost_url.as_deref() else {
-                return false;
-            };
-            let pid = self.project_id.as_deref();
-            match self.drep_cache.refresh(&self.http, base, pid).await {
-                Ok(0) => {
-                    tracing::warn!("drep cache initial scrape returned 0 names");
-                    false
-                }
-                Ok(n) => {
-                    tracing::info!("drep cache initial scrape done ({n} dreps)");
-                    true
-                }
-                Err(e) => {
-                    tracing::warn!("drep cache initial scrape failed: {e:#}");
-                    false
-                }
+            Ok(n) => {
+                tracing::info!("drep cache initial scrape done ({n} dreps)");
+                true
             }
-        };
-        let (_, dreps_ready) = tokio::join!(pool_fut, drep_fut);
-        dreps_ready
+            Err(e) => {
+                tracing::warn!("drep cache initial scrape failed: {e:#}");
+                false
+            }
+        }
     }
 
     /// Re-scrape pool + DRep registration metadata from Blockfrost every day
