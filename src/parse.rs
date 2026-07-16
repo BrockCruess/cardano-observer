@@ -222,6 +222,9 @@ fn parse_tx(
     }
 
     // ── Withdrawals ──────────────────────────────────────────────────────
+    // Skip 0-lovelace withdrawals: scripts often withdraw ₳0 from a script
+    // stake address solely to force a reward-account script purpose. Those
+    // aren't real reward claims and would spam the feed as "₳ 0".
     if let Some(w) = tx.get("withdrawals").and_then(Value::as_object) {
         for (account, amount) in w {
             let lov = amount
@@ -229,6 +232,9 @@ fn parse_tx(
                 .and_then(|a| a.get("lovelace"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            if lov == 0 {
+                continue;
+            }
             events.push(b.make(
                 "withdrawal",
                 "staking",
@@ -384,7 +390,7 @@ fn parse_certificate(
                 events.push(ev(
                     "vote_delegation",
                     "governance",
-                    "Vote Delegation".into(),
+                    "DRep Delegation".into(),
                     data,
                 ));
             }

@@ -17,6 +17,33 @@ const DEX_VENUES = [
   "Danogo",
 ];
 
+/**
+ * Governance subtype filters — CIP-1694 action types (proposals) plus other
+ * governance event kinds. Ids match `data.actionType` / `kind` from the server.
+ */
+const GOV_TYPES = [
+  { id: "treasuryWithdrawals", label: "Treasury Withdrawal" },
+  { id: "protocolParametersUpdate", label: "Parameter Update" },
+  { id: "hardForkInitiation", label: "Hard Fork" },
+  { id: "constitutionalCommittee", label: "Committee Update" },
+  { id: "constitution", label: "New Constitution" },
+  { id: "noConfidence", label: "No Confidence" },
+  { id: "information", label: "Info Action" },
+  { id: "gov_vote", label: "Vote" },
+  { id: "vote_delegation", label: "DRep Delegation" },
+  { id: "drep_registration", label: "DRep Registration" },
+  { id: "drep_update", label: "DRep Update" },
+  { id: "drep_retirement", label: "DRep Retirement" },
+  { id: "committee_auth", label: "Committee Auth" },
+  { id: "committee_resign", label: "Committee Resign" },
+];
+
+function govTypeKey(ev) {
+  if (!ev || ev.category !== "governance") return "";
+  if (ev.kind === "gov_proposal") return String(ev.data?.actionType || "unknown");
+  return String(ev.kind || "");
+}
+
 const CATS = [
   { id: "block",       label: "Blocks" },
   { id: "token",       label: "Tokens" },
@@ -40,7 +67,7 @@ const ICONS = {
   mint: svg('<path d="M2 9.5L5.5 6.5h15V10H15v4h3.5v3.5H5.5V14H9V10H2z"/><path d="M6 17.5h12V20H6z"/>'),
   burn: svg('<path d="M12 3c3 3.5 6 6 6 11a6 6 0 0 1-12 0c0-2.5 1.2-4.5 3-6.2C8.2 10.5 9.8 12 12 11.2 11.5 8.5 11.8 5.5 12 3z"/>'),
   delegation: svg('<path d="M12 3l8 4-8 4-8-4 8-4z"/><path d="M4 13l8 4 8-4"/><path d="M4 17l8 4 8-4"/>'),
-  vote_delegation: svg('<path d="M12 3l8 4-8 4-8-4 8-4z"/><path d="M4 13l8 4 8-4"/><path d="M9 18.5l2 2 4-4.5"/>'),
+  vote_delegation: svg('<g transform="translate(12 12) scale(1.06) translate(-12 -12)"><path fill="currentColor" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke fill" d="M17.62 6.73C17.52 6.76 17.38 6.81 17.31 6.86C17.24 6.90 16.88 7.23 16.51 7.59C15.66 8.42 15.15 8.82 14.39 9.25L14.08 9.43L12.95 9.43C11.63 9.43 11.64 9.43 10.68 9.09C9.57 8.69 9.02 8.58 8.28 8.62C7.35 8.66 6.55 9.00 5.84 9.66C5.70 9.78 5.36 10.16 5.09 10.48C4.47 11.22 4.10 11.58 3.40 12.12C3.10 12.35 2.81 12.58 2.75 12.63C2.53 12.84 2.45 13.16 2.54 13.47C2.58 13.62 2.66 13.75 2.88 14.01C3.03 14.20 3.35 14.58 3.58 14.86C3.81 15.15 4.27 15.71 4.61 16.12C4.95 16.52 5.30 16.96 5.39 17.08C5.58 17.31 5.66 17.37 5.74 17.34C5.77 17.33 6.05 17.04 6.36 16.71C7.37 15.62 7.63 15.41 8.16 15.19C8.68 14.98 8.98 14.95 10.66 14.94C12.15 14.94 12.69 14.91 13.23 14.81C15.09 14.45 17.05 13.30 19.09 11.37C19.98 10.53 21.17 9.14 21.43 8.62C21.50 8.50 21.52 8.38 21.53 8.19L21.55 7.93L21.47 7.78C21.42 7.70 21.33 7.59 21.27 7.53C21.11 7.41 20.79 7.32 20.58 7.35L20.41 7.37L20.39 7.29C20.30 7.02 20.01 6.78 19.68 6.71C19.42 6.65 19.09 6.71 18.84 6.87L18.64 6.99L18.54 6.90C18.31 6.70 17.94 6.64 17.62 6.73ZM18.09 7.02C18.19 7.04 18.30 7.09 18.33 7.13L18.40 7.21L17.73 7.92C17.00 8.71 16.49 9.16 15.96 9.52L15.62 9.75L15.37 9.63C15.20 9.54 15.05 9.49 14.92 9.48C14.81 9.47 14.72 9.44 14.72 9.43C14.72 9.41 14.74 9.40 14.75 9.40C14.80 9.40 15.35 9.02 15.72 8.73C15.92 8.58 16.37 8.16 16.73 7.81C17.37 7.19 17.52 7.07 17.74 7.02C17.89 6.98 17.91 6.98 18.09 7.02ZM19.82 7.08C19.95 7.15 20.10 7.34 20.10 7.43C20.09 7.46 20.01 7.54 19.90 7.61C19.79 7.68 19.51 7.94 19.21 8.26C18.15 9.39 17.52 9.92 16.80 10.25C16.55 10.37 16.09 10.54 16.02 10.54C16.01 10.54 16.00 10.49 16.00 10.44C16.00 10.39 15.96 10.26 15.91 10.17L15.83 9.98L16.04 9.84C16.71 9.39 17.17 8.98 18.02 8.06C18.65 7.39 18.86 7.20 19.03 7.10C19.28 6.98 19.59 6.97 19.82 7.08ZM21.01 7.74C21.24 7.88 21.30 8.12 21.18 8.43C21.05 8.77 20.15 9.86 19.27 10.75C18.02 12.03 16.56 13.13 15.26 13.78C14.83 14.00 14.06 14.28 13.63 14.39C12.89 14.58 12.64 14.60 10.90 14.62C10.02 14.63 9.16 14.65 9.00 14.67C8.34 14.75 7.74 14.98 7.27 15.35C7.13 15.46 6.72 15.87 6.37 16.25C6.01 16.63 5.70 16.94 5.69 16.94C5.68 16.93 5.51 16.74 5.33 16.51C5.14 16.28 4.52 15.51 3.94 14.81C3.36 14.11 2.87 13.49 2.84 13.44C2.78 13.30 2.79 13.16 2.87 13.00C2.92 12.89 3.07 12.76 3.55 12.40C4.33 11.79 4.62 11.52 5.24 10.78C5.53 10.45 5.88 10.06 6.02 9.91C6.48 9.47 6.99 9.18 7.62 9.01L7.88 8.94L8.45 8.94L9.02 8.94L9.38 9.02C9.77 9.10 10.09 9.20 10.79 9.46C11.05 9.56 11.38 9.66 11.53 9.69L11.81 9.76L13.41 9.77L15.02 9.79L15.15 9.85C15.62 10.07 15.80 10.49 15.60 10.90C15.49 11.12 15.28 11.28 15.00 11.36C14.87 11.40 13.90 11.54 12.70 11.69C11.55 11.83 10.59 11.96 10.57 11.99C10.50 12.04 10.51 12.18 10.58 12.22C10.66 12.26 14.91 11.73 15.14 11.66C15.48 11.53 15.75 11.31 15.90 11.02L15.98 10.87L16.24 10.79C16.80 10.63 17.32 10.36 17.86 9.96C18.11 9.78 18.49 9.43 19.13 8.78C19.73 8.18 20.10 7.83 20.19 7.78C20.49 7.63 20.80 7.62 21.01 7.74Z"/></g>'),
   stake_registration: svg('<circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-3.8 4.8-5.5 8-5.5s6.5 1.7 8 5.5"/><path d="M17 8h5M19.5 5.5v5" stroke-width="1.6"/>'),
   stake_deregistration: svg('<circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-3.8 4.8-5.5 8-5.5s6.5 1.7 8 5.5"/><path d="M17 8h5" stroke-width="1.6"/>'),
   withdrawal: svg('<path d="M5 11v8h14v-8"/><path d="M12 16V4"/><path d="M8.5 7.5L12 4l3.5 3.5"/>'),
@@ -49,6 +76,8 @@ const ICONS = {
   pool_retirement: svg('<rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 9h6v6H9z"/><path d="M9 3v3M12 3v3M15 3v3M9 18v3M12 18v3M15 18v3M3 9h3M3 12h3M3 15h3M18 9h3M18 12h3M18 15h3"/><path d="M4 4l16 16"/>'),
   gov_proposal: svg('<path d="M12 4v16"/><path d="M5 7h14"/><path d="M5 7l-2.6 5.2a3 3 0 0 0 5.9 0L5.7 7"/><path d="M18.3 7l-2.6 5.2a3 3 0 0 0 5.9 0L19 7"/><path d="M8 20h8"/>'),
   gov_vote: svg('<rect x="5" y="4" width="14" height="16" rx="2"/><path d="M9 12l2.2 2.2L15.5 9.5"/>'),
+  gov_vote_no: svg('<rect x="5" y="4" width="14" height="16" rx="2"/><path d="M9 9l6 6M15 9l-6 6"/>'),
+  gov_vote_abstain: svg('<rect x="5" y="4" width="14" height="16" rx="2"/><path d="M8 13c1.6-2.8 3-2.8 4 0s2.4 2.8 4 0"/>'),
   drep_registration: svg('<circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-3.8 4.8-5.5 8-5.5s6.5 1.7 8 5.5"/><path d="M16.5 3.5l2 2 3.5-4" stroke-width="1.6"/>'),
   drep_update: svg('<circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-3.8 4.8-5.5 8-5.5s6.5 1.7 8 5.5"/>'),
   drep_retirement: svg('<circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-3.8 4.8-5.5 8-5.5s6.5 1.7 8 5.5"/><path d="M17 5h5" stroke-width="1.6"/>'),
@@ -66,8 +95,15 @@ const ICONS = {
   dex_lp_redeem: svg('<path d="M5 11v8h14v-8"/><path d="M12 16V4"/><path d="M8.5 7.5L12 4l3.5 3.5"/>'),
   dex_cancel: svg('<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>'),
 };
-const iconFor = (kind, category, side) => {
+const iconFor = (kind, category, side, vote) => {
   if (kind === "dex_lp" && side === "redeem") return ICONS.dex_lp_redeem;
+  if (kind === "delegation") return ICONS.vote_delegation;
+  if (kind === "gov_vote") {
+    const v = String(vote || "").toLowerCase();
+    if (v === "no") return ICONS.gov_vote_no;
+    if (v === "abstain") return ICONS.gov_vote_abstain;
+    return ICONS.gov_vote;
+  }
   return ICONS[kind] || ICONS[{ token: "token_transfer", staking: "delegation", governance: "gov_proposal", metadata: "tx_metadata", alert: "slot_battle", dex: "dex", pool: "pool", mint: "mint" }[category]] || ICONS.transaction;
 };
 
@@ -231,6 +267,11 @@ const settings = {
     ...Object.fromEntries(DEX_VENUES.map((d) => [d, true])),
     ...store.get("co_dex_venues_v1", {}),
   },
+  // Per-type governance toggles (true = include). Unknown types stay visible.
+  govTypes: {
+    ...Object.fromEntries(GOV_TYPES.map((g) => [g.id, true])),
+    ...store.get("co_gov_types_v1", {}),
+  },
   layout: store.get("co_layout_v1", "vertical"),
   // Mobile defaults to compact; desktop stays roomy unless the user toggled it.
   compact: store.get(
@@ -245,6 +286,11 @@ const settings = {
 function dexVenueEnabled(venue) {
   if (!venue) return true;
   return settings.dexVenues[venue] !== false;
+}
+
+function govTypeEnabled(type) {
+  if (!type) return true;
+  return settings.govTypes[type] !== false;
 }
 
 /* ── Global state ─────────────────────────────────────────────────────── */
@@ -319,7 +365,7 @@ function applyFilters() {
     .join("\n");
   const minL = settings.minAda * 1e6;
   filterStyle.textContent = css;
-  // min-ADA + search + DEX venue need per-card logic
+  // min-ADA + search + subtype filters need per-card logic
   const q = $("search").value.trim().toLowerCase();
   for (const g of groupOrder) {
     let visible = 0;
@@ -328,16 +374,20 @@ function applyFilters() {
       if (minL > 0 && card.dataset.category === "transaction" && Number(card.dataset.ada || 0) < minL) hide = true;
       if (q && !(card.dataset.search || "").includes(q)) hide = true;
       if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) hide = true;
+      if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) hide = true;
       card.classList.toggle("f-hide", hide);
       if (!hide && settings.filters[card.dataset.category]) {
         visible++;
       }
     });
-    g.classList.toggle("f-hide", q !== "" && visible === 0);
+    // Collapse groups with nothing visible (category / venue / search filters),
+    // so rare filtered events aren't separated by long empty spine stretches.
+    g.classList.toggle("f-hide", visible === 0);
   }
   store.set("co_filters_v1", settings.filters);
   store.set("co_minada_v1", settings.minAda);
   store.set("co_dex_venues_v1", settings.dexVenues);
+  store.set("co_gov_types_v1", settings.govTypes);
   updateLoadedEventCount();
   if (!searchPriming && $("search").value.trim()) {
     updateSearchEmptyPrompt();
@@ -346,15 +396,35 @@ function applyFilters() {
   }
 }
 
-/** Total events loaded for counting: 24h retention index + any older scrolled-in history. */
+/** Visible (filter-matching) events currently shown in the feed. */
+function countVisibleEvents() {
+  let n = 0;
+  let oldest = Infinity;
+  let newest = -Infinity;
+  document.querySelectorAll("#feed .block-group:not(.f-hide) .card:not(.f-hide)").forEach((card) => {
+    if (!settings.filters[card.dataset.category]) return;
+    if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return;
+    if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) return;
+    n++;
+    const ts = Number(card.querySelector(".ev-time")?.dataset.ts || 0);
+    if (ts > 0) {
+      if (ts < oldest) oldest = ts;
+      if (ts > newest) newest = ts;
+    }
+  });
+  const hours = Number.isFinite(oldest) && newest >= oldest ? (newest - oldest) / 3600 : 0;
+  return { n, hours };
+}
+
+/** Footer count: filtered visible events only (not the full loaded total). */
 function updateLoadedEventCount() {
   const el = $("ft-session");
   if (!el) return;
-  const n = loadedEventIds.size;
-  const span = formatHistorySpan(loadedHistoryHours());
+  const { n, hours } = countVisibleEvents();
+  const span = formatHistorySpan(hours);
   const unit = `event${n === 1 ? "" : "s"}`;
   el.textContent = span
-    ? `${fmtInt(n)} ${unit} · ${span} loaded`
+    ? `${fmtInt(n)} ${unit} · ${span}`
     : `${fmtInt(n)} ${unit}`;
 }
 
@@ -432,50 +502,40 @@ function searchFromUrl() {
   return "";
 }
 
-function buildDexVenueMenu(menu) {
-  menu.innerHTML = "";
-  for (const venue of DEX_VENUES) {
-    const on = dexVenueEnabled(venue);
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "dex-venue-opt" + (on ? " on" : "");
-    row.setAttribute("role", "menuitemcheckbox");
-    row.setAttribute("aria-checked", on ? "true" : "false");
-    row.innerHTML =
-      `<span class="dex-venue-check" aria-hidden="true">${on ? "✓" : ""}</span>` +
-      `<span class="dex-venue-label">${esc(venue)}</span>`;
-    row.onclick = (e) => {
-      e.stopPropagation();
-      settings.dexVenues[venue] = !dexVenueEnabled(venue);
-      buildDexVenueMenu(menu);
-      applyFilters();
-    };
-    menu.appendChild(row);
-  }
-}
-
-function buildDexChip(chips) {
+/**
+ * Category chip with a right-side multi-select submenu.
+ * `opts` items are `{ id, label }`; toggles live in `settings[settingsKey]`.
+ */
+function buildSplitFilterChip(chips, {
+  catId,
+  label,
+  iconKind,
+  settingsKey,
+  options,
+  isEnabled,
+  menuAria,
+}) {
   const wrap = document.createElement("div");
-  wrap.className = "chip-wrap chip-dex-wrap";
+  wrap.className = "chip-wrap";
+  wrap.style.setProperty("--c", `var(--c-${catId})`);
 
   const b = document.createElement("button");
   b.type = "button";
-  b.className = "chip chip-dex" + (settings.filters.dex ? " on" : "");
-  b.style.setProperty("--c", "var(--c-dex)");
+  b.className = "chip chip-main" + (settings.filters[catId] ? " on" : "");
   b.innerHTML =
-    `${iconFor("dex", "dex")}<span>DEX</span><span class="n" data-cat-n="dex"></span>`;
-  b.title = "show/hide DEX";
+    `${iconFor(iconKind, catId)}<span>${esc(label)}</span><span class="n" data-cat-n="${catId}"></span>`;
+  b.title = `show/hide ${label.toLowerCase()}`;
   b.onclick = () => {
-    settings.filters.dex = !settings.filters.dex;
-    b.classList.toggle("on", settings.filters.dex);
-    wrap.classList.toggle("on", settings.filters.dex);
+    settings.filters[catId] = !settings.filters[catId];
+    b.classList.toggle("on", settings.filters[catId]);
+    wrap.classList.toggle("on", settings.filters[catId]);
     applyFilters();
   };
 
   const caret = document.createElement("button");
   caret.type = "button";
   caret.className = "chip-caret";
-  caret.setAttribute("aria-label", "Filter by DEX venue");
+  caret.setAttribute("aria-label", menuAria);
   caret.setAttribute("aria-haspopup", "menu");
   caret.setAttribute("aria-expanded", "false");
   caret.innerHTML =
@@ -483,10 +543,34 @@ function buildDexChip(chips) {
     `<path fill="currentColor" d="M4.2 6.2a.75.75 0 0 1 1.06 0L8 8.94l2.74-2.74a.75.75 0 1 1 1.06 1.06l-3.27 3.27a.75.75 0 0 1-1.06 0L4.2 7.26a.75.75 0 0 1 0-1.06z"/></svg>`;
 
   const menu = document.createElement("div");
-  menu.className = "dex-venue-menu";
+  menu.className = "chip-sub-menu";
   menu.setAttribute("role", "menu");
   menu.hidden = true;
-  buildDexVenueMenu(menu);
+
+  const rebuildMenu = () => {
+    menu.innerHTML = "";
+    for (const opt of options) {
+      const id = typeof opt === "string" ? opt : opt.id;
+      const text = typeof opt === "string" ? opt : opt.label;
+      const on = isEnabled(id);
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "chip-sub-opt" + (on ? " on" : "");
+      row.setAttribute("role", "menuitemcheckbox");
+      row.setAttribute("aria-checked", on ? "true" : "false");
+      row.innerHTML =
+        `<span class="chip-sub-check" aria-hidden="true">${on ? "✓" : ""}</span>` +
+        `<span class="chip-sub-label">${esc(text)}</span>`;
+      row.onclick = (e) => {
+        e.stopPropagation();
+        settings[settingsKey][id] = !isEnabled(id);
+        rebuildMenu();
+        applyFilters();
+      };
+      menu.appendChild(row);
+    }
+  };
+  rebuildMenu();
 
   const closeMenu = () => {
     menu.hidden = true;
@@ -494,7 +578,7 @@ function buildDexChip(chips) {
     caret.setAttribute("aria-expanded", "false");
   };
   const openMenu = () => {
-    buildDexVenueMenu(menu);
+    rebuildMenu();
     menu.hidden = false;
     wrap.classList.add("open");
     caret.setAttribute("aria-expanded", "true");
@@ -513,7 +597,7 @@ function buildDexChip(chips) {
     if (e.key === "Escape") closeMenu();
   });
 
-  wrap.classList.toggle("on", settings.filters.dex);
+  wrap.classList.toggle("on", settings.filters[catId]);
   wrap.append(b, caret, menu);
   chips.appendChild(wrap);
 }
@@ -522,7 +606,27 @@ function buildToolbar() {
   const chips = $("chips");
   for (const c of CATS) {
     if (c.id === "dex") {
-      buildDexChip(chips);
+      buildSplitFilterChip(chips, {
+        catId: "dex",
+        label: "DEX",
+        iconKind: "dex",
+        settingsKey: "dexVenues",
+        options: DEX_VENUES,
+        isEnabled: dexVenueEnabled,
+        menuAria: "Filter by DEX venue",
+      });
+      continue;
+    }
+    if (c.id === "governance") {
+      buildSplitFilterChip(chips, {
+        catId: "governance",
+        label: "Governance",
+        iconKind: "gov_proposal",
+        settingsKey: "govTypes",
+        options: GOV_TYPES,
+        isEnabled: govTypeEnabled,
+        menuAria: "Filter by governance action type",
+      });
       continue;
     }
     const b = document.createElement("button");
@@ -837,16 +941,8 @@ function cardBody(ev) {
   }
 }
 
-const KIND_LABEL = {
-  block: "block", transaction: "tx", token_transfer: "tokens", mint: "mint", burn: "burn",
-  delegation: "stake", vote_delegation: "governance", stake_registration: "stake",
-  stake_deregistration: "stake", withdrawal: "rewards", pool_registration: "pool",
-  pool_retirement: "pool", gov_proposal: "governance", gov_vote: "vote",
-  drep_registration: "drep", drep_update: "drep", drep_retirement: "drep",
-  committee_auth: "committee", committee_resign: "committee", tx_metadata: "metadata",
-  certificate: "cert", rollback: "fork", orphaned_block: "fork", slot_battle: "battle",
-  dex_order: "dex", dex_fill: "dex", dex_lp: "dex", dex_cancel: "dex",
-};
+/** Card kind badge = filter category (title already names the specific event). */
+const CAT_LABEL = Object.fromEntries(CATS.map((c) => [c.id, c.label]));
 
 function roleLabel(r) {
   return { delegateRepresentative: "DRep", constitutionalCommittee: "CC", stakePoolOperator: "SPO" }[r] || r;
@@ -998,17 +1094,21 @@ function buildCard(ev) {
   if (ev.tx_hash) card.dataset.tx = ev.tx_hash;
   if (ev.data && ev.data.ada != null) card.dataset.ada = ev.data.ada;
   if (ev.category === "dex" && ev.data?.dex) card.dataset.dex = String(ev.data.dex);
+  if (ev.category === "governance") {
+    const gt = govTypeKey(ev);
+    if (gt) card.dataset.govType = gt;
+  }
 
   const title = ev.kind === "block"
     ? `Block <span class="height">${fmtInt(ev.height)}</span>`
-    : esc(titleCaseWords(ev.title));
+    : esc(titleCaseWords(ev.kind === "vote_delegation" ? "DRep Delegation" : ev.title));
 
   card.innerHTML = `
-    <div class="ev-icon">${iconFor(ev.kind, ev.category, ev.data?.side)}</div>
+    <div class="ev-icon">${iconFor(ev.kind, ev.category, ev.data?.side, ev.data?.vote)}</div>
     <div class="ev-body">
       <div class="ev-head">
         <span class="ev-title">${title}</span>
-        <span class="ev-kind">${esc(KIND_LABEL[ev.kind] || ev.category)}</span>
+        <span class="ev-kind">${esc(CAT_LABEL[ev.category] || ev.category)}</span>
         <span class="ev-time" data-ts="${ev.timestamp}" title="${esc(clock(ev.timestamp))}">${timeAgo(ev.timestamp)}</span>
       </div>
       <div class="ev-sub">${cardBody(ev)}</div>
@@ -1034,6 +1134,7 @@ function newGroup(blockHash, atEnd = false) {
   if (atEnd) {
     feed.appendChild(g);
     groupOrder.push(g);
+    pinHistoryLoader();
   } else {
     feed.prepend(g);
     groupOrder.unshift(g);
@@ -1242,6 +1343,7 @@ function visibleMatchCount() {
   document.querySelectorAll("#feed .card:not(.f-hide)").forEach((card) => {
     if (!settings.filters[card.dataset.category]) return;
     if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return;
+    if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) return;
     n++;
   });
   return n;
@@ -1597,6 +1699,12 @@ async function runSearchPrime(snapshotCount) {
   updateSearchEmptyPrompt();
 }
 
+/** Keep the history loader after every block group (older pages append downward). */
+function pinHistoryLoader() {
+  const el = $("history-loader");
+  if (el && el.parentElement === feed) feed.appendChild(el);
+}
+
 function setHistoryLoading(on, exhausted = false) {
   let el = $("history-loader");
   if (!el) {
@@ -1604,10 +1712,9 @@ function setHistoryLoading(on, exhausted = false) {
     el.id = "history-loader";
     el.className = "history-loader";
     el.setAttribute("aria-live", "polite");
-    feed.appendChild(el);
-  } else if (el.parentElement !== feed) {
-    feed.appendChild(el);
   }
+  // Always pin to the bottom of the feed — history loads downward.
+  feed.appendChild(el);
   if (on) {
     el.innerHTML = `<span class="hist-spin" aria-hidden="true"></span><span class="hist-t">Loading older events…</span>`;
     el.classList.add("show");
@@ -2011,7 +2118,9 @@ const mono = (s, full) =>
 function openModal(ev) {
   overlay.classList.add("show");
   if (ev.tx_hash) return openTx(ev);
-  mTitle.textContent = titleCaseWords(ev.title);
+  mTitle.textContent = titleCaseWords(
+    ev.kind === "vote_delegation" ? "DRep Delegation" : ev.title
+  );
   mBody.innerHTML = renderEventDetail(ev);
 }
 

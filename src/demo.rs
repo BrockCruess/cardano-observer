@@ -229,7 +229,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
         state.publish(mk(
             "vote_delegation",
             "governance",
-            "Vote Delegation".into(),
+            "DRep Delegation".into(),
             json!({ "stake": fake_stake(rng), "fromDrep": from, "drep": to }),
         ));
     }
