@@ -300,7 +300,7 @@ const feed = $("feed");
 const groups = new Map();      // block hash -> .block-group element
 const groupOrder = [];         // newest first
 const seenEventIds = new Set(); // dedupe when merging search hits into the feed
-const MAX_GROUPS = 50_000; // keep history while scrolling back; soft safety cap
+const MAX_GROUPS = 50_000; // soft safety cap while scrolling back
 const pending = [];            // buffered events while user is reading
 let oldestEventId = null;      // smallest id currently in the feed
 let historyExhausted = false;
@@ -332,19 +332,29 @@ let searchHitsExhausted = false;
 
 /**
  * Client-side copy of the server's 24h retention window.
- * Loaded in the background after the tip snapshot; search runs against this.
+ * Kept fully in memory; the feed only renders small pages from it on scroll.
  */
 const retentionCache = new Map(); // id -> { ev, hay }
 let retentionReady = false;
 let retentionLoading = null; // Promise while /api/buffer is in flight
 let retentionLoadGen = 0; // bumped on reconnect so stale preloads don't notify
 let retentionWaiters = []; // resolvers waiting for ready
+/** Newest-first events matching current filters (from retentionCache). */
+let feedHitBuffer = [];
+/** How far through feedHitBuffer we have rendered into the DOM. */
+let feedHitOffset = 0;
+/** Serialized filter state used to build feedHitBuffer. */
+let feedHitKey = "";
+/** True once feedHitBuffer has been fully rendered (further scroll → disk). */
+let retentionHistoryDone = false;
 
 const SEARCH_PRIME_LOOKBACK = 300;
-/** Older events fetched per scroll page (matches tip snapshot size). */
-const HISTORY_PAGE_SIZE = 25;
-/** Matches rendered per page — keeps the DOM/scrollbar bounded. */
+/** Events rendered into the DOM per scroll page (from the in-memory 24h buffer). */
+const FEED_PAGE_SIZE = 40;
+/** Matches rendered per search page — keeps the DOM/scrollbar bounded. */
 const SEARCH_PAGE_SIZE = 40;
+/** Older-than-24h disk pages (only after retention is exhausted). */
+const HISTORY_PAGE_SIZE = 40;
 const catCounts = Object.fromEntries(CATS.map((c) => [c.id, 0]));
 /** Ids counted in catCounts / the session total (retention window + scrolled history). */
 const loadedEventIds = new Set();
@@ -393,6 +403,10 @@ function applyFilters() {
     updateSearchEmptyPrompt();
   } else if (!$("search").value.trim()) {
     hideSearchPrompts();
+    // Only rebuild the scroll buffer when filter settings actually change.
+    if (retentionReady && feedFilterKey() !== feedHitKey) {
+      queueMicrotask(() => onFeedFiltersChanged());
+    }
   }
 }
 
@@ -860,13 +874,10 @@ function cardBody(ev) {
       return sub([from && to ? `${from} <span class="sep">→</span> ${to}` : (to || from)]);
     }
     case "vote_delegation": {
-      const fmtDrep = (id) => {
-        if (!id) return "";
-        const label = id.length > 24 ? short(id, 10, 5) : id;
-        return `<b title="${esc(id)}">${esc(label)}</b>`;
-      };
-      const from = d.fromDrep ? fmtDrep(d.fromDrep) : (d.stake ? `<span class="hash">${esc(short(d.stake, 12, 5))}</span>` : "");
-      const to = fmtDrep(d.drep);
+      const from = d.fromDrep
+        ? drepSpan(d.fromDrep, d.fromDrepName)
+        : (d.stake ? `<span class="hash">${esc(short(d.stake, 12, 5))}</span>` : "");
+      const to = drepSpan(d.drep, d.drepName);
       return sub([from && to ? `${from} <span class="sep">→</span> ${to}` : (to || from)]);
     }
     case "stake_registration":
@@ -900,14 +911,14 @@ function cardBody(ev) {
       return sub([
         `<span class="badge ${cls}">${esc(v.toUpperCase())}</span>`,
         d.role ? esc(roleLabel(d.role)) : "",
-        d.voter ? `<span class="hash">${esc(short(d.voter, 12, 5))}</span>` : "",
+        d.voter ? drepSpan(d.voter, d.voterName) : "",
         d.proposalTx ? `on <span class="hash">${esc(short(d.proposalTx, 8, 4))}#${esc(String(d.proposalIndex ?? 0))}</span>` : "",
       ]);
     }
     case "drep_registration":
     case "drep_update":
     case "drep_retirement":
-      return d.drep ? `<span class="hash">${esc(short(String(d.drep), 14, 6))}</span>` : "";
+      return d.drep ? drepSpan(d.drep, d.drepName) : "";
     case "tx_metadata":
       return d.msg
         ? `<span style="font-style:italic">“${esc(String(d.msg).slice(0, 160))}”</span>`
@@ -960,6 +971,39 @@ function poolIdsFromData(d) {
   return [d.issuerPool, d.pool, d.fromPool].filter((id) => typeof id === "string" && id);
 }
 
+function isLookupDrepId(id) {
+  return typeof id === "string"
+    && (id.startsWith("drep1") || id.startsWith("drep_script1"))
+    && id.length >= 50
+    && id.length <= 120;
+}
+
+/** Prefer stamped/cached givenName; enrichDreps fills misses via /api/drep. */
+function drepSpan(id, stampedName) {
+  if (!id) return "";
+  const s = String(id);
+  if (s === "Always Abstain" || s === "Always No Confidence") {
+    return `<b title="${esc(s)}">${esc(s)}</b>`;
+  }
+  if (!isLookupDrepId(s)) {
+    const label = s.length > 24 ? short(s, 10, 5) : s;
+    return `<span class="hash" title="${esc(s)}">${esc(label)}</span>`;
+  }
+  const known = (typeof stampedName === "string" && stampedName)
+    || drepMeta.get(s)?.name
+    || "";
+  if (known) {
+    if (!drepMeta.get(s)?.name) drepMeta.set(s, { name: known });
+    return `<span class="drep-name" data-drep="${esc(s)}" title="${esc(s)}">${esc(known)}</span>`;
+  }
+  return `<span class="drep-id" data-drep="${esc(s)}" title="${esc(s)}">${esc(short(s, 10, 5))}</span>`;
+}
+
+function drepIdsFromData(d) {
+  if (!d || typeof d !== "object") return [];
+  return [d.drep, d.fromDrep, d.voter].filter(isLookupDrepId);
+}
+
 /** Build the lowercase search haystack for a card (includes pool ids + known tickers). */
 function cardSearchText(ev) {
   const d = ev.data || {};
@@ -968,6 +1012,11 @@ function cardSearchText(ev) {
     bits.push(id);
     const meta = poolMeta.get(id);
     if (meta?.ticker) bits.push(meta.ticker);
+    if (meta?.name) bits.push(meta.name);
+  }
+  for (const id of drepIdsFromData(d)) {
+    bits.push(id);
+    const meta = drepMeta.get(id);
     if (meta?.name) bits.push(meta.name);
   }
   // Asset registry tickers already fetched into assetMeta.
@@ -1017,14 +1066,17 @@ function whenRetentionReady() {
 }
 
 /**
- * Background-load the full 24h window into retentionCache. Does not block the
- * tip snapshot / live feed. Search waits on whenRetentionReady() instead of
- * hitting the server per query.
+ * Background-load the full 24h window into retentionCache.
+ * The feed stays small — pages are served from this cache on scroll.
  */
 function startRetentionPreload(force = false) {
   if (!force && retentionLoading) return retentionLoading;
   const gen = ++retentionLoadGen;
   retentionReady = false;
+  feedHitBuffer = [];
+  feedHitOffset = 0;
+  feedHitKey = "";
+  retentionHistoryDone = false;
   retentionLoading = (async () => {
     try {
       const r = await fetch("/api/buffer");
@@ -1047,18 +1099,109 @@ function startRetentionPreload(force = false) {
       if (gen === retentionLoadGen) {
         notifyRetentionReady();
         retentionLoading = null;
+        queueMicrotask(() => onFeedFiltersChanged());
       }
     }
   })();
   return retentionLoading;
 }
 
-/** Local filter over the preloaded 24h cache. Returns newest-first matches. */
+/** Category / gov-type / DEX venue / min-ADA (search text is separate). */
+function eventPassesFeedFilters(ev) {
+  if (!ev || !keepDexEvent(ev)) return false;
+  if (!settings.filters[ev.category]) return false;
+  if (ev.category === "dex" && !dexVenueEnabled(ev.data?.dex)) return false;
+  if (ev.category === "governance") {
+    const gt = govTypeKey(ev);
+    if (gt && !govTypeEnabled(gt)) return false;
+  }
+  if (settings.minAda > 0 && ev.category === "transaction") {
+    if (Number(ev.data?.ada || 0) < settings.minAda * 1e6) return false;
+  }
+  return true;
+}
+
+function feedFilterKey() {
+  return JSON.stringify({
+    f: settings.filters,
+    g: settings.govTypes,
+    d: settings.dexVenues,
+    m: settings.minAda,
+  });
+}
+
+/** Newest-first events from the 24h cache that pass the current feed filters. */
+function collectFeedHits() {
+  const hits = [];
+  for (const { ev } of retentionCache.values()) {
+    if (eventPassesFeedFilters(ev)) hits.push(ev);
+  }
+  hits.sort((a, b) => (b.id || 0) - (a.id || 0));
+  return hits;
+}
+
+function syncFeedHitOffset() {
+  feedHitOffset = 0;
+  while (
+    feedHitOffset < feedHitBuffer.length
+    && seenEventIds.has(feedHitBuffer[feedHitOffset].id)
+  ) {
+    feedHitOffset++;
+  }
+  retentionHistoryDone = feedHitOffset >= feedHitBuffer.length;
+}
+
+function ensureFeedHitBuffer(force = false) {
+  const key = feedFilterKey();
+  if (!force && key === feedHitKey && feedHitBuffer.length) {
+    syncFeedHitOffset();
+    return;
+  }
+  feedHitKey = key;
+  feedHitBuffer = collectFeedHits();
+  syncFeedHitOffset();
+}
+
+/**
+ * Render the next FEED_PAGE_SIZE *new* matches from feedHitBuffer into the DOM.
+ * Returns how many cards were added.
+ */
+function renderFeedPage() {
+  const batch = [];
+  while (batch.length < FEED_PAGE_SIZE && feedHitOffset < feedHitBuffer.length) {
+    const ev = feedHitBuffer[feedHitOffset++];
+    if (ev?.id == null || seenEventIds.has(ev.id)) continue;
+    batch.push(ev);
+  }
+  retentionHistoryDone = feedHitOffset >= feedHitBuffer.length;
+  if (!batch.length) return 0;
+  // Buffer is newest-first; historical insert expects oldest→newest.
+  routeHistoricalBatch(batch.slice().reverse());
+  prefetchUnitsFromEvents(batch);
+  applyFilters();
+  return batch.length;
+}
+
+/**
+ * After retention preload or a filter change: refresh the page buffer and, if
+ * the viewport is empty, paint a single page (never dump the whole window).
+ */
+function onFeedFiltersChanged() {
+  if ($("search").value.trim()) return;
+  if (!retentionReady) return;
+  ensureFeedHitBuffer(true);
+  if (!visibleFeedFillsPage() && feedHitOffset < feedHitBuffer.length) {
+    renderFeedPage();
+  }
+}
+
+/** Local text search over the preloaded 24h cache. Returns newest-first matches. */
 function searchRetentionLocal(query) {
   const q = String(query || "").trim().toLowerCase();
   if (!q) return [];
   const hits = [];
   for (const { ev, hay } of retentionCache.values()) {
+    if (!eventPassesFeedFilters(ev)) continue;
     if (hay.includes(q)) hits.push(ev);
   }
   hits.sort((a, b) => (b.id || 0) - (a.id || 0));
@@ -1119,6 +1262,7 @@ function buildCard(ev) {
   card.addEventListener("click", () => openModal(ev));
   enrichAssets(card);
   enrichPools(card);
+  enrichDreps(card);
   return card;
 }
 
@@ -1423,9 +1567,9 @@ function hideSearchPrompts() {
   setSearchMore(false);
 }
 
-/** Pool/asset metadata still resolving - search haystacks may gain tickers shortly. */
+/** Pool/DRep/asset metadata still resolving - search haystacks may gain labels shortly. */
 function enrichmentPending() {
-  return poolWaiters.size > 0;
+  return poolWaiters.size > 0 || drepWaiters.size > 0;
 }
 
 /** Don't declare "no results" until this time (ms) while pool tickers may still land. */
@@ -1570,25 +1714,49 @@ async function extendSearchHistory() {
 function maybeLoadHistory() {
   // Active search pages matches from searchHitBuffer only.
   if ($("search").value.trim()) return;
-  if (searchPriming || searchExtending || historyLoading || historyExhausted || oldestEventId == null) return;
+  if (searchPriming || searchExtending || historyLoading || oldestEventId == null) return;
   if (!nearHistoryEnd()) return;
+  // Nothing left in the 24h page buffer and disk history is exhausted.
+  if (retentionHistoryDone && historyExhausted) return;
   loadHistory();
 }
 
-/** Fetch one older page and route it. Returns the events array (maybe empty). */
-async function fetchAndRouteHistoryPage() {
-  if (historyLoading || historyExhausted || oldestEventId == null) return [];
+/** One older page from the in-memory 24h buffer (or disk once that is exhausted). */
+async function loadHistory() {
+  if (searchPriming) return;
+  if ($("search").value.trim()) return;
+
+  if (!retentionReady) {
+    startRetentionPreload();
+    setHistoryLoading(true);
+    await whenRetentionReady();
+    if ($("search").value.trim()) {
+      setHistoryLoading(false, historyExhausted);
+      return;
+    }
+  }
+
   historyLoading = true;
-  if (!searchPriming) setHistoryLoading(true);
+  setHistoryLoading(true);
+
+  ensureFeedHitBuffer();
+  if (feedHitOffset < feedHitBuffer.length) {
+    renderFeedPage();
+    historyLoading = false;
+    setHistoryLoading(false, false);
+    return;
+  }
+
+  // Past the 24h window — fall through to disk history (one page per scroll).
+  retentionHistoryDone = true;
   const ac = new AbortController();
   historyAbort = ac;
-  let events = [];
   try {
     const r = await fetch(`/api/events?before=${oldestEventId}&limit=${HISTORY_PAGE_SIZE}`, {
       signal: ac.signal,
     });
     const m = await r.json();
-    events = m.events || [];
+    const events = m.events || [];
     if (m.exhausted || !events.length) historyExhausted = true;
     if (events.length) {
       routeHistoricalBatch(events);
@@ -1596,35 +1764,11 @@ async function fetchAndRouteHistoryPage() {
       applyFilters();
     }
   } catch (e) {
-    if (e?.name === "AbortError") {
-      historyLoading = false;
-      if (historyAbort === ac) historyAbort = null;
-      if (!searchPriming) setHistoryLoading(false, historyExhausted);
-      return [];
-    }
-    /* history is best-effort */
+    if (e?.name !== "AbortError") { /* best-effort */ }
   }
   if (historyAbort === ac) historyAbort = null;
   historyLoading = false;
-  if (!searchPriming) setHistoryLoading(false, historyExhausted);
-  return events;
-}
-
-async function loadHistory() {
-  if (searchPriming) return;
-  const q = $("search").value.trim();
-  const batch = await fetchAndRouteHistoryPage();
-  if (q && batch.length) {
-    searchScanned += batch.length;
-    updateSearchEmptyPrompt();
-  }
-  if (historyExhausted || !nearHistoryEnd()) return;
-  // Under an active search the filtered feed often stays short, so nearHistoryEnd()
-  // is almost always true - a microtask chain would re-scan the whole JSONL
-  // (~1.5s/page) forever. Only auto-chain when unfiltered; search uses scroll
-  // (one page per gesture) or the explicit "Load more history" button.
-  if (q) return;
-  queueMicrotask(() => maybeLoadHistory());
+  setHistoryLoading(false, historyExhausted);
 }
 
 function routeSearchHits(events) {
@@ -1705,7 +1849,7 @@ function pinHistoryLoader() {
   if (el && el.parentElement === feed) feed.appendChild(el);
 }
 
-function setHistoryLoading(on, exhausted = false) {
+function setHistoryLoading(on, exhausted = false, label = null) {
   let el = $("history-loader");
   if (!el) {
     el = document.createElement("div");
@@ -1716,7 +1860,8 @@ function setHistoryLoading(on, exhausted = false) {
   // Always pin to the bottom of the feed — history loads downward.
   feed.appendChild(el);
   if (on) {
-    el.innerHTML = `<span class="hist-spin" aria-hidden="true"></span><span class="hist-t">Loading older events…</span>`;
+    const text = label || "Loading older events…";
+    el.innerHTML = `<span class="hist-spin" aria-hidden="true"></span><span class="hist-t">${esc(text)}</span>`;
     el.classList.add("show");
     el.dataset.state = "loading";
   } else if (exhausted) {
@@ -1998,6 +2143,8 @@ function paintAsset(chip, meta) {
 
 const poolMeta = new Map(Object.entries(store.get("co_pools_v1", {})));
 const poolWaiters = new Map(); // poolId → elements waiting on in-flight fetch
+const drepMeta = new Map(Object.entries(store.get("co_dreps_v1", {})));
+const drepWaiters = new Map(); // drepId → elements waiting on in-flight fetch
 
 function persistPoolCache() {
   const obj = {};
@@ -2068,6 +2215,98 @@ function paintPool(el, meta) {
   el.classList.remove("hash");
   el.classList.add("pool-ticker");
   el.title = [name && name !== ticker ? name : null, poolId].filter(Boolean).join(" · ");
+}
+
+function persistDrepCache() {
+  const obj = {};
+  let i = 0;
+  for (const [k, v] of drepMeta) {
+    if (!v || !v.name) continue;
+    if (i++ > 700) break;
+    obj[k] = { name: v.name || null };
+  }
+  store.set("co_dreps_v1", obj);
+}
+
+/** Hydrate drepMeta from the server's durable cache, then repaint. */
+async function loadDrepMeta() {
+  try {
+    const r = await fetch("/api/dreps");
+    if (!r.ok) return;
+    const m = await r.json();
+    let n = 0;
+    for (const [id, meta] of Object.entries(m || {})) {
+      if (!meta || typeof meta !== "object" || !meta.name) continue;
+      drepMeta.set(id, { name: meta.name });
+      n++;
+    }
+    if (n) persistDrepCache();
+    document.querySelectorAll("[data-drep]").forEach((el) => {
+      const id = el.dataset.drep;
+      const cached = drepMeta.get(id);
+      if (cached?.name) paintDrep(el, cached);
+    });
+  } catch {
+    /* leave truncated ids */
+  }
+}
+
+function enrichDreps(root) {
+  root.querySelectorAll("[data-drep]").forEach((el) => {
+    const id = el.dataset.drep;
+    if (!id || !isLookupDrepId(id)) return;
+    const cached = drepMeta.get(id);
+    if (cached && cached.name) {
+      paintDrep(el, cached);
+      return;
+    }
+    if (drepWaiters.has(id)) {
+      drepWaiters.get(id).push(el);
+      return;
+    }
+    drepWaiters.set(id, [el]);
+    fetch(`/api/drep/${encodeURIComponent(id)}`)
+      .then((r) => r.json())
+      .then((meta) => {
+        if (meta && meta.name) {
+          drepMeta.set(id, meta);
+          persistDrepCache();
+        } else {
+          drepMeta.set(id, { drep: id }); // negative cache - keep id visible
+        }
+        const waiters = drepWaiters.get(id) || [];
+        drepWaiters.delete(id);
+        const all = new Set([
+          ...waiters,
+          ...document.querySelectorAll(`[data-drep="${CSS.escape(id)}"]`),
+        ]);
+        all.forEach((e) => paintDrep(e, drepMeta.get(id)));
+      })
+      .catch(() => {
+        drepWaiters.delete(id);
+        if ($("search").value.trim()) scheduleFilterRefresh();
+      });
+  });
+}
+
+function paintDrep(el, meta) {
+  if (!meta) return;
+  const name = typeof meta.name === "string" && meta.name ? meta.name : "";
+  const drepId = el.dataset.drep || "";
+  const card = el.closest(".card");
+  if (card) {
+    appendCardSearch(card, drepId, name);
+    const eid = Number(card.dataset.eid);
+    if (Number.isFinite(eid) && retentionCache.has(eid)) {
+      retentionIndex(retentionCache.get(eid).ev);
+    }
+    if ($("search").value.trim()) scheduleFilterRefresh();
+  }
+  if (!name) return; // leave truncated drep id as fallback
+  el.textContent = name;
+  el.classList.remove("hash");
+  el.classList.add("drep-name");
+  el.title = drepId;
 }
 
 /* ── Modal ────────────────────────────────────────────────────────────── */
@@ -2298,6 +2537,10 @@ function connect() {
         oldestEventId = null;
         historyExhausted = false;
         historyLoading = false;
+        retentionHistoryDone = false;
+        feedHitBuffer = [];
+        feedHitOffset = 0;
+        feedHitKey = "";
         searchPrimeGen++;
         if (historyAbort) {
           try { historyAbort.abort(); } catch { /* ignore */ }
@@ -2419,4 +2662,5 @@ $("trending-track")?.addEventListener("click", (e) => {
 buildToolbar();
 applyFilters();
 loadRegistryMeta();
+loadDrepMeta();
 connect();

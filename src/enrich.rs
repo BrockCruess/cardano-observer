@@ -1,16 +1,18 @@
-//! Metadata enrichment: in-memory Cardano token registry (CIP-26) and stake
-//! pool ticker cache loaded from disk at boot. Live Blockfrost calls only run
-//! for assets/pools missing from those durable caches.
+//! Metadata enrichment: in-memory Cardano token registry (CIP-26), stake pool
+//! ticker cache, and DRep name cache loaded from disk at boot. Live Blockfrost
+//! calls only run for assets/pools/dreps missing from those durable caches.
+//! Pool and DRep caches are also re-scraped daily at 00:00 UTC.
 
 use crate::config::Config;
+use crate::dreps::{self, DrepCache, DrepEntry};
 use crate::pools::{PoolCache, PoolEntry};
 use crate::registry::TokenRegistry;
 use crate::trending::KeywordMeta;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct Enricher {
     http: reqwest::Client,
@@ -21,6 +23,8 @@ pub struct Enricher {
     registry: TokenRegistry,
     /// Durable pool ticker cache - pool1… → ticker/name.
     pool_cache: PoolCache,
+    /// Durable DRep name cache - drep1… → CIP-119 givenName.
+    drep_cache: DrepCache,
     assets: Mutex<HashMap<String, Value>>,
 }
 
@@ -65,6 +69,15 @@ impl Enricher {
             }
         };
 
+        let drep_cache = DrepCache::load(
+            &http,
+            cache_dir,
+            config.blockfrost_url.as_deref(),
+            config.blockfrost_project_id.as_deref(),
+            config.drep_cache_refresh,
+        )
+        .await;
+
         Enricher {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
@@ -75,6 +88,7 @@ impl Enricher {
             registry_url: config.token_registry_url.clone(),
             registry,
             pool_cache,
+            drep_cache,
             assets: Mutex::new(HashMap::new()),
         }
     }
@@ -85,6 +99,48 @@ impl Enricher {
 
     pub fn pool_cache_len(&self) -> usize {
         self.pool_cache.len()
+    }
+
+    pub fn drep_cache_len(&self) -> usize {
+        self.drep_cache.len()
+    }
+
+    /// Re-scrape pool + DRep registration metadata from Blockfrost every day
+    /// at 00:00 UTC so ticker/name changes land without a restart.
+    pub async fn refresh_meta_caches_loop(self: Arc<Self>) {
+        if self.blockfrost_url.is_none() {
+            tracing::info!("pool/drep daily refresh skipped (no BLOCKFROST_URL)");
+            return;
+        }
+        loop {
+            let wait = duration_until_next_utc_midnight();
+            tracing::info!(
+                "next pool/drep cache refresh in ~{} (00:00 UTC)",
+                humantime::format_duration(wait)
+            );
+            tokio::time::sleep(wait).await;
+            self.refresh_pool_and_drep_caches().await;
+            // Stay past midnight so the next wait targets tomorrow.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    async fn refresh_pool_and_drep_caches(&self) {
+        let Some(base) = self.blockfrost_url.as_deref() else {
+            return;
+        };
+        let pid = self.project_id.as_deref();
+        tracing::info!("refreshing pool and drep caches from Blockfrost…");
+        match self.pool_cache.refresh(&self.http, base, pid).await {
+            Ok(0) => tracing::warn!("pool cache refresh returned 0 entries - keeping previous"),
+            Ok(n) => tracing::info!("pool cache refreshed ({n} pools)"),
+            Err(e) => tracing::warn!("pool cache refresh failed: {e:#}"),
+        }
+        match self.drep_cache.refresh(&self.http, base, pid).await {
+            Ok(0) => tracing::warn!("drep cache refresh returned 0 names - keeping previous"),
+            Ok(n) => tracing::info!("drep cache refreshed ({n} dreps)"),
+            Err(e) => tracing::warn!("drep cache refresh failed: {e:#}"),
+        }
     }
 
     /// Sync CIP-26 ticker/name for trending keyword extraction.
@@ -100,6 +156,47 @@ impl Enricher {
     /// an event so the UI can format quantities without a per-token round-trip.
     pub fn stamp_event_assets(&self, event: &mut crate::model::ChainEvent) {
         stamp_json_assets(&mut event.data, &self.registry);
+    }
+
+    /// Stamp CIP-119 givenNames onto DRep id fields when the durable cache has them.
+    pub fn stamp_event_dreps(&self, event: &mut crate::model::ChainEvent) {
+        let Some(obj) = event.data.as_object_mut() else {
+            return;
+        };
+        for (id_key, name_key) in [
+            ("drep", "drepName"),
+            ("fromDrep", "fromDrepName"),
+            ("voter", "voterName"),
+        ] {
+            let Some(id) = obj.get(id_key).and_then(Value::as_str).map(str::to_string) else {
+                continue;
+            };
+            if !dreps::is_lookup_drep_id(&id) {
+                continue;
+            }
+            if let Some(name) = self
+                .drep_cache
+                .get(&id)
+                .and_then(|e| e.name)
+                .filter(|s| !s.is_empty())
+            {
+                obj.insert(name_key.into(), json!(name));
+            }
+        }
+    }
+
+    /// Compact drep-id → name map for the browser (loaded once per page).
+    pub fn dreps_json(&self) -> Value {
+        self.drep_cache.to_names_json()
+    }
+
+    /// Fill the durable cache from registration/update anchor URLs in events.
+    pub async fn warm_dreps_from_events(&self, events: &[crate::model::ChainEvent]) {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .build()
+            .unwrap_or_else(|_| self.http.clone());
+        dreps::warm_from_events(&http, &self.drep_cache, events).await;
     }
 
     /// Drop swap/order DEX events whose tokens are not in CIP-26 (no liquidity
@@ -283,6 +380,40 @@ impl Enricher {
         meta
     }
 
+    /// DRep CIP-119 givenName (and optional image / metadata url).
+    pub async fn drep(&self, drep_id: &str) -> Value {
+        let id = drep_id.trim();
+        if !dreps::is_lookup_drep_id(id) {
+            return json!({ "error": "bad drep id" });
+        }
+        if let Some(hit) = self.drep_cache.get(id) {
+            return hit.to_json(id);
+        }
+        let meta = self
+            .drep_from_blockfrost(id)
+            .await
+            .unwrap_or_else(|| json!({ "drep": id }));
+        let entry = DrepEntry {
+            name: meta
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            url: meta
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            image: meta
+                .get("image")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        };
+        self.drep_cache.remember(id, entry);
+        meta
+    }
+
 }
 
 impl KeywordMeta for Enricher {
@@ -307,6 +438,26 @@ impl Enricher {
             "name": name,
             "homepage": v.get("homepage").and_then(Value::as_str),
         }))
+    }
+
+    async fn drep_from_blockfrost(&self, drep_id: &str) -> Option<Value> {
+        let req = self.bf(&format!("/governance/dreps/{drep_id}/metadata"))?;
+        let v: Value = tokio::time::timeout(Duration::from_secs(8), req.send())
+            .await
+            .ok()?
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        if let Some(entry) = DrepEntry::from_blockfrost_meta(&v) {
+            return Some(entry.to_json(drep_id));
+        }
+        // If BF only returned the anchor URL, fetch CIP-119 ourselves.
+        let url = v.get("url").and_then(Value::as_str)?;
+        let entry = dreps::fetch_anchor_entry(&self.http, url).await?;
+        Some(entry.to_json(drep_id))
     }
 
     /// Batch account delegation snapshot (pool + drep) for stake addresses.
@@ -460,6 +611,20 @@ fn stamp_json_assets(v: &mut Value, reg: &TokenRegistry) {
         }
         _ => {}
     }
+}
+
+fn duration_until_next_utc_midnight() -> Duration {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let secs_into_day = now % 86_400;
+    let wait = if secs_into_day == 0 {
+        86_400
+    } else {
+        86_400 - secs_into_day
+    };
+    Duration::from_secs(wait)
 }
 
 /// Prefer fields already present on `base`; fill gaps from `extra`.

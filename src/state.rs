@@ -190,6 +190,7 @@ impl AppState {
         let meta = self.meta_ref();
         if let Some(e) = meta.as_ref() {
             e.stamp_event_assets(&mut event);
+            e.stamp_event_dreps(&mut event);
             if !e.keep_dex_event(&event) {
                 return;
             }
@@ -228,6 +229,15 @@ impl AppState {
         let dropped = before - buf.len();
         if dropped > 0 {
             tracing::info!("dropped {dropped} DEX events with tokens outside CIP-26");
+        }
+    }
+
+    /// Apply cached DRep givenNames onto every buffered event (boot).
+    pub fn stamp_buffered_dreps(&self) {
+        let Some(enricher) = self.meta_ref() else { return };
+        let mut buf = self.events.lock().unwrap();
+        for ev in buf.iter_mut() {
+            enricher.stamp_event_dreps(ev);
         }
     }
 

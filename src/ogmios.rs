@@ -189,6 +189,8 @@ async fn handle_forward(
 
     // Cache-miss from→to: one short batched Blockfrost account lookup.
     deleg::fill_missing_froms(enricher, &mut parsed.events).await;
+    // Learn DRep names from any registration/update anchors in this block.
+    enricher.warm_dreps_from_events(&parsed.events).await;
 
     state.counters.blocks.fetch_add(1, Ordering::Relaxed);
     state.counters.txs.fetch_add(parsed.txs.len() as u64, Ordering::Relaxed);

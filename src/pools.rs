@@ -1,8 +1,10 @@
 //! Durable stake-pool metadata cache (ticker / name / homepage).
 //!
 //! First boot scrapes Blockfrost `/pools` (+ per-pool `/metadata`) into
-//! `pools.json`. Later boots always load that file. Individual misses are
-//! fetched live once and appended - we never re-pull a pool already cached.
+//! `pools.json`. Later boots always load that file. While the process is
+//! running, a daily UTC-midnight job re-scrapes and overwrites the cache so
+//! ticker/name changes show up without a restart. Individual misses are
+//! fetched live once and appended.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -107,6 +109,37 @@ impl PoolCache {
         if let Some(path) = &self.path {
             let _ = save_cache(path, &map);
         }
+    }
+
+    /// Replace the in-memory + on-disk cache with a fresh Blockfrost scrape.
+    pub async fn refresh(
+        &self,
+        http: &reqwest::Client,
+        blockfrost_url: &str,
+        project_id: Option<&str>,
+    ) -> Result<usize> {
+        let scrape_http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(8))
+            .build()
+            .unwrap_or_else(|_| http.clone());
+        let map = scrape_pools(&scrape_http, blockfrost_url, project_id)
+            .await
+            .context("Blockfrost pool scrape failed")?;
+        let n = map.len();
+        if n == 0 {
+            return Ok(0);
+        }
+        {
+            let mut guard = self.by_id.lock().unwrap();
+            *guard = map;
+            if let Some(path) = &self.path {
+                if let Err(e) = save_cache(path, &guard) {
+                    tracing::warn!("could not write pool cache: {e:#}");
+                }
+            }
+        }
+        Ok(n)
     }
 
     /// Load `pools.json` if present; otherwise scrape Blockfrost once.

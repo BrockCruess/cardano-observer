@@ -811,6 +811,17 @@ header {
   white-space: nowrap;
 }
 
+.drep-name {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  background: color-mix(in srgb, var(--c-governance) 18%, var(--surface-2));
+  padding: 1px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
 .badge {
   font-size: 11px;
   font-weight: 700;

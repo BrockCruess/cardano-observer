@@ -2,6 +2,7 @@ mod config;
 mod demo;
 mod deleg;
 mod dex;
+mod dreps;
 mod enrich;
 mod model;
 mod ogmios;
@@ -88,6 +89,14 @@ async fn main() -> anyhow::Result<()> {
     state.set_keyword_meta(enricher.clone());
     // Restored JSONL events predate registry stamping — fill decimals now.
     state.stamp_buffered_assets();
+    // Learn DRep names from registration anchors in the retention window, then stamp.
+    {
+        let buf = state.events.lock().unwrap();
+        let snap: Vec<_> = buf.iter().cloned().collect();
+        drop(buf);
+        enricher.warm_dreps_from_events(&snap).await;
+    }
+    state.stamp_buffered_dreps();
     // Seed trending from the in-memory retention window (already loaded above).
     {
         let buf = state.events.lock().unwrap();
@@ -101,10 +110,12 @@ async fn main() -> anyhow::Result<()> {
         state.seed_trending(snap);
     }
     tracing::info!(
-        "token registry ready ({} subjects); pool cache ready ({} pools)",
+        "token registry ready ({} subjects); pool cache ready ({} pools); drep cache ready ({} dreps)",
         enricher.registry_len(),
-        enricher.pool_cache_len()
+        enricher.pool_cache_len(),
+        enricher.drep_cache_len()
     );
+    tokio::spawn(enricher.clone().refresh_meta_caches_loop());
     let deleg = Arc::new(deleg::DelegationTracker::new());
     // Seed from restored buffer so re-delegations show from→to immediately.
     {

@@ -36,6 +36,8 @@ pub fn router(ctx: ServerCtx) -> Router {
         .route("/api/asset/{unit}", get(api_asset))
         .route("/api/registry", get(api_registry))
         .route("/api/pool/{id}", get(api_pool))
+        .route("/api/drep/{id}", get(api_drep))
+        .route("/api/dreps", get(api_dreps))
         .route("/api/stats", get(api_stats))
         .route("/api/trending", get(api_trending))
         .route("/healthz", get(|| async { "ok" }))
@@ -172,6 +174,15 @@ async fn api_registry(State(ctx): State<ServerCtx>) -> Response {
 
 async fn api_pool(State(ctx): State<ServerCtx>, Path(id): Path<String>) -> Response {
     Json(ctx.enricher.pool(&id).await).into_response()
+}
+
+async fn api_drep(State(ctx): State<ServerCtx>, Path(id): Path<String>) -> Response {
+    Json(ctx.enricher.drep(&id).await).into_response()
+}
+
+/// Full in-memory DRep name map for browser-side labels (no per-id round-trips).
+async fn api_dreps(State(ctx): State<ServerCtx>) -> Response {
+    Json(ctx.enricher.dreps_json()).into_response()
 }
 
 async fn api_stats(State(ctx): State<ServerCtx>) -> Response {

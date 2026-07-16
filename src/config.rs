@@ -13,6 +13,8 @@ pub struct Config {
     pub token_registry_refresh: bool,
     /// Force re-scrape of Blockfrost pool list even if pools.json exists.
     pub pool_cache_refresh: bool,
+    /// Force re-scrape of Blockfrost DRep list even if dreps.json exists.
+    pub drep_cache_refresh: bool,
     pub network: Network,
     pub bind: String,
     /// How many hours of events to keep in the in-memory ring (trending + fast search).
@@ -85,6 +87,10 @@ impl Config {
             ),
             pool_cache_refresh: matches!(
                 non_empty("POOL_CACHE_REFRESH").as_deref(),
+                Some("true") | Some("1") | Some("yes")
+            ),
+            drep_cache_refresh: matches!(
+                non_empty("DREP_CACHE_REFRESH").as_deref(),
                 Some("true") | Some("1") | Some("yes")
             ),
             network,
