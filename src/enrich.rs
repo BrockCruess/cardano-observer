@@ -1,10 +1,11 @@
 //! Metadata enrichment: in-memory Cardano token registry (CIP-26), stake pool
 //! ticker cache, and DRep name cache loaded from disk at boot. Pool/DRep
 //! Blockfrost scrapes run in the background when caches are empty (or refresh
-//! flags are set); live lookups only run for assets/pools/dreps missing from
-//! those durable caches. Pool and DRep caches are also re-scraped daily at
-//! 00:00 UTC. Governance action titles (CIP-108) are fetched once on first
-//! sight and stored in `gov-actions.json`.
+//! flags are set); live Blockfrost lookups only run for pools/dreps missing from
+//! those durable caches (assets use CIP-26 only — unknowns are local stubs).
+//! Token registry, pool, and DRep caches are re-scraped daily at 00:00 UTC.
+//! Governance action titles (CIP-108) are fetched once on first sight and
+//! stored in `gov-actions.json`.
 
 use crate::config::Config;
 use crate::dreps::{self, DrepCache, DrepEntry};
@@ -23,7 +24,6 @@ pub struct Enricher {
     blockfrost_url: Option<String>,
     project_id: Option<String>,
     ogmios_url: String,
-    registry_url: String,
     /// Full CIP-26 registry - subject → name/ticker/decimals.
     registry: TokenRegistry,
     /// Durable pool ticker cache - pool1… → ticker/name.
@@ -55,8 +55,8 @@ impl Enricher {
         {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("token registry load failed ({e:#}) - live lookups only");
-                TokenRegistry::empty()
+                tracing::warn!("token registry load failed ({e:#}) - CIP-26 stamps unavailable");
+                TokenRegistry::empty(cache_dir, &config.token_registry_zip)
             }
         };
 
@@ -73,7 +73,6 @@ impl Enricher {
             blockfrost_url: config.blockfrost_url.clone(),
             project_id: config.blockfrost_project_id.clone(),
             ogmios_url: config.ogmios_url.clone(),
-            registry_url: config.token_registry_url.clone(),
             registry,
             pool_cache,
             drep_cache,
@@ -157,23 +156,34 @@ impl Enricher {
         }
     }
 
-    /// Re-scrape pool + DRep registration metadata from Blockfrost every day
-    /// at 00:00 UTC so ticker/name changes land without a restart.
+    /// Re-download CIP-26 token registry + re-scrape pool/DRep metadata every
+    /// day at 00:00 UTC so new registrations land without a restart.
     pub async fn refresh_meta_caches_loop(self: Arc<Self>) {
-        if self.blockfrost_url.is_none() {
-            tracing::info!("pool/drep daily refresh skipped (no BLOCKFROST_URL)");
-            return;
-        }
         loop {
             let wait = duration_until_next_utc_midnight();
             tracing::info!(
-                "next pool/drep cache refresh in ~{} (00:00 UTC)",
+                "next meta cache refresh in ~{} (00:00 UTC)",
                 humantime::format_duration(wait)
             );
             tokio::time::sleep(wait).await;
-            self.refresh_pool_and_drep_caches().await;
+            self.refresh_token_registry().await;
+            if self.blockfrost_url.is_some() {
+                self.refresh_pool_and_drep_caches().await;
+            }
             // Stay past midnight so the next wait targets tomorrow.
             tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    async fn refresh_token_registry(&self) {
+        tracing::info!("refreshing CIP-26 token registry…");
+        match self.registry.refresh(&self.http).await {
+            Ok(n) => {
+                // Drop unregistered stubs so newly registered tokens resolve from CIP-26.
+                self.assets.lock().unwrap().clear();
+                tracing::info!("token registry refreshed ({n} subjects)");
+            }
+            Err(e) => tracing::warn!("token registry refresh failed: {e:#}"),
         }
     }
 
@@ -385,30 +395,29 @@ impl Enricher {
     }
 
     /// Asset metadata for a unit (policy hex + asset-name hex).
+    ///
+    /// CIP-26 registry only — we do **not** hit Blockfrost for unknowns. Tokens
+    /// missing from the cache are treated as unregistered (NFT / junk / no
+    /// decimals): return a local stub so the UI can still show a decoded name.
     pub async fn asset(&self, unit: &str) -> Value {
         if !unit.chars().all(|c| c.is_ascii_hexdigit()) || unit.len() < 56 || unit.len() > 120 {
             return json!({ "error": "bad unit" });
         }
-        // Prefer the in-memory CIP-26 registry - no network round-trip.
         if let Some(hit) = self.registry.to_json(unit) {
             return hit;
         }
         if let Some(hit) = self.assets.lock().unwrap().get(unit) {
             return hit.clone();
         }
-        // Unregistered / unknown tokens: Blockfrost, then registry HTTP.
-        let mut meta = self.asset_from_blockfrost(unit).await;
-        if !meta_has_decimals(&meta) {
-            if let Some(reg) = self.asset_from_registry_http(unit).await {
-                meta = Some(merge_asset_meta(meta, reg));
-            }
-        }
-        // Still unknown after registry + Blockfrost + HTTP: CIP-26 default is 0.
-        let mut meta = meta.unwrap_or_else(|| json!({ "unit": unit }));
-        if !meta_has_decimals(&Some(meta.clone())) {
+        let mut meta = json!({
+            "unit": unit,
+            "decimals": 0,
+            "decimalsDefaulted": true,
+            "unregistered": true,
+        });
+        if let Some(name) = decode_asset_name(unit) {
             if let Some(obj) = meta.as_object_mut() {
-                obj.insert("decimals".into(), json!(0));
-                obj.insert("decimalsDefaulted".into(), json!(true));
+                obj.insert("name".into(), json!(name));
             }
         }
         let mut cache = self.assets.lock().unwrap();
@@ -417,53 +426,6 @@ impl Enricher {
         }
         cache.insert(unit.to_string(), meta.clone());
         meta
-    }
-
-    async fn asset_from_blockfrost(&self, unit: &str) -> Option<Value> {
-        let req = self.bf(&format!("/assets/{unit}"))?;
-        let v: Value = tokio::time::timeout(Duration::from_millis(1500), req.send())
-            .await
-            .ok()?
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
-            .await
-            .ok()?;
-        let m = v.get("metadata").filter(|m| !m.is_null());
-        let onchain = v.get("onchain_metadata").filter(|m| !m.is_null());
-        Some(json!({
-            "unit": unit,
-            "name": m.and_then(|m| m.get("name")).or_else(|| onchain.and_then(|m| m.get("name"))),
-            "ticker": m.and_then(|m| m.get("ticker")),
-            "decimals": m.and_then(|m| m.get("decimals")).filter(|d| !d.is_null()),
-            "logo": m.and_then(|m| m.get("logo")),
-            "image": onchain.and_then(|m| m.get("image")),
-            "fingerprint": v.get("fingerprint"),
-            "quantity": v.get("quantity"),
-            "mintTxCount": v.get("mint_or_burn_count"),
-        }))
-    }
-
-    async fn asset_from_registry_http(&self, unit: &str) -> Option<Value> {
-        let url = format!("{}/metadata/{unit}", self.registry_url);
-        let v: Value = tokio::time::timeout(Duration::from_millis(1500), self.http.get(url).send())
-            .await
-            .ok()?
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
-            .await
-            .ok()?;
-        let field = |k: &str| v.get(k).and_then(|f| f.get("value")).cloned();
-        Some(json!({
-            "unit": unit,
-            "name": field("name"),
-            "ticker": field("ticker"),
-            "decimals": field("decimals"),
-            "logo": field("logo"),
-        }))
     }
 
     /// Stake pool ticker/name/homepage.
@@ -712,13 +674,6 @@ impl Enricher {
     }
 }
 
-fn meta_has_decimals(meta: &Option<Value>) -> bool {
-    meta.as_ref()
-        .and_then(|m| m.get("decimals"))
-        .map(|d| !d.is_null())
-        .unwrap_or(false)
-}
-
 /// Walk event JSON and attach registry decimals/ticker onto asset-like objects.
 fn stamp_json_assets(v: &mut Value, reg: &TokenRegistry) {
     match v {
@@ -743,8 +698,7 @@ fn stamp_json_assets(v: &mut Value, reg: &TokenRegistry) {
                             }
                         }
                     } else if !map.contains_key("decimals") {
-                        // Not in CIP-26 (e.g. SONGMARKETCAP): Cardano default is 0.
-                        // Blockfrost may refine later via /api/asset.
+                        // Not in CIP-26 (NFT / unregistered): Cardano default is 0.
                         map.insert("decimals".into(), json!(0));
                     }
                 }
@@ -776,25 +730,25 @@ fn duration_until_next_utc_midnight() -> Duration {
     Duration::from_secs(wait)
 }
 
-/// Prefer fields already present on `base`; fill gaps from `extra`.
-fn merge_asset_meta(base: Option<Value>, extra: Value) -> Value {
-    let Some(mut base) = base else {
-        return extra;
-    };
-    let obj = base.as_object_mut();
-    let Some(obj) = obj else {
-        return extra;
-    };
-    if let Some(ex) = extra.as_object() {
-        for (k, v) in ex {
-            let empty = match obj.get(k) {
-                None => true,
-                Some(cur) => cur.is_null(),
-            };
-            if empty && !v.is_null() {
-                obj.insert(k.clone(), v.clone());
-            }
-        }
+/// Decode the asset-name hex suffix (after 56-char policy id) as UTF-8 when printable.
+fn decode_asset_name(unit: &str) -> Option<String> {
+    if unit.len() <= 56 {
+        return None;
     }
-    base
+    let name_hex = &unit[56..];
+    if name_hex.is_empty() || name_hex.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(name_hex.len() / 2);
+    let mut chars = name_hex.chars();
+    while let (Some(a), Some(b)) = (chars.next(), chars.next()) {
+        let hi = a.to_digit(16)?;
+        let lo = b.to_digit(16)?;
+        bytes.push(((hi << 4) | lo) as u8);
+    }
+    let s = String::from_utf8(bytes).ok()?;
+    if s.is_empty() || !s.chars().all(|c| !c.is_control()) {
+        return None;
+    }
+    Some(s)
 }

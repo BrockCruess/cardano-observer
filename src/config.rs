@@ -5,7 +5,6 @@ pub struct Config {
     pub ogmios_url: String,
     pub blockfrost_url: Option<String>,
     pub blockfrost_project_id: Option<String>,
-    pub token_registry_url: String,
     /// GitHub zip (or mirror) of the CIP-26 mappings tree - fetched only when
     /// the on-disk cache is missing.
     pub token_registry_zip: String,
@@ -75,9 +74,6 @@ impl Config {
             ogmios_url: non_empty("OGMIOS_URL").unwrap_or_else(|| "ws://127.0.0.1:1337".into()),
             blockfrost_url: non_empty("BLOCKFROST_URL").map(|u| u.trim_end_matches('/').to_string()),
             blockfrost_project_id: non_empty("BLOCKFROST_PROJECT_ID"),
-            token_registry_url: non_empty("TOKEN_REGISTRY_URL")
-                .map(|u| u.trim_end_matches('/').to_string())
-                .unwrap_or_else(|| "https://tokens.cardano.org".into()),
             token_registry_zip: non_empty("TOKEN_REGISTRY_ZIP").unwrap_or_else(|| {
                 crate::registry::DEFAULT_REGISTRY_ZIP.to_string()
             }),

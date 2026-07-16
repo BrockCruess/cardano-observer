@@ -2,9 +2,9 @@
 //!
 //! On first run, downloads the official GitHub mappings zip, strips it to
 //! subject → {name, ticker, decimals} (no logos), and writes
-//! `token-registry.json`. Later starts always load that file - registry
-//! entries are append-only / immutable, so we never re-fetch unless the
-//! cache is missing or `TOKEN_REGISTRY_REFRESH=1`.
+//! `token-registry.json`. Later starts load that file. A daily UTC-midnight
+//! job (and `TOKEN_REGISTRY_REFRESH=1`) re-downloads the zip so newly
+//! registered tokens land without a restart.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
 use zip::ZipArchive;
 
 /// Default zip of https://github.com/cardano-foundation/cardano-token-registry
@@ -32,29 +34,31 @@ pub struct RegistryEntry {
 }
 
 pub struct TokenRegistry {
-    by_subject: HashMap<String, RegistryEntry>,
+    by_subject: Mutex<HashMap<String, RegistryEntry>>,
+    path: Option<PathBuf>,
+    zip_url: String,
 }
 
 impl TokenRegistry {
-    pub fn empty() -> Self {
+    pub fn empty(cache_dir: Option<&Path>, zip_url: &str) -> Self {
+        let path = cache_dir.map(|d| d.join(SLIM_CACHE_FILE));
         TokenRegistry {
-            by_subject: HashMap::new(),
+            by_subject: Mutex::new(HashMap::new()),
+            path,
+            zip_url: zip_url.to_string(),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.by_subject.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_subject.is_empty()
+        self.by_subject.lock().unwrap().len()
     }
 
     /// Look up a unit (policy‖assetName hex). Also tries CIP-68 prefix variants.
-    pub fn get(&self, unit: &str) -> Option<&RegistryEntry> {
+    pub fn get(&self, unit: &str) -> Option<RegistryEntry> {
+        let map = self.by_subject.lock().unwrap();
         for key in lookup_keys(unit) {
-            if let Some(hit) = self.by_subject.get(&key) {
-                return Some(hit);
+            if let Some(hit) = map.get(&key) {
+                return Some(hit.clone());
             }
         }
         None
@@ -74,8 +78,9 @@ impl TokenRegistry {
 
     /// Browser bulk hydrate: subject → {decimals, ticker, name} (only useful rows).
     pub fn to_assets_json(&self) -> Value {
+        let map = self.by_subject.lock().unwrap();
         let mut out = serde_json::Map::new();
-        for (subject, e) in &self.by_subject {
+        for (subject, e) in map.iter() {
             if e.decimals.is_none() && e.ticker.is_none() && e.name.is_none() {
                 continue;
             }
@@ -106,62 +111,111 @@ impl TokenRegistry {
 
         if !force_refresh {
             match load_slim_cache(&path) {
-                Ok(reg) if !reg.is_empty() => {
+                Ok(map) if !map.is_empty() => {
                     tracing::info!(
                         "token registry: loaded {} entries from {}",
-                        reg.len(),
+                        map.len(),
                         path.display()
                     );
-                    return Ok(reg);
+                    return Ok(TokenRegistry {
+                        by_subject: Mutex::new(map),
+                        path: Some(path),
+                        zip_url: zip_url.to_string(),
+                    });
                 }
                 Ok(_) => tracing::warn!("token registry cache empty - downloading"),
                 Err(_) if path.exists() => {
                     tracing::warn!("token registry cache unreadable - downloading");
                 }
                 Err(_) => {
-                    tracing::info!("token registry: no cache at {} - downloading once", path.display());
+                    tracing::info!(
+                        "token registry: no cache at {} - downloading once",
+                        path.display()
+                    );
                 }
             }
         } else {
             tracing::info!("token registry: TOKEN_REGISTRY_REFRESH set - re-downloading");
         }
 
-        tracing::info!("token registry: downloading {zip_url}");
-        fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-        let zip_path = dir.join("token-registry.zip");
-
-        let mut resp = http
-            .get(zip_url)
-            .send()
-            .await
-            .context("download token registry zip")?
-            .error_for_status()
-            .context("token registry zip HTTP error")?;
-        {
-            use std::io::Write;
-            let mut out = fs::File::create(&zip_path)
-                .with_context(|| format!("create {}", zip_path.display()))?;
-            loop {
-                let Some(chunk) = resp.chunk().await.context("read zip chunk")? else { break };
-                out.write_all(&chunk)?;
-            }
-            out.flush()?;
-        }
-
-        let file = fs::File::open(&zip_path)
-            .with_context(|| format!("open {}", zip_path.display()))?;
-        let reg = parse_registry_zip(file).context("parse token registry zip")?;
-        tracing::info!("token registry: parsed {} entries from zip", reg.len());
-        let _ = fs::remove_file(&zip_path);
-
-        if let Err(e) = save_slim_cache(&path, &reg) {
+        let map = download_and_parse(http, &dir, zip_url).await?;
+        if let Err(e) = save_slim_cache(&path, &map) {
             tracing::warn!("could not write token registry cache: {e:#}");
         } else {
             tracing::info!("token registry: wrote durable cache at {}", path.display());
         }
 
-        Ok(reg)
+        Ok(TokenRegistry {
+            by_subject: Mutex::new(map),
+            path: Some(path),
+            zip_url: zip_url.to_string(),
+        })
     }
+
+    /// Re-download the CIP-26 zip and replace in-memory + on-disk cache.
+    /// Returns the new entry count. Keeps the previous map on empty/failed parse.
+    pub async fn refresh(&self, http: &reqwest::Client) -> Result<usize> {
+        let dir = self
+            .path
+            .as_ref()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| std::env::temp_dir().join("cardano-observer"));
+
+        let dl_http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| http.clone());
+
+        let map = download_and_parse(&dl_http, &dir, &self.zip_url).await?;
+        let n = map.len();
+        if n == 0 {
+            anyhow::bail!("token registry refresh returned 0 entries");
+        }
+        if let Some(path) = &self.path {
+            if let Err(e) = save_slim_cache(path, &map) {
+                tracing::warn!("could not write token registry cache: {e:#}");
+            }
+        }
+        *self.by_subject.lock().unwrap() = map;
+        Ok(n)
+    }
+}
+
+async fn download_and_parse(
+    http: &reqwest::Client,
+    dir: &Path,
+    zip_url: &str,
+) -> Result<HashMap<String, RegistryEntry>> {
+    tracing::info!("token registry: downloading {zip_url}");
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let zip_path = dir.join("token-registry.zip");
+
+    let mut resp = http
+        .get(zip_url)
+        .send()
+        .await
+        .context("download token registry zip")?
+        .error_for_status()
+        .context("token registry zip HTTP error")?;
+    {
+        use std::io::Write;
+        let mut out =
+            fs::File::create(&zip_path).with_context(|| format!("create {}", zip_path.display()))?;
+        loop {
+            let Some(chunk) = resp.chunk().await.context("read zip chunk")? else {
+                break;
+            };
+            out.write_all(&chunk)?;
+        }
+        out.flush()?;
+    }
+
+    let file = fs::File::open(&zip_path).with_context(|| format!("open {}", zip_path.display()))?;
+    let map = parse_registry_zip(file).context("parse token registry zip")?;
+    tracing::info!("token registry: parsed {} entries from zip", map.len());
+    let _ = fs::remove_file(&zip_path);
+    Ok(map)
 }
 
 fn lookup_keys(unit: &str) -> Vec<String> {
@@ -183,22 +237,20 @@ fn lookup_keys(unit: &str) -> Vec<String> {
     keys
 }
 
-fn load_slim_cache(path: &Path) -> Result<TokenRegistry> {
+fn load_slim_cache(path: &Path) -> Result<HashMap<String, RegistryEntry>> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let map: HashMap<String, RegistryEntry> =
-        serde_json::from_str(&text).context("parse slim registry cache")?;
-    Ok(TokenRegistry { by_subject: map })
+    serde_json::from_str(&text).context("parse slim registry cache")
 }
 
-fn save_slim_cache(path: &PathBuf, reg: &TokenRegistry) -> Result<()> {
+fn save_slim_cache(path: &PathBuf, map: &HashMap<String, RegistryEntry>) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(&reg.by_subject)?;
+    let text = serde_json::to_string_pretty(map)?;
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)?;
     Ok(())
 }
 
-fn parse_registry_zip(file: fs::File) -> Result<TokenRegistry> {
+fn parse_registry_zip(file: fs::File) -> Result<HashMap<String, RegistryEntry>> {
     let mut archive = ZipArchive::new(file).context("open zip")?;
     let mut by_subject = HashMap::with_capacity(8_192);
     for i in 0..archive.len() {
@@ -236,7 +288,7 @@ fn parse_registry_zip(file: fs::File) -> Result<TokenRegistry> {
         }
         by_subject.insert(subject, entry);
     }
-    Ok(TokenRegistry { by_subject })
+    Ok(by_subject)
 }
 
 fn field_str(v: &Value, key: &str) -> Option<String> {
@@ -260,4 +312,3 @@ fn field_u32(v: &Value, key: &str) -> Option<u32> {
     }
     x.as_str()?.parse().ok()
 }
-

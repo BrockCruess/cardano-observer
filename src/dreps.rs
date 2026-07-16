@@ -20,7 +20,6 @@ use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 
 const CACHE_FILE: &str = "dreps.json";
-/// Blockfrost max page size — one round-trip per 100 DReps with embedded metadata.
 const PAGE: usize = 100;
 const META_CONCURRENCY: usize = 4;
 const ANCHOR_CONCURRENCY: usize = 12;

@@ -50,11 +50,11 @@ and slot battles.
   proposals, votes, metadata, raw JSON, and explorer links (mainnet or
   `preprod.` / `preview.` Cardanoscan, Cexplorer, AdaStat). Served from an
   in-memory cache; falls back to Blockfrost for older transactions.
-- **Token & pool metadata.** Asset names, tickers, decimals and logos resolve
-  from a durable CIP-26 token-registry cache (downloaded once into
-  `DATA_DIR/token-registry.json`), with Blockfrost as a live fallback. Pool
-  tickers come from a one-shot Blockfrost scrape into `DATA_DIR/pools.json`,
-  with per-miss fetches appended afterward.
+- **Token & pool metadata.** Asset names, tickers, and decimals resolve from a
+  durable CIP-26 token-registry cache (`DATA_DIR/token-registry.json`),
+  re-downloaded daily at 00:00 UTC. Unregistered assets get a local stub (no
+  Blockfrost). Pool tickers come from a Blockfrost scrape into
+  `DATA_DIR/pools.json` (also refreshed daily), with per-miss fetches appended.
 - **Delegation context.** Stake and vote re-delegations show **from → to**
   using an in-process tracker seeded from persisted history, with Blockfrost
   account lookups when the previous target is still unknown.
@@ -140,9 +140,8 @@ the browser after each rebuild).
 | `OGMIOS_URL` | `ws://127.0.0.1:1337` | Ogmios WebSocket endpoint (unused when `DEMO=true`) |
 | `BLOCKFROST_URL` | *(unset / disabled)* | Blockfrost RYO base URL (optional; needs db-sync behind it). Example: `http://127.0.0.1:3000` |
 | `BLOCKFROST_PROJECT_ID` | *(empty)* | `project_id` header, if your instance needs one |
-| `TOKEN_REGISTRY_URL` | `https://tokens.cardano.org` | HTTP fallback for asset metadata when the local CIP-26 cache / Blockfrost miss |
-| `TOKEN_REGISTRY_ZIP` | Cardano Foundation GitHub master zip | CIP-26 mappings zip used to build `token-registry.json` on first boot |
-| `TOKEN_REGISTRY_REFRESH` | `false` | `true` / `1` / `yes` to re-download the registry zip |
+| `TOKEN_REGISTRY_ZIP` | Cardano Foundation GitHub master zip | CIP-26 mappings zip used to build `token-registry.json` on first boot (also re-downloaded daily at 00:00 UTC while running) |
+| `TOKEN_REGISTRY_REFRESH` | `false` | `true` / `1` / `yes` to re-download the registry zip on boot |
 | `POOL_CACHE_REFRESH` | `false` | `true` / `1` / `yes` to re-scrape Blockfrost `/pools` into `pools.json` on boot (also auto-refreshed daily at 00:00 UTC while running) |
 | `DREP_CACHE_REFRESH` | `false` | `true` / `1` / `yes` to re-scrape Blockfrost `/governance/dreps` into `dreps.json` on boot (also auto-refreshed daily at 00:00 UTC while running) |
 | `NETWORK` | `mainnet` | `mainnet` \| `preprod` \| `preview` (addresses & explorer links) |
