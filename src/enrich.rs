@@ -2,9 +2,12 @@
 //! ticker cache, and DRep name cache loaded from disk at boot. Live Blockfrost
 //! calls only run for assets/pools/dreps missing from those durable caches.
 //! Pool and DRep caches are also re-scraped daily at 00:00 UTC.
+//! Governance action titles (CIP-108) are fetched once on first sight and
+//! stored in `gov-actions.json`.
 
 use crate::config::Config;
 use crate::dreps::{self, DrepCache, DrepEntry};
+use crate::gov_actions::{self, GovActionCache};
 use crate::pools::{PoolCache, PoolEntry};
 use crate::registry::TokenRegistry;
 use crate::trending::KeywordMeta;
@@ -18,6 +21,7 @@ pub struct Enricher {
     http: reqwest::Client,
     blockfrost_url: Option<String>,
     project_id: Option<String>,
+    ogmios_url: String,
     registry_url: String,
     /// Full CIP-26 registry - subject → name/ticker/decimals.
     registry: TokenRegistry,
@@ -25,6 +29,8 @@ pub struct Enricher {
     pool_cache: PoolCache,
     /// Durable DRep name cache - drep1… → CIP-119 givenName.
     drep_cache: DrepCache,
+    /// Durable gov-action title cache - `{tx}#{index}` → CIP-108 title.
+    gov_action_cache: GovActionCache,
     assets: Mutex<HashMap<String, Value>>,
 }
 
@@ -78,6 +84,8 @@ impl Enricher {
         )
         .await;
 
+        let gov_action_cache = GovActionCache::load(cache_dir);
+
         Enricher {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
@@ -85,10 +93,12 @@ impl Enricher {
                 .expect("http client"),
             blockfrost_url: config.blockfrost_url.clone(),
             project_id: config.blockfrost_project_id.clone(),
+            ogmios_url: config.ogmios_url.clone(),
             registry_url: config.token_registry_url.clone(),
             registry,
             pool_cache,
             drep_cache,
+            gov_action_cache,
             assets: Mutex::new(HashMap::new()),
         }
     }
@@ -103,6 +113,10 @@ impl Enricher {
 
     pub fn drep_cache_len(&self) -> usize {
         self.drep_cache.len()
+    }
+
+    pub fn gov_action_cache_len(&self) -> usize {
+        self.gov_action_cache.titled_len()
     }
 
     /// Re-scrape pool + DRep registration metadata from Blockfrost every day
@@ -185,9 +199,77 @@ impl Enricher {
         }
     }
 
+    /// Stamp CIP-108 titles onto gov proposal / vote events when cached.
+    pub fn stamp_event_gov_actions(&self, event: &mut crate::model::ChainEvent) {
+        let (tx, index) = match event.kind.as_str() {
+            "gov_proposal" => {
+                let Some(tx) = event.tx_hash.clone() else {
+                    return;
+                };
+                let index = event
+                    .data
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                (tx, index)
+            }
+            "gov_vote" => {
+                let Some(tx) = event
+                    .data
+                    .get("proposalTx")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                else {
+                    return;
+                };
+                let index = event
+                    .data
+                    .get("proposalIndex")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                (tx, index)
+            }
+            _ => return,
+        };
+        let key = gov_actions::cache_key(&tx, index);
+        let Some(title) = self.gov_action_cache.title(&key) else {
+            return;
+        };
+        if let Some(obj) = event.data.as_object_mut() {
+            obj.insert("proposalTitle".into(), json!(title));
+        }
+    }
+
+    /// Resolve titles for any new gov actions referenced by these events
+    /// (Blockfrost once per action; later hits are cache-only).
+    pub async fn ensure_gov_action_titles(&self, events: &[crate::model::ChainEvent]) {
+        let refs = gov_actions::collect_refs(events, &self.gov_action_cache);
+        if refs.is_empty() {
+            return;
+        }
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .build()
+            .unwrap_or_else(|_| self.http.clone());
+        gov_actions::ensure_titles(
+            &http,
+            self.blockfrost_url.as_deref(),
+            self.project_id.as_deref(),
+            Some(self.ogmios_url.as_str()),
+            &self.gov_action_cache,
+            refs,
+        )
+        .await;
+    }
+
     /// Compact drep-id → name map for the browser (loaded once per page).
     pub fn dreps_json(&self) -> Value {
         self.drep_cache.to_names_json()
+    }
+
+    /// Compact `{tx}#{index}` → title map for the browser.
+    pub fn gov_actions_json(&self) -> Value {
+        self.gov_action_cache.to_titles_json()
     }
 
     /// Fill the durable cache from registration/update anchor URLs in events.
@@ -414,6 +496,35 @@ impl Enricher {
         meta
     }
 
+    /// CIP-108 governance action title for `{tx_hash}` + cert index.
+    pub async fn gov_action(&self, tx_hash: &str, index: u64) -> Value {
+        let tx = tx_hash.trim().to_lowercase();
+        if tx.len() != 64 || !tx.chars().all(|c| c.is_ascii_hexdigit()) {
+            return json!({ "error": "bad tx hash" });
+        }
+        let key = gov_actions::cache_key(&tx, index);
+        if let Some(hit) = self.gov_action_cache.get(&key) {
+            return hit.to_json(&tx, index);
+        }
+        self.ensure_gov_action_titles(&[crate::model::ChainEvent {
+            id: 0,
+            kind: "gov_vote".into(),
+            category: "governance".into(),
+            slot: 0,
+            height: None,
+            block_hash: None,
+            tx_hash: None,
+            timestamp: 0,
+            title: String::new(),
+            summary: String::new(),
+            data: json!({ "proposalTx": tx, "proposalIndex": index }),
+        }])
+        .await;
+        self.gov_action_cache
+            .get(&key)
+            .unwrap_or_default()
+            .to_json(&tx, index)
+    }
 }
 
 impl KeywordMeta for Enricher {

@@ -191,6 +191,8 @@ async fn handle_forward(
     deleg::fill_missing_froms(enricher, &mut parsed.events).await;
     // Learn DRep names from any registration/update anchors in this block.
     enricher.warm_dreps_from_events(&parsed.events).await;
+    // CIP-108 titles: Blockfrost once per new governance action.
+    enricher.ensure_gov_action_titles(&parsed.events).await;
 
     state.counters.blocks.fetch_add(1, Ordering::Relaxed);
     state.counters.txs.fetch_add(parsed.txs.len() as u64, Ordering::Relaxed);

@@ -279,7 +279,7 @@ fn save_cache(path: &Path, map: &HashMap<String, DrepEntry>) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let text = serde_json::to_string(map)?;
+    let text = serde_json::to_string_pretty(map)?;
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)?;
     Ok(())

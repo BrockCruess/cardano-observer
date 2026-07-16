@@ -192,7 +192,7 @@ fn load_slim_cache(path: &Path) -> Result<TokenRegistry> {
 
 fn save_slim_cache(path: &PathBuf, reg: &TokenRegistry) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
-    let text = serde_json::to_string(&reg.by_subject)?;
+    let text = serde_json::to_string_pretty(&reg.by_subject)?;
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)?;
     Ok(())

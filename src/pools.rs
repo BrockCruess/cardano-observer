@@ -220,7 +220,7 @@ fn load_cache(path: &Path) -> Result<HashMap<String, PoolEntry>> {
 
 fn save_cache(path: &Path, map: &HashMap<String, PoolEntry>) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
-    let text = serde_json::to_string(map)?;
+    let text = serde_json::to_string_pretty(map)?;
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)?;
     Ok(())

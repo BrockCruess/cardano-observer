@@ -900,19 +900,36 @@ function cardBody(ev) {
         d.pool ? `<span class="pool-id" data-pool="${esc(d.pool)}" title="${esc(d.pool)}">${esc(short(d.pool, 12, 5))}</span>` : "",
         d.retirementEpoch != null ? `epoch <b>${esc(String(d.retirementEpoch))}</b>` : "",
       ]);
-    case "gov_proposal":
+    case "gov_proposal": {
+      const govKey = ev.tx_hash
+        ? `${String(ev.tx_hash).toLowerCase()}#${d.index ?? 0}`
+        : "";
       return sub([
+        d.proposalTitle
+          ? `<span class="gov-title" data-gov="${esc(govKey)}" title="${esc(ev.tx_hash || "")}#${esc(String(d.index ?? 0))}">${esc(d.proposalTitle)}</span>`
+          : govKey
+            ? `<span class="hash" data-gov="${esc(govKey)}" title="${esc(ev.tx_hash || "")}#${esc(String(d.index ?? 0))}">${esc(short(ev.tx_hash, 8, 4))}#${esc(String(d.index ?? 0))}</span>`
+            : "",
         d.deposit ? `deposit <b>${fmtAda(d.deposit)}</b>` : "",
         d.anchorUrl ? `<span class="hash">${esc(short(d.anchorUrl, 22, 0))}</span>` : "",
       ]);
+    }
     case "gov_vote": {
       const v = String(d.vote || "").toLowerCase();
       const cls = v === "yes" ? "yes" : v === "no" ? "no" : "abstain";
+      const govKey = d.proposalTx != null
+        ? `${String(d.proposalTx).toLowerCase()}#${d.proposalIndex ?? 0}`
+        : "";
+      const onProp = d.proposalTitle
+        ? `on <span class="gov-title" data-gov="${esc(govKey)}" title="${esc(d.proposalTx || "")}#${esc(String(d.proposalIndex ?? 0))}">${esc(d.proposalTitle)}</span>`
+        : d.proposalTx
+          ? `on <span class="hash" data-gov="${esc(govKey)}" title="${esc(d.proposalTx)}#${esc(String(d.proposalIndex ?? 0))}">${esc(short(d.proposalTx, 8, 4))}#${esc(String(d.proposalIndex ?? 0))}</span>`
+          : "";
       return sub([
         `<span class="badge ${cls}">${esc(v.toUpperCase())}</span>`,
         d.role ? esc(roleLabel(d.role)) : "",
         d.voter ? drepSpan(d.voter, d.voterName) : "",
-        d.proposalTx ? `on <span class="hash">${esc(short(d.proposalTx, 8, 4))}#${esc(String(d.proposalIndex ?? 0))}</span>` : "",
+        onProp,
       ]);
     }
     case "drep_registration":
@@ -1263,6 +1280,7 @@ function buildCard(ev) {
   enrichAssets(card);
   enrichPools(card);
   enrichDreps(card);
+  enrichGovActions(card);
   return card;
 }
 
@@ -2309,6 +2327,104 @@ function paintDrep(el, meta) {
   el.title = drepId;
 }
 
+const govMeta = new Map(Object.entries(store.get("co_gov_v1", {})));
+const govWaiters = new Map();
+
+function persistGovCache() {
+  const obj = {};
+  let i = 0;
+  for (const [k, v] of govMeta) {
+    if (!v || !v.title) continue;
+    if (i++ > 700) break;
+    obj[k] = { title: v.title || null };
+  }
+  store.set("co_gov_v1", obj);
+}
+
+/** Hydrate govMeta from the server's durable cache, then repaint. */
+async function loadGovMeta() {
+  try {
+    const r = await fetch("/api/gov-actions");
+    if (!r.ok) return;
+    const m = await r.json();
+    let n = 0;
+    for (const [key, meta] of Object.entries(m || {})) {
+      if (!meta || typeof meta !== "object" || !meta.title) continue;
+      govMeta.set(key, { title: meta.title });
+      n++;
+    }
+    if (n) persistGovCache();
+    document.querySelectorAll("[data-gov]").forEach((el) => {
+      const key = el.dataset.gov;
+      const cached = govMeta.get(key);
+      if (cached?.title) paintGov(el, cached);
+    });
+  } catch {
+    /* leave tx#index hashes */
+  }
+}
+
+function enrichGovActions(root) {
+  root.querySelectorAll("[data-gov]").forEach((el) => {
+    const key = el.dataset.gov;
+    if (!key || !key.includes("#")) return;
+    const cached = govMeta.get(key);
+    if (cached && cached.title) {
+      paintGov(el, cached);
+      return;
+    }
+    if (el.classList.contains("gov-title")) return; // already stamped
+    if (govWaiters.has(key)) {
+      govWaiters.get(key).push(el);
+      return;
+    }
+    const [tx, idxRaw] = key.split("#");
+    const index = Number(idxRaw);
+    if (!tx || !Number.isFinite(index)) return;
+    govWaiters.set(key, [el]);
+    fetch(`/api/gov-action/${encodeURIComponent(tx)}/${encodeURIComponent(index)}`)
+      .then((r) => r.json())
+      .then((meta) => {
+        if (meta && meta.title) {
+          govMeta.set(key, { title: meta.title });
+          persistGovCache();
+        } else {
+          govMeta.set(key, { title: null }); // negative cache
+        }
+        const waiters = govWaiters.get(key) || [];
+        govWaiters.delete(key);
+        const all = new Set([
+          ...waiters,
+          ...document.querySelectorAll(`[data-gov="${CSS.escape(key)}"]`),
+        ]);
+        all.forEach((e) => paintGov(e, govMeta.get(key)));
+      })
+      .catch(() => {
+        govWaiters.delete(key);
+      });
+  });
+}
+
+function paintGov(el, meta) {
+  if (!meta) return;
+  const title = typeof meta.title === "string" && meta.title ? meta.title : "";
+  const key = el.dataset.gov || "";
+  const card = el.closest(".card");
+  if (card) {
+    appendCardSearch(card, key, title);
+    const eid = Number(card.dataset.eid);
+    if (Number.isFinite(eid) && retentionCache.has(eid)) {
+      retentionIndex(retentionCache.get(eid).ev);
+    }
+    if ($("search").value.trim()) scheduleFilterRefresh();
+  }
+  if (!title) return;
+  el.textContent = title;
+  el.classList.remove("hash");
+  el.classList.add("gov-title");
+  if (key) el.title = key;
+}
+
 /* ── Modal ────────────────────────────────────────────────────────────── */
 
 const overlay = $("overlay");
@@ -2663,4 +2779,5 @@ buildToolbar();
 applyFilters();
 loadRegistryMeta();
 loadDrepMeta();
+loadGovMeta();
 connect();

@@ -191,6 +191,7 @@ impl AppState {
         if let Some(e) = meta.as_ref() {
             e.stamp_event_assets(&mut event);
             e.stamp_event_dreps(&mut event);
+            e.stamp_event_gov_actions(&mut event);
             if !e.keep_dex_event(&event) {
                 return;
             }
@@ -238,6 +239,15 @@ impl AppState {
         let mut buf = self.events.lock().unwrap();
         for ev in buf.iter_mut() {
             enricher.stamp_event_dreps(ev);
+        }
+    }
+
+    /// Apply cached CIP-108 gov-action titles onto every buffered event (boot).
+    pub fn stamp_buffered_gov_actions(&self) {
+        let Some(enricher) = self.meta_ref() else { return };
+        let mut buf = self.events.lock().unwrap();
+        for ev in buf.iter_mut() {
+            enricher.stamp_event_gov_actions(ev);
         }
     }
 

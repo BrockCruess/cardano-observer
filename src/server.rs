@@ -38,6 +38,8 @@ pub fn router(ctx: ServerCtx) -> Router {
         .route("/api/pool/{id}", get(api_pool))
         .route("/api/drep/{id}", get(api_drep))
         .route("/api/dreps", get(api_dreps))
+        .route("/api/gov-action/{tx}/{index}", get(api_gov_action))
+        .route("/api/gov-actions", get(api_gov_actions))
         .route("/api/stats", get(api_stats))
         .route("/api/trending", get(api_trending))
         .route("/healthz", get(|| async { "ok" }))
@@ -183,6 +185,18 @@ async fn api_drep(State(ctx): State<ServerCtx>, Path(id): Path<String>) -> Respo
 /// Full in-memory DRep name map for browser-side labels (no per-id round-trips).
 async fn api_dreps(State(ctx): State<ServerCtx>) -> Response {
     Json(ctx.enricher.dreps_json()).into_response()
+}
+
+async fn api_gov_action(
+    State(ctx): State<ServerCtx>,
+    Path((tx, index)): Path<(String, u64)>,
+) -> Response {
+    Json(ctx.enricher.gov_action(&tx, index).await).into_response()
+}
+
+/// Full in-memory gov-action title map for browser-side labels.
+async fn api_gov_actions(State(ctx): State<ServerCtx>) -> Response {
+    Json(ctx.enricher.gov_actions_json()).into_response()
 }
 
 async fn api_stats(State(ctx): State<ServerCtx>) -> Response {

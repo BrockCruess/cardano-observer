@@ -147,7 +147,7 @@ the browser after each rebuild).
 | `DREP_CACHE_REFRESH` | `false` | `true` / `1` / `yes` to re-scrape Blockfrost `/governance/dreps` into `dreps.json` on boot (also auto-refreshed daily at 00:00 UTC while running) |
 | `NETWORK` | `mainnet` | `mainnet` \| `preprod` \| `preview` (addresses & explorer links) |
 | `BIND` | `0.0.0.0:9070` | web UI listen address |
-| `DATA_DIR` | `./data` | persisted event/tx history + registry/pool/drep caches (JSONL/JSON); `none` / `off` / `false` disables persistence |
+| `DATA_DIR` | `./data` | persisted event/tx history + registry/pool/drep/gov-action caches (JSONL/JSON); `none` / `off` / `false` disables persistence |
 | `BACKFILL_HOURS` | `24` | resume chain-sync from the last persisted block if younger than this; `0` = start at tip |
 | `EVENT_RETENTION_HOURS` | `24` | hours of events kept in memory for trending + fast search (full history still on disk) |
 | `TX_CACHE` | `4000` | transactions kept for the detail modal |
@@ -201,10 +201,11 @@ Blockfrost RYO  ◀── enrichment / pools / dreps┘
 - `src/registry.rs` - CIP-26 token registry zip → durable slim cache
 - `src/pools.rs` - Blockfrost pool-metadata scrape → `pools.json`
 - `src/dreps.rs` - Blockfrost DRep scrape + registration-anchor fetch → `dreps.json`
+- `src/gov_actions.rs` - first-sight CIP-108 titles via Blockfrost → `gov-actions.json`
 - `src/deleg.rs` - stake/DRep from→to tracker across live + restored events
 - `src/server.rs` - axum server: embedded UI, `/ws` stream, `/api/events`,
   `/api/buffer`, `/api/trending`, `/api/tx`, `/api/asset`, `/api/pool`,
-  `/api/drep`, `/api/dreps`, `/api/stats`
+  `/api/drep`, `/api/dreps`, `/api/gov-action`, `/api/gov-actions`, `/api/stats`
 - `static/` - the whole frontend: one HTML file, one stylesheet, one script;
   no frameworks, no build step
 
