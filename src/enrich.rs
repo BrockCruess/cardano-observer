@@ -1,9 +1,10 @@
 //! Metadata enrichment: in-memory Cardano token registry (CIP-26), stake pool
-//! ticker cache, and DRep name cache loaded from disk at boot. Live Blockfrost
-//! calls only run for assets/pools/dreps missing from those durable caches.
-//! Pool and DRep caches are also re-scraped daily at 00:00 UTC.
-//! Governance action titles (CIP-108) are fetched once on first sight and
-//! stored in `gov-actions.json`.
+//! ticker cache, and DRep name cache loaded from disk at boot. Pool/DRep
+//! Blockfrost scrapes run in the background when caches are empty (or refresh
+//! flags are set); live lookups only run for assets/pools/dreps missing from
+//! those durable caches. Pool and DRep caches are also re-scraped daily at
+//! 00:00 UTC. Governance action titles (CIP-108) are fetched once on first
+//! sight and stored in `gov-actions.json`.
 
 use crate::config::Config;
 use crate::dreps::{self, DrepCache, DrepEntry};
@@ -59,31 +60,9 @@ impl Enricher {
             }
         };
 
-        let pool_cache = match PoolCache::load(
-            &http,
-            cache_dir,
-            config.blockfrost_url.as_deref(),
-            config.blockfrost_project_id.as_deref(),
-            config.pool_cache_refresh,
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("pool cache load failed ({e:#}) - live lookups only");
-                PoolCache::empty()
-            }
-        };
-
-        let drep_cache = DrepCache::load(
-            &http,
-            cache_dir,
-            config.blockfrost_url.as_deref(),
-            config.blockfrost_project_id.as_deref(),
-            config.drep_cache_refresh,
-        )
-        .await;
-
+        // Disk only — Blockfrost scrapes run in a background task from main.
+        let pool_cache = PoolCache::load(cache_dir);
+        let drep_cache = DrepCache::load(cache_dir);
         let gov_action_cache = GovActionCache::load(cache_dir);
 
         Enricher {
@@ -117,6 +96,71 @@ impl Enricher {
 
     pub fn gov_action_cache_len(&self) -> usize {
         self.gov_action_cache.titled_len()
+    }
+
+    /// Run pool/DRep Blockfrost scrapes when the on-disk cache was empty (or a
+    /// refresh flag is set). Intended to be `tokio::spawn`ed so boot is not blocked.
+    /// Returns whether the DRep cache gained entries (caller may re-stamp events).
+    pub async fn run_initial_scrapes(&self, force_pools: bool, force_dreps: bool) -> bool {
+        if self.blockfrost_url.is_none() {
+            tracing::info!("pool/drep initial scrape skipped (no BLOCKFROST_URL)");
+            return false;
+        }
+        let need_pools = force_pools || self.pool_cache.len() == 0;
+        let need_dreps = force_dreps || self.drep_cache.len() == 0;
+        if !need_pools && !need_dreps {
+            return false;
+        }
+        if force_pools {
+            tracing::info!("pool cache: POOL_CACHE_REFRESH set - background re-scrape");
+        } else if need_pools {
+            tracing::info!("pool cache: empty - background scrape starting");
+        }
+        if force_dreps {
+            tracing::info!("drep cache: DREP_CACHE_REFRESH set - background re-scrape");
+        } else if need_dreps {
+            tracing::info!("drep cache: empty - background scrape starting");
+        }
+
+        let pool_fut = async {
+            if !need_pools {
+                return;
+            }
+            let Some(base) = self.blockfrost_url.as_deref() else {
+                return;
+            };
+            let pid = self.project_id.as_deref();
+            match self.pool_cache.refresh(&self.http, base, pid).await {
+                Ok(0) => tracing::warn!("pool cache initial scrape returned 0 entries"),
+                Ok(n) => tracing::info!("pool cache initial scrape done ({n} pools)"),
+                Err(e) => tracing::warn!("pool cache initial scrape failed: {e:#}"),
+            }
+        };
+        let drep_fut = async {
+            if !need_dreps {
+                return false;
+            }
+            let Some(base) = self.blockfrost_url.as_deref() else {
+                return false;
+            };
+            let pid = self.project_id.as_deref();
+            match self.drep_cache.refresh(&self.http, base, pid).await {
+                Ok(0) => {
+                    tracing::warn!("drep cache initial scrape returned 0 names");
+                    false
+                }
+                Ok(n) => {
+                    tracing::info!("drep cache initial scrape done ({n} dreps)");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("drep cache initial scrape failed: {e:#}");
+                    false
+                }
+            }
+        };
+        let (_, dreps_ready) = tokio::join!(pool_fut, drep_fut);
+        dreps_ready
     }
 
     /// Re-scrape pool + DRep registration metadata from Blockfrost every day

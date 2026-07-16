@@ -1,10 +1,10 @@
 //! Durable stake-pool metadata cache (ticker / name / homepage).
 //!
-//! First boot scrapes Blockfrost `/pools` (+ per-pool `/metadata`) into
-//! `pools.json`. Later boots always load that file. While the process is
-//! running, a daily UTC-midnight job re-scrapes and overwrites the cache so
-//! ticker/name changes show up without a restart. Individual misses are
-//! fetched live once and appended.
+//! Loads `pools.json` from DATA_DIR when present (boot stays non-blocking).
+//! Missing / forced refreshes scrape Blockfrost `/pools` (+ per-pool
+//! `/metadata`) in the background; when the scrape finishes the in-memory map
+//! and on-disk file are replaced. A daily UTC-midnight job re-scrapes the same
+//! way. Individual misses are fetched live once and appended.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -77,13 +77,6 @@ pub struct PoolCache {
 }
 
 impl PoolCache {
-    pub fn empty() -> Self {
-        PoolCache {
-            by_id: Mutex::new(HashMap::new()),
-            path: None,
-        }
-    }
-
     pub fn len(&self) -> usize {
         self.by_id.lock().unwrap().len()
     }
@@ -142,74 +135,55 @@ impl PoolCache {
         Ok(n)
     }
 
-    /// Load `pools.json` if present; otherwise scrape Blockfrost once.
-    pub async fn load(
-        http: &reqwest::Client,
-        cache_dir: Option<&Path>,
-        blockfrost_url: Option<&str>,
-        project_id: Option<&str>,
-        force_refresh: bool,
-    ) -> Result<Self> {
+    /// Load `pools.json` from disk only — never blocks on Blockfrost.
+    /// Background scrapes are started by [`crate::enrich::Enricher`].
+    pub fn load(cache_dir: Option<&Path>) -> Self {
         let dir = cache_dir
             .map(Path::to_path_buf)
             .unwrap_or_else(|| std::env::temp_dir().join("cardano-observer"));
         let path = dir.join(CACHE_FILE);
+        let _ = fs::create_dir_all(&dir);
 
-        if !force_refresh {
-            match load_cache(&path) {
-                Ok(map) if !map.is_empty() => {
-                    tracing::info!(
-                        "pool cache: loaded {} entries from {}",
-                        map.len(),
-                        path.display()
-                    );
-                    return Ok(PoolCache {
-                        by_id: Mutex::new(map),
-                        path: Some(path),
-                    });
-                }
-                Ok(_) => tracing::warn!("pool cache empty - scraping"),
-                Err(_) if path.exists() => tracing::warn!("pool cache unreadable - scraping"),
-                Err(_) => tracing::info!(
-                    "pool cache: no file at {} - scraping once",
+        match load_cache(&path) {
+            Ok(map) if !map.is_empty() => {
+                tracing::info!(
+                    "pool cache: loaded {} entries from {}",
+                    map.len(),
                     path.display()
-                ),
+                );
+                PoolCache {
+                    by_id: Mutex::new(map),
+                    path: Some(path),
+                }
             }
-        } else {
-            tracing::info!("pool cache: POOL_CACHE_REFRESH set - re-scraping");
+            Ok(_) => {
+                tracing::info!(
+                    "pool cache: empty at {} - background scrape / live lookups",
+                    path.display()
+                );
+                PoolCache {
+                    by_id: Mutex::new(HashMap::new()),
+                    path: Some(path),
+                }
+            }
+            Err(_) if path.exists() => {
+                tracing::warn!("pool cache unreadable - background scrape / live lookups");
+                PoolCache {
+                    by_id: Mutex::new(HashMap::new()),
+                    path: Some(path),
+                }
+            }
+            Err(_) => {
+                tracing::info!(
+                    "pool cache: no file at {} - background scrape / live lookups",
+                    path.display()
+                );
+                PoolCache {
+                    by_id: Mutex::new(HashMap::new()),
+                    path: Some(path),
+                }
+            }
         }
-
-        let Some(bf_base) = blockfrost_url else {
-            tracing::warn!("pool cache: no BLOCKFROST_URL - leaving cache empty");
-            return Ok(PoolCache {
-                by_id: Mutex::new(HashMap::new()),
-                path: Some(path),
-            });
-        };
-
-        fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-
-        let scrape_http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .connect_timeout(Duration::from_secs(8))
-            .build()
-            .unwrap_or_else(|_| http.clone());
-
-        let map = scrape_pools(&scrape_http, bf_base, project_id)
-            .await
-            .context("Blockfrost pool scrape failed")?;
-
-        tracing::info!("pool cache: scraped {} pools with tickers", map.len());
-        if let Err(e) = save_cache(&path, &map) {
-            tracing::warn!("could not write pool cache: {e:#}");
-        } else {
-            tracing::info!("pool cache: wrote durable cache at {}", path.display());
-        }
-
-        Ok(PoolCache {
-            by_id: Mutex::new(map),
-            path: Some(path),
-        })
     }
 }
 

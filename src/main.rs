@@ -121,6 +121,23 @@ async fn main() -> anyhow::Result<()> {
         enricher.gov_action_cache_len()
     );
     tokio::spawn(enricher.clone().refresh_meta_caches_loop());
+    // Empty (or forced) pool/DRep caches scrape in the background; lookups
+    // start using them as soon as the in-memory maps are filled.
+    {
+        let enricher = enricher.clone();
+        let state = state.clone();
+        let force_pools = config.pool_cache_refresh;
+        let force_dreps = config.drep_cache_refresh;
+        tokio::spawn(async move {
+            if enricher.run_initial_scrapes(force_pools, force_dreps).await {
+                state.stamp_buffered_dreps();
+                tracing::info!(
+                    "re-stamped buffered events with {} drep names",
+                    enricher.drep_cache_len()
+                );
+            }
+        });
+    }
     let deleg = Arc::new(deleg::DelegationTracker::new());
     // Seed from restored buffer so re-delegations show from→to immediately.
     {

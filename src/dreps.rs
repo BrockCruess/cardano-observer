@@ -1,11 +1,11 @@
 //! Durable DRep metadata cache (CIP-119 givenName).
 //!
-//! Loads `dreps.json` from DATA_DIR when present. On first boot (or when
-//! `DREP_CACHE_REFRESH` is set) scrapes Blockfrost `GET /governance/dreps`
-//! which embeds CIP-119 metadata (`metadata.json_metadata.body.givenName`).
-//! While the process is running, a daily UTC-midnight job re-scrapes and
-//! overwrites the cache. Misses are filled by `GET /governance/dreps/{id}/metadata`,
-//! registration anchor URLs, and live `/api/drep` lookups.
+//! Loads `dreps.json` from DATA_DIR when present (boot stays non-blocking).
+//! Missing / forced refreshes scrape Blockfrost `GET /governance/dreps` in the
+//! background; when the scrape finishes the in-memory map and on-disk file are
+//! replaced. A daily UTC-midnight job re-scrapes the same way. Misses are also
+//! filled by `GET /governance/dreps/{id}/metadata`, registration anchors, and
+//! live `/api/drep` lookups.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,11 @@ const CACHE_FILE: &str = "dreps.json";
 const PAGE: usize = 100;
 const META_CONCURRENCY: usize = 16;
 const ANCHOR_CONCURRENCY: usize = 12;
+/// Self-hosted Blockfrost often needs minutes for `/governance/dreps` list pages.
+const DREP_LIST_PAGE_TIMEOUT: Duration = Duration::from_secs(300);
+const DREP_META_TIMEOUT: Duration = Duration::from_secs(60);
+/// Whole scrape client budget (many list pages + optional per-id metadata).
+const DREP_SCRAPE_CLIENT_TIMEOUT: Duration = Duration::from_secs(900);
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DrepEntry {
@@ -171,10 +176,14 @@ impl DrepCache {
         project_id: Option<&str>,
     ) -> Result<usize> {
         let scrape_http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(45))
-            .connect_timeout(Duration::from_secs(8))
+            .timeout(DREP_SCRAPE_CLIENT_TIMEOUT)
+            .connect_timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| http.clone());
+        tracing::info!(
+            "drep cache: scraping Blockfrost (up to {}s per list page)…",
+            DREP_LIST_PAGE_TIMEOUT.as_secs()
+        );
         let map = scrape_dreps(&scrape_http, blockfrost_url, project_id).await?;
         let n = map.len();
         if n == 0 {
@@ -186,85 +195,62 @@ impl DrepCache {
             if let Some(path) = &self.path {
                 if let Err(e) = save_cache(path, &guard) {
                     tracing::warn!("could not write drep cache: {e:#}");
+                } else {
+                    tracing::info!("drep cache: wrote durable cache at {}", path.display());
                 }
             }
         }
         Ok(n)
     }
 
-    /// Load `dreps.json` if present; otherwise scrape Blockfrost once.
-    pub async fn load(
-        http: &reqwest::Client,
-        cache_dir: Option<&Path>,
-        blockfrost_url: Option<&str>,
-        project_id: Option<&str>,
-        force_refresh: bool,
-    ) -> Self {
+    /// Load `dreps.json` from disk only — never blocks on Blockfrost.
+    /// Background scrapes are started by [`crate::enrich::Enricher`].
+    pub fn load(cache_dir: Option<&Path>) -> Self {
         let dir = cache_dir
             .map(Path::to_path_buf)
             .unwrap_or_else(|| std::env::temp_dir().join("cardano-observer"));
         let path = dir.join(CACHE_FILE);
-
-        if !force_refresh {
-            match load_cache(&path) {
-                Ok(map) if !map.is_empty() => {
-                    tracing::info!(
-                        "drep cache: loaded {} entries from {}",
-                        map.len(),
-                        path.display()
-                    );
-                    return DrepCache {
-                        by_id: Mutex::new(map),
-                        path: Some(path),
-                    };
-                }
-                Ok(_) => tracing::info!(
-                    "drep cache: empty at {} - will scrape / fill on demand",
-                    path.display()
-                ),
-                Err(_) if path.exists() => {
-                    tracing::warn!("drep cache unreadable - will scrape / fill on demand")
-                }
-                Err(_) => tracing::info!(
-                    "drep cache: no file at {} - will scrape / fill on demand",
-                    path.display()
-                ),
-            }
-        } else {
-            tracing::info!("drep cache: DREP_CACHE_REFRESH set - re-scraping");
-        }
-
         let _ = fs::create_dir_all(&dir);
 
-        if let Some(bf_base) = blockfrost_url {
-            let scrape_http = reqwest::Client::builder()
-                .timeout(Duration::from_secs(45))
-                .connect_timeout(Duration::from_secs(8))
-                .build()
-                .unwrap_or_else(|_| http.clone());
-            match scrape_dreps(&scrape_http, bf_base, project_id).await {
-                Ok(map) if !map.is_empty() => {
-                    tracing::info!("drep cache: scraped {} dreps with names", map.len());
-                    if let Err(e) = save_cache(&path, &map) {
-                        tracing::warn!("could not write drep cache: {e:#}");
-                    } else {
-                        tracing::info!("drep cache: wrote durable cache at {}", path.display());
-                    }
-                    return DrepCache {
-                        by_id: Mutex::new(map),
-                        path: Some(path),
-                    };
+        match load_cache(&path) {
+            Ok(map) if !map.is_empty() => {
+                tracing::info!(
+                    "drep cache: loaded {} entries from {}",
+                    map.len(),
+                    path.display()
+                );
+                DrepCache {
+                    by_id: Mutex::new(map),
+                    path: Some(path),
                 }
-                Ok(_) => tracing::warn!("drep cache: Blockfrost scrape returned no names"),
-                Err(e) => tracing::warn!("drep cache: Blockfrost scrape failed ({e:#})"),
             }
-        } else {
-            tracing::warn!("drep cache: no BLOCKFROST_URL - leaving cache empty for lazy fill");
-        }
-
-        DrepCache {
-            by_id: Mutex::new(HashMap::new()),
-            path: Some(path),
+            Ok(_) => {
+                tracing::info!(
+                    "drep cache: empty at {} - background scrape / on-demand fill",
+                    path.display()
+                );
+                DrepCache {
+                    by_id: Mutex::new(HashMap::new()),
+                    path: Some(path),
+                }
+            }
+            Err(_) if path.exists() => {
+                tracing::warn!("drep cache unreadable - background scrape / on-demand fill");
+                DrepCache {
+                    by_id: Mutex::new(HashMap::new()),
+                    path: Some(path),
+                }
+            }
+            Err(_) => {
+                tracing::info!(
+                    "drep cache: no file at {} - background scrape / on-demand fill",
+                    path.display()
+                );
+                DrepCache {
+                    by_id: Mutex::new(HashMap::new()),
+                    path: Some(path),
+                }
+            }
         }
     }
 }
@@ -369,7 +355,7 @@ async fn scrape_list_embedded(
     loop {
         let path = format!("/governance/dreps?count={PAGE}&page={page}");
         let rows: Value = bf_get(http, base, &path, project_id)
-            .timeout(Duration::from_secs(20))
+            .timeout(DREP_LIST_PAGE_TIMEOUT)
             .send()
             .await
             .with_context(|| format!("GET {base}{path}"))?
@@ -450,7 +436,7 @@ async fn scrape_list_and_metadata(
             if let Some(pid) = pid_header {
                 req = req.header("project_id", pid);
             }
-            let v: Value = tokio::time::timeout(Duration::from_secs(8), req.send())
+            let v: Value = tokio::time::timeout(DREP_META_TIMEOUT, req.send())
                 .await
                 .ok()?
                 .ok()?
@@ -488,7 +474,7 @@ async fn list_drep_ids(
     loop {
         let path = format!("/governance/dreps?count={PAGE}&page={page}");
         let rows: Value = bf_get(http, base, &path, project_id)
-            .timeout(Duration::from_secs(20))
+            .timeout(DREP_LIST_PAGE_TIMEOUT)
             .send()
             .await
             .with_context(|| format!("GET {base}{path}"))?
