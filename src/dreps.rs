@@ -2,12 +2,15 @@
 //!
 //! Loads `dreps.json` from DATA_DIR when present (boot stays non-blocking).
 //! Missing / forced refreshes scrape Blockfrost `GET /governance/dreps` in the
-//! background (Blockfrost only — no third-party indexers). Pages are fetched
-//! with retries and **no request timeout** so a slow RYO cannot abort the
-//! scrape; names are merged into the in-memory map (and disk) as each page
-//! lands. A daily UTC-midnight job re-scrapes the same way. Misses are also
-//! filled by `GET /governance/dreps/{id}/metadata`, registration anchors, and
-//! live `/api/drep` lookups.
+//! background (Blockfrost only — no third-party indexers). Prefer RYO's
+//! undocumented `unpaged: true` header (one request, every active DRep,
+//! metadata included; `retired=false&expired=false`); fall back to paginated
+//! list + per-id `/metadata` when needed.
+//! The scrape HTTP client has **no timeouts** (request/connect/idle) — it waits
+//! until RYO returns or the process is killed; failed attempts retry forever.
+//! A daily UTC-midnight job re-scrapes the same way. Misses are also filled by
+//! `GET /governance/dreps/{id}/metadata`, registration anchors, and live
+//! `/api/drep` lookups.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -21,10 +24,11 @@ use tokio::sync::Mutex as AsyncMutex;
 
 const CACHE_FILE: &str = "dreps.json";
 const PAGE: usize = 100;
+/// Only currently registered, non-expired DReps (Blockfrost query filters).
+const DREP_LIST_FILTERS: &str = "retired=false&expired=false";
 const META_CONCURRENCY: usize = 4;
 const ANCHOR_CONCURRENCY: usize = 12;
-const DREP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Cap between page retries so a wedged RYO is retried, not abandoned.
+/// Cap between *failed-attempt* retries only (not an in-flight request deadline).
 const DREP_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -173,10 +177,12 @@ impl DrepCache {
 
     /// Replace/merge the in-memory + on-disk cache with a Blockfrost scrape.
     ///
-    /// Uses a client with **no request timeout** and retries each page until it
-    /// succeeds. Names are merged into the live map as pages arrive so the app
-    /// can use them before the full scrape completes. Only one scrape runs at a
-    /// time so we never pile concurrent `/governance/dreps` calls onto RYO.
+    /// Dedicated HTTP client with **no request, connect, or pool idle timeout** —
+    /// an in-flight scrape waits until RYO responds or the process is killed.
+    /// Failed attempts (connection reset, 5xx, decode) retry forever with backoff.
+    /// Prefers RYO `unpaged: true` (single full list); falls back to pagination.
+    /// Only one scrape runs at a time so we never pile concurrent list calls
+    /// onto RYO.
     pub async fn refresh(
         &self,
         http: &reqwest::Client,
@@ -187,13 +193,22 @@ impl DrepCache {
             tracing::info!("drep cache: scrape already in progress - skipping");
             return Ok(self.len());
         };
+        // Never reuse Enricher's short-timeout client. Omit timeout/connect_timeout
+        // so reqwest waits indefinitely for headers + body.
         let scrape_http = reqwest::Client::builder()
-            .connect_timeout(DREP_CONNECT_TIMEOUT)
-            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_idle_timeout(None)
+            // Keep NAT/middleboxes from silently dropping an hour-long download.
+            .tcp_keepalive(Duration::from_secs(60))
             .build()
-            .unwrap_or_else(|_| http.clone());
+            .unwrap_or_else(|e| {
+                tracing::warn!("drep cache: scrape client build failed ({e:#}) - using bare client");
+                let _ = http;
+                reqwest::Client::builder()
+                    .build()
+                    .expect("bare drep scrape http client")
+            });
         tracing::info!(
-            "drep cache: scraping Blockfrost /governance/dreps (count={PAGE}, no request timeout, retry forever)…"
+            "drep cache: scraping Blockfrost /governance/dreps (unpaged preferred, no timeouts, retry forever)…"
         );
         let before = self.len();
         scrape_dreps(self, &scrape_http, blockfrost_url, project_id).await?;
@@ -328,12 +343,27 @@ fn bf_get(
     base: &str,
     path: &str,
     project_id: Option<&str>,
+    unpaged: bool,
 ) -> reqwest::RequestBuilder {
     let mut req = http.get(format!("{base}{path}"));
     if let Some(pid) = project_id {
         req = req.header("project_id", pid);
     }
+    // Blockfrost RYO: bypasses count/page and runs the unpaged SQL path.
+    if unpaged {
+        req = req.header("unpaged", "true");
+    }
     req
+}
+
+/// List path for active DReps only (`retired=false&expired=false`).
+fn dreps_list_path(page: Option<(usize, u32)>) -> String {
+    match page {
+        None => format!("/governance/dreps?{DREP_LIST_FILTERS}"),
+        Some((count, page)) => {
+            format!("/governance/dreps?count={count}&page={page}&{DREP_LIST_FILTERS}")
+        }
+    }
 }
 
 fn retry_backoff(attempt: u32) -> Duration {
@@ -342,18 +372,19 @@ fn retry_backoff(attempt: u32) -> Duration {
     Duration::from_secs(secs)
 }
 
-/// GET JSON from Blockfrost with unlimited retries and no request timeout.
-/// Used for list pages that must eventually succeed.
+/// GET JSON from Blockfrost. Retries forever on failure; in-flight waits have
+/// no deadline (caller must use a no-timeout client).
 async fn bf_get_json_retry(
     http: &reqwest::Client,
     base: &str,
     path: &str,
     project_id: Option<&str>,
     label: &str,
+    unpaged: bool,
 ) -> Result<Value> {
     let mut attempt = 0u32;
     loop {
-        match bf_get(http, base, path, project_id).send().await {
+        match bf_get(http, base, path, project_id, unpaged).send().await {
             Ok(resp) => match resp.error_for_status() {
                 Ok(ok) => match ok.json::<Value>().await {
                     Ok(v) => return Ok(v),
@@ -392,7 +423,7 @@ async fn fetch_drep_metadata_retry(
 ) -> Option<DrepEntry> {
     let mut attempt = 0u32;
     loop {
-        match bf_get(http, base, path, project_id).send().await {
+        match bf_get(http, base, path, project_id, false).send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if status.as_u16() == 404 || status.as_u16() == 400 {
@@ -429,18 +460,38 @@ async fn fetch_drep_metadata_retry(
     }
 }
 
+enum ListScrape {
+    /// Embedded `metadata` present (possibly sparse names).
+    Embedded,
+    /// List has no `metadata` field — caller should fetch per-id `/metadata`.
+    NeedPerIdMetadata,
+}
+
 async fn scrape_dreps(
     cache: &DrepCache,
     http: &reqwest::Client,
     base: &str,
     project_id: Option<&str>,
 ) -> Result<()> {
-    // Primary + preferred: paginate GET /governance/dreps with embedded metadata
-    // (the fast path the RYO docs advertise). Only fall back to per-id /metadata
-    // when the list has no `metadata` field at all (older Blockfrost builds).
+    match scrape_list_unpaged(cache, http, base, project_id).await? {
+        Some(ListScrape::Embedded) => {
+            tracing::info!("drep cache: used unpaged /governance/dreps with embedded metadata");
+            return Ok(());
+        }
+        Some(ListScrape::NeedPerIdMetadata) => {
+            tracing::warn!(
+                "drep cache: unpaged /governance/dreps has no metadata field - fetching /metadata per id"
+            );
+            return scrape_list_and_metadata(cache, http, base, project_id).await;
+        }
+        None => {
+            tracing::info!("drep cache: unpaged incomplete or unused - falling back to pagination");
+        }
+    }
+
     match scrape_list_embedded(cache, http, base, project_id).await {
         Ok(true) => {
-            tracing::info!("drep cache: used embedded metadata on /governance/dreps");
+            tracing::info!("drep cache: used paginated /governance/dreps with embedded metadata");
             Ok(())
         }
         Ok(false) => {
@@ -453,7 +504,91 @@ async fn scrape_dreps(
     }
 }
 
-/// Page `GET /governance/dreps` and merge `metadata` names into `cache`.
+/// Merge embedded metadata names from list rows into `cache`.
+/// Returns `(saw_metadata_field, named_count)`.
+fn merge_embedded_rows(cache: &DrepCache, arr: &[Value]) -> (bool, usize) {
+    let mut saw_metadata_field = false;
+    let mut batch = HashMap::new();
+    for row in arr {
+        let Some(id) = row.get("drep_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if row.as_object().is_some_and(|o| o.contains_key("metadata")) {
+            saw_metadata_field = true;
+        }
+        if let Some(meta) = row.get("metadata") {
+            if let Some(entry) = DrepEntry::from_blockfrost_meta(meta) {
+                batch.insert(id.to_string(), entry);
+            }
+        }
+    }
+    let named = batch.len();
+    cache.remember_many(batch);
+    (saw_metadata_field, named)
+}
+
+/// RYO `unpaged: true` — one `GET /governance/dreps?retired=false&expired=false`.
+///
+/// Returns `None` when the response looks truncated (header ignored by a
+/// paginating proxy / public API) so the caller can paginate instead.
+async fn scrape_list_unpaged(
+    cache: &DrepCache,
+    http: &reqwest::Client,
+    base: &str,
+    project_id: Option<&str>,
+) -> Result<Option<ListScrape>> {
+    let path = dreps_list_path(None);
+    let rows = bf_get_json_retry(
+        http,
+        base,
+        &path,
+        project_id,
+        "GET /governance/dreps (unpaged, active)",
+        true,
+    )
+    .await?;
+    let Some(arr) = rows.as_array() else {
+        return Ok(None);
+    };
+    if arr.is_empty() {
+        return Ok(None);
+    }
+
+    // Public Blockfrost ignores unknown headers and returns the default page
+    // (count=100). If we got ≤ PAGE rows, check whether page 2 exists.
+    if arr.len() <= PAGE {
+        let probe = dreps_list_path(Some((PAGE, 2)));
+        let more = bf_get_json_retry(
+            http,
+            base,
+            &probe,
+            project_id,
+            "GET /governance/dreps?page=2 (unpaged probe)",
+            false,
+        )
+        .await?;
+        if more.as_array().is_some_and(|a| !a.is_empty()) {
+            tracing::info!(
+                "drep cache: unpaged returned {} rows but page 2 is non-empty - header ignored",
+                arr.len()
+            );
+            return Ok(None);
+        }
+    }
+
+    let (saw_meta, named) = merge_embedded_rows(cache, arr);
+    tracing::info!(
+        "drep cache: unpaged list ({} rows, {named} names)",
+        arr.len()
+    );
+    if saw_meta || named > 0 {
+        Ok(Some(ListScrape::Embedded))
+    } else {
+        Ok(Some(ListScrape::NeedPerIdMetadata))
+    }
+}
+
+/// Page `GET /governance/dreps` (active only) and merge `metadata` names.
 ///
 /// Returns `Ok(true)` when the endpoint embeds a `metadata` field (even if some
 /// rows lack names). Returns `Ok(false)` when the build has no `metadata` field
@@ -468,31 +603,18 @@ async fn scrape_list_embedded(
     let mut saw_metadata_field = false;
     let mut named = 0usize;
     loop {
-        let path = format!("/governance/dreps?count={PAGE}&page={page}");
+        let path = dreps_list_path(Some((PAGE, page)));
         let label = format!("GET {path}");
-        let rows = bf_get_json_retry(http, base, &path, project_id, &label).await?;
+        let rows = bf_get_json_retry(http, base, &path, project_id, &label, false).await?;
         let Some(arr) = rows.as_array() else {
             break;
         };
         if arr.is_empty() {
             break;
         }
-        let mut batch = HashMap::new();
-        for row in arr {
-            let Some(id) = row.get("drep_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if row.as_object().is_some_and(|o| o.contains_key("metadata")) {
-                saw_metadata_field = true;
-            }
-            if let Some(meta) = row.get("metadata") {
-                if let Some(entry) = DrepEntry::from_blockfrost_meta(meta) {
-                    batch.insert(id.to_string(), entry);
-                }
-            }
-        }
-        named += batch.len();
-        cache.remember_many(batch);
+        let (saw, batch_named) = merge_embedded_rows(cache, arr);
+        saw_metadata_field |= saw;
+        named += batch_named;
         tracing::info!(
             "drep cache: list page {page} ({} rows, {named} names so far)",
             arr.len()
@@ -579,9 +701,9 @@ async fn list_drep_ids(
     let mut ids = Vec::with_capacity(4_096);
     let mut page = 1u32;
     loop {
-        let path = format!("/governance/dreps?count={PAGE}&page={page}");
+        let path = dreps_list_path(Some((PAGE, page)));
         let label = format!("GET {path}");
-        let rows = bf_get_json_retry(http, base, &path, project_id, &label).await?;
+        let rows = bf_get_json_retry(http, base, &path, project_id, &label, false).await?;
         let Some(arr) = rows.as_array() else {
             break;
         };
@@ -715,7 +837,7 @@ pub async fn warm_from_events(
 mod tests {
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn named_row(i: usize) -> Value {
@@ -748,23 +870,28 @@ mod tests {
         assert_eq!(e.url.as_deref(), Some("https://example.com/drep.json"));
     }
 
+    #[test]
+    fn list_path_ends_with_active_filters() {
+        assert_eq!(
+            dreps_list_path(None),
+            "/governance/dreps?retired=false&expired=false"
+        );
+        assert_eq!(
+            dreps_list_path(Some((100, 3))),
+            "/governance/dreps?count=100&page=3&retired=false&expired=false"
+        );
+    }
+
     #[tokio::test]
-    async fn scrape_paginates_and_updates_memory() {
+    async fn scrape_unpaged_one_shot() {
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
             .and(path("/governance/dreps"))
-            .and(query_param("count", "100"))
-            .and(query_param("page", "1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(0, 100)))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/governance/dreps"))
-            .and(query_param("count", "100"))
-            .and(query_param("page", "2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(100, 5)))
+            .and(header("unpaged", "true"))
+            .and(query_param("retired", "false"))
+            .and(query_param("expired", "false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(0, 105)))
             .expect(1)
             .mount(&server)
             .await;
@@ -789,26 +916,116 @@ mod tests {
                 .and_then(|e| e.name),
             Some("DRep 104".into())
         );
-        // Durable file written.
         assert!(dir.path().join(CACHE_FILE).exists());
     }
 
     #[tokio::test]
-    async fn scrape_retries_until_page_succeeds() {
+    async fn scrape_falls_back_to_pagination_when_unpaged_truncated() {
         let server = MockServer::start().await;
 
-        // First two attempts for page 1 fail; third succeeds with a short page.
+        // "Unpaged" returns a single default page — header ignored.
         Mock::given(method("GET"))
             .and(path("/governance/dreps"))
+            .and(header("unpaged", "true"))
+            .and(query_param("retired", "false"))
+            .and(query_param("expired", "false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(0, 100)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Probe finds page 2 → fall back to pagination.
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(query_param("page", "2"))
+            .and(query_param("retired", "false"))
+            .and(query_param("expired", "false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(100, 5)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(query_param("count", "100"))
             .and(query_param("page", "1"))
+            .and(query_param("retired", "false"))
+            .and(query_param("expired", "false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body(0, 100)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DrepCache::load(Some(dir.path()));
+        let http = reqwest::Client::new();
+        let n = cache.refresh(&http, &server.uri(), None).await.unwrap();
+        assert_eq!(n, 105);
+        assert_eq!(cache.len(), 105);
+    }
+
+    #[tokio::test]
+    async fn scrape_waits_past_enricher_client_timeout() {
+        // Enricher's live client is 10s; scrape must still succeed if RYO is slower.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(header("unpaged", "true"))
+            .and(query_param("retired", "false"))
+            .and(query_param("expired", "false"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_secs(12))
+                    .set_body_json(page_body(0, 2)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(query_param("page", "2"))
+            .and(query_param("retired", "false"))
+            .and(query_param("expired", "false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DrepCache::load(Some(dir.path()));
+        // Deliberately pass a short-timeout client — refresh must ignore it.
+        let short = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let n = cache.refresh(&short, &server.uri(), None).await.unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[tokio::test]
+    async fn scrape_retries_until_unpaged_succeeds() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(header("unpaged", "true"))
+            .and(query_param("retired", "false"))
+            .and(query_param("expired", "false"))
             .respond_with(ResponseTemplate::new(503))
             .up_to_n_times(2)
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/governance/dreps"))
-            .and(query_param("page", "1"))
+            .and(header("unpaged", "true"))
+            .and(query_param("retired", "false"))
+            .and(query_param("expired", "false"))
             .respond_with(ResponseTemplate::new(200).set_body_json(page_body(0, 3)))
+            .mount(&server)
+            .await;
+        // ≤ PAGE rows → probe page 2 (empty) so unpaged is accepted.
+        Mock::given(method("GET"))
+            .and(path("/governance/dreps"))
+            .and(query_param("page", "2"))
+            .and(query_param("retired", "false"))
+            .and(query_param("expired", "false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
             .mount(&server)
             .await;
 
