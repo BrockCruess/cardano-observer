@@ -42,7 +42,11 @@
 }
 
 * { box-sizing: border-box; }
-html { scrollbar-color: #2b3550 transparent; }
+html {
+  scrollbar-color: #2b3550 transparent;
+  overflow-x: clip;
+  max-width: 100%;
+}
 
 body {
   margin: 0;
@@ -55,6 +59,9 @@ body {
   font-size: 15px;
   line-height: 1.45;
   min-height: 100vh;
+  max-width: 100%;
+  overflow-x: clip;
+  overscroll-behavior-x: none;
 }
 
 button { font-family: inherit; }
@@ -526,6 +533,18 @@ header {
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
+}
+/* Native <select> reserves a wide gutter for its chevron — draw our own. */
+.tb-select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 22px;
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none' stroke='%239aa3b5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 6l4 4 4-4'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 10px;
 }
 .tb-btn { display: inline-flex; align-items: center; gap: 6px; }
 .tb-btn svg { width: 14px; height: 14px; }
@@ -542,6 +561,7 @@ header {
   max-width: 1280px;
   margin: 0 auto;
   padding: 14px 18px 80px;
+  min-width: 0;
 }
 
 .block-group { position: relative; overflow-anchor: none; }
@@ -562,7 +582,8 @@ header {
   padding-left: var(--group-pad);
   margin-bottom: 0;
 }
-/* Spine through the group's cards */
+/* Spine through the group's cards — hard gap around the block diamond so the
+   line meets the diamond instead of running through it. */
 #feed.vertical .block-group::before {
   content: "";
   position: absolute;
@@ -570,7 +591,13 @@ header {
   top: 0;
   bottom: 0;
   width: var(--spine-w);
-  background: color-mix(in srgb, var(--c-governance) 45%, transparent);
+  /* Diamond at top:20px / 12px on the block card → cover ~17–35px. */
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--c-governance) 45%, transparent) 0 14px,
+    transparent 14px 38px,
+    color-mix(in srgb, var(--c-governance) 45%, transparent) 38px 100%
+  );
 }
 /* Short dotted spine between different blocks (empty blocks stay collapsed) */
 #feed.vertical .block-group:not(.f-hide) {
@@ -599,7 +626,10 @@ header {
   );
 }
 
-/* block node dot on the spine - centered on the 2px line */
+/* block node diamond on the spine — above the spine, never under it */
+#feed.vertical .block-group > .card-block {
+  z-index: 1;
+}
 #feed.vertical .block-group > .card-block::before {
   content: "";
   position: absolute;
@@ -610,6 +640,7 @@ header {
   border-radius: 4px;
   transform: rotate(45deg);
   background: var(--c-block);
+  z-index: 2;
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--c-block) 22%, transparent),
               0 0 14px color-mix(in srgb, var(--c-block) 55%, transparent);
 }
@@ -621,7 +652,7 @@ header {
 .group-events { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
 #feed.vertical .group-events { padding-left: var(--events-pad); }
 
-/* event connector ticks - meet spine center; vertically mid-card */
+/* event connector ticks - stop at the outer edge of the event-dot (never through it) */
 #feed.vertical .group-events .card { position: relative; }
 #feed.vertical .group-events .card::before {
   content: "";
@@ -630,7 +661,7 @@ header {
   top: 50%;
   width: calc(
     var(--group-pad) + var(--events-pad) + var(--card-b)
-    - var(--spine-x) - var(--event-dot-gap)
+    - var(--spine-x) - var(--event-dot-gap) - var(--event-dot) / 2
   );
   height: 2px;
   transform: translateY(-50%);
@@ -646,54 +677,57 @@ header {
   border-radius: 50%;
   transform: translateY(-50%);
   background: var(--evc, var(--muted));
+  /* Above the spine tick so the line meets the dot edge, never shows through. */
+  z-index: 1;
 }
 
-/* ── Child event hierarchy: indent + guide from the parent event-dot ───── */
+/* ── Child event hierarchy: indent + measured SVG pipes ───────────────── */
+/* Connectors are drawn in JS (see drawHierarchyPipes) from measured card
+   anchors — CSS pixel “reach” guesses cannot track variable card heights. */
 #feed.vertical {
   --child-indent: 22px;
-  /* Child card edge → parent event-dot center (same column as the green node). */
-  --child-rail: calc(var(--child-indent) + var(--event-dot-gap));
-  /* Reach from the gap above the first child up to the parent's mid-dot. */
-  --child-rail-up: 32px;
+  --child-rail-color: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+
+#feed.vertical .group-events {
+  position: relative;
+}
+
+#feed.vertical .group-events > .ev-pipes {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 0;
+}
+
+#feed.vertical .group-events > .ev-pipes path {
+  fill: none;
+  stroke: var(--child-rail-color);
+  stroke-width: 2;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+}
+
+#feed.vertical .group-events > .card {
+  z-index: 1;
 }
 
 #feed.vertical .group-events .card.ev-child {
+  /* Indent without extending past the parent — bare margin-left on a full-width
+     block is a classic mobile horizontal-scroll overflow. */
   margin-left: var(--child-indent);
+  width: calc(100% - var(--child-indent));
+  max-width: calc(100% - var(--child-indent));
 }
-/* Vertical rail in the parent-dot column + elbow into the child card. */
-#feed.vertical .group-events .card.ev-child::before {
-  left: calc(-1 * var(--child-rail));
-  top: -6px;         /* bridge the 6px gap so consecutive children join up */
-  bottom: 0;
-  width: 2px;
-  height: auto;
-  transform: none;
-  background: color-mix(in srgb, var(--muted) 45%, transparent);
-}
-/* First child under a parent: extend the rail up to the parent's event-dot. */
-#feed.vertical .group-events .card:not(.ev-child) + .card.ev-child::before {
-  top: calc(-6px - var(--child-rail-up));
-}
-/* Last child in a run: stop at the elbow instead of trailing past the card. */
-#feed.vertical .group-events .card.ev-child:last-child::before,
-#feed.vertical .group-events .card.ev-child:has(+ .card:not(.ev-child))::before {
-  bottom: auto;
-  height: calc(50% + 6px);
-}
-#feed.vertical .group-events .card:not(.ev-child) + .card.ev-child:last-child::before,
-#feed.vertical .group-events .card:not(.ev-child) + .card.ev-child:has(+ .card:not(.ev-child))::before {
-  top: calc(-6px - var(--child-rail-up));
-  bottom: auto;
-  height: calc(var(--child-rail-up) + 6px + 50%);
-}
+
+/* Hierarchy pipes are SVG — suppress CSS ticks/dots on indented children. */
+#feed.vertical .group-events .card.ev-child::before,
 #feed.vertical .group-events .card.ev-child::after {
-  left: calc(-1 * var(--child-rail));
-  top: 50%;
-  width: var(--child-rail);
-  height: 2px;
-  border-radius: 0;
-  transform: translateY(-50%);
-  background: color-mix(in srgb, var(--muted) 45%, transparent);
+  content: none;
 }
 
 /* ── Light-cone hover highlighting ──────────────────────────────────────── */
@@ -1115,7 +1149,6 @@ header {
 body.compact .card { padding: 6px 12px; border-radius: 10px; }
 body.compact .ev-icon { width: 26px; height: 26px; border-radius: 8px; margin-top: 1px; }
 body.compact .ev-icon svg { width: 14px; height: 14px; }
-body.compact #feed.vertical { --child-rail-up: 26px; }
 body.compact .ev-title { font-size: 13px; }
 body.compact .ev-sub { font-size: 12px; margin-top: 0; }
 body.compact .group-events { gap: 4px; margin: 2px 0 4px; }
@@ -1387,6 +1420,9 @@ footer .ft-repo:hover {
 /* Search prime - spinner only, scoped to the events list */
 #feed-shell {
   position: relative;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: clip;
 }
 .search-prime {
   position: absolute;
@@ -1474,19 +1510,36 @@ body.search-priming #feed {
 @media (max-width: 720px) {
   .trending { padding: 5px 12px; gap: 8px; }
   .hdr-inner { padding: 8px 12px; gap: 10px; }
-  .stats { width: 100%; overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
+  .stats { width: 100%; max-width: 100%; overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
   .stats::-webkit-scrollbar { display: none; }
   .tile { min-width: 88px; flex: none; }
-  #toolbar { padding: 10px 12px 2px; }
-  #search { width: 100%; order: 9; }
-  #feed { padding: 12px 10px 80px; }
+  #toolbar { padding: 10px 12px 2px; max-width: 100%; }
+  .tb-right {
+    width: 100%;
+    margin-left: 0;
+    gap: 5px;
+  }
+  #search { width: 100%; max-width: 100%; order: 9; flex: 1 0 100%; }
+  /* Keep min-ADA / reset / layout / compact on one row under search. */
+  .tb-right .tb-select,
+  .tb-right .tb-btn {
+    padding: 5px 8px;
+    font-size: 11.5px;
+  }
+  .tb-right .tb-select {
+    padding-right: 18px;
+    background-position: right 6px center;
+    background-size: 9px;
+  }
+  #feed { padding: 12px 10px 80px; max-width: 100%; }
   #feed.vertical {
     --spine-left: 7px;
     --group-pad: 24px;
     --events-pad: 4px;
     --block-dot: 10px;
+    --child-indent: 16px;
   }
-  #feed.horizontal .block-group { width: 86vw; }
+  #feed.horizontal .block-group { width: min(86vw, 100%); max-width: 100%; }
   .ev-time { font-size: 10.5px; }
   #overlay { padding: 0; }
   #modal { max-width: none; min-height: 100vh; border-radius: 0; border: none; }

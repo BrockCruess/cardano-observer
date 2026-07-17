@@ -869,6 +869,7 @@ function applyFilters() {
       queueMicrotask(() => onFeedFiltersChanged());
     }
   }
+  scheduleHierarchyPipes();
 }
 
 /** Visible (filter-matching) events currently shown in the feed. */
@@ -1108,6 +1109,38 @@ function buildSplitFilterChip(chips, {
   chips.appendChild(wrap);
 }
 
+/** Turn every category / venue / subtype filter back on; clear min-ADA and search. */
+function resetFilters() {
+  for (const c of CATS) settings.filters[c.id] = true;
+  for (const v of DEX_VENUES) settings.dexVenues[v] = true;
+  for (const a of DAPP_APPS) settings.dappApps[a] = true;
+  for (const g of GOV_TYPES) settings.govTypes[g.id] = true;
+  settings.minAda = 0;
+  urlSearchPreset = "";
+
+  const minAda = $("min-ada");
+  if (minAda) minAda.value = "0";
+
+  // Sync chip UI without rebuilding (split chips register document listeners).
+  for (const wrap of document.querySelectorAll("#chips .chip-wrap")) {
+    wrap.classList.add("on");
+    wrap.querySelector(".chip-main")?.classList.add("on");
+  }
+  for (const chip of document.querySelectorAll("#chips > .chip")) {
+    chip.classList.add("on");
+  }
+
+  const search = $("search");
+  if (search?.value.trim() || searchPriming) {
+    search.value = "";
+    // cancelSearchPrime clears prime state and calls applyFilters.
+    cancelSearchPrime();
+    return;
+  }
+
+  applyFilters();
+}
+
 function buildToolbar() {
   const chips = $("chips");
   for (const c of CATS) {
@@ -1202,11 +1235,11 @@ function buildToolbar() {
   minAda.value = String(settings.minAda);
   minAda.onchange = () => { settings.minAda = Number(minAda.value); applyFilters(); };
 
+  $("reset-filters-btn").onclick = () => resetFilters();
+
   const layoutBtn = $("layout-btn");
   const setLayoutBtn = () => {
-    layoutBtn.innerHTML = settings.layout === "vertical"
-      ? svg('<path d="M12 4v16M8 8l4-4 4 4M8 16l4 4 4-4"/>') + "vertical"
-      : svg('<path d="M4 12h16M8 8l-4 4 4 4M16 8l4 4-4 4"/>') + "horizontal";
+    layoutBtn.textContent = settings.layout === "vertical" ? "vertical" : "horizontal";
   };
   setLayoutBtn();
   feed.className = settings.layout;
@@ -1216,6 +1249,7 @@ function buildToolbar() {
     feed.className = settings.layout;
     store.set("co_layout_v1", settings.layout);
     setLayoutBtn();
+    scheduleHierarchyPipes();
   };
 
   const compactBtn = $("compact-btn");
@@ -1227,6 +1261,7 @@ function buildToolbar() {
     compactBtn.classList.toggle("on", settings.compact);
     store.set("co_compact_v1", settings.compact);
     requestAnimationFrame(() => layoutTxStakes());
+    scheduleHierarchyPipes();
   };
 }
 
@@ -2083,6 +2118,201 @@ function resortFeedBySlot() {
   } else if (feed.scrollLeft !== x) {
     feed.scrollLeft = x;
   }
+  scheduleHierarchyPipes();
+}
+
+/* ── Hierarchy pipes (measured SVG, not CSS pixel guesses) ────────────── */
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+let hierarchyPipeTimer = 0;
+let hierarchyPipeMaxTimer = 0;
+let hierarchyPipeDrawing = false;
+let hierarchyPipeRo = null;
+let hierarchyPipeMo = null;
+
+function hierarchyGeom() {
+  const cs = getComputedStyle(feed);
+  return {
+    dot: parseFloat(cs.getPropertyValue("--event-dot")) || 6,
+    gap: parseFloat(cs.getPropertyValue("--event-dot-gap")) || 10,
+  };
+}
+
+/** Visible in layout (not f-hide and not display:none via category CSS). */
+function cardPipeVisible(card) {
+  if (card.classList.contains("f-hide")) return false;
+  return card.getClientRects().length > 0;
+}
+
+/** Parent event-dot center / child elbow, in host-local coordinates. */
+function hierarchyAnchor(card, hostRect, geom, role) {
+  const r = card.getBoundingClientRect();
+  const bl = parseFloat(getComputedStyle(card).borderLeftWidth) || 0;
+  const y = r.top + r.height / 2 - hostRect.top;
+  if (role === "dot") {
+    return {
+      x: r.left + bl - geom.gap - hostRect.left,
+      y,
+    };
+  }
+  // Elbow ends at the child's outer left edge (colored border).
+  return { x: r.left - hostRect.left, y };
+}
+
+function ensurePipeSvg(host) {
+  let svg = host.querySelector(":scope > .ev-pipes");
+  if (!svg) {
+    svg = document.createElementNS(SVG_NS, "svg");
+    svg.classList.add("ev-pipes");
+    svg.setAttribute("aria-hidden", "true");
+    host.insertBefore(svg, host.firstChild);
+    hierarchyPipeRo?.observe(host);
+  }
+  return svg;
+}
+
+function clearGroupPipes(host) {
+  const svg = host.querySelector(":scope > .ev-pipes");
+  if (svg) svg.replaceChildren();
+}
+
+function drawGroupHierarchyPipes(host) {
+  if (!feed.classList.contains("vertical") || host.closest(".block-group.f-hide")) {
+    clearGroupPipes(host);
+    return;
+  }
+  const cards = [...host.querySelectorAll(":scope > .card")].filter(cardPipeVisible);
+  const runs = [];
+  for (let i = 0; i < cards.length; i++) {
+    const parent = cards[i];
+    if (parent.classList.contains("ev-child")) continue;
+    const kids = [];
+    for (let j = i + 1; j < cards.length && cards[j].classList.contains("ev-child"); j++) {
+      kids.push(cards[j]);
+    }
+    if (kids.length) runs.push({ parent, kids });
+  }
+  if (!runs.length) {
+    clearGroupPipes(host);
+    return;
+  }
+
+  const hostRect = host.getBoundingClientRect();
+  const geom = hierarchyGeom();
+  const svg = ensurePipeSvg(host);
+  const w = Math.max(1, host.scrollWidth || host.clientWidth);
+  const h = Math.max(1, host.scrollHeight || host.clientHeight);
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("width", String(w));
+  svg.setAttribute("height", String(h));
+  svg.replaceChildren();
+
+  for (const { parent, kids } of runs) {
+    const p = hierarchyAnchor(parent, hostRect, geom, "dot");
+    const elbows = kids.map((k) => hierarchyAnchor(k, hostRect, geom, "elbow"));
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    // Subpixel positions from getBoundingClientRect — matches the CSS event-dot.
+    const railX = p.x;
+    const y0 = p.y + geom.dot / 2 - 0.5;
+    const y1 = elbows[elbows.length - 1].y;
+    let d = `M${railX} ${y0}V${y1}`;
+    for (const e of elbows) {
+      if (!Number.isFinite(e.x) || !Number.isFinite(e.y)) continue;
+      d += `M${railX} ${e.y}H${e.x}`;
+    }
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    svg.appendChild(path);
+  }
+}
+
+function drawAllHierarchyPipes() {
+  if (!feed.classList.contains("vertical")) {
+    feed.querySelectorAll(".ev-pipes").forEach((el) => el.remove());
+    return;
+  }
+  // Avoid RO feedback while we mutate SVG geometry.
+  hierarchyPipeRo?.disconnect();
+  try {
+    for (const host of feed.querySelectorAll(".group-events")) {
+      try {
+        drawGroupHierarchyPipes(host);
+      } catch (err) {
+        console.warn("hierarchy pipes:", err);
+      }
+    }
+  } finally {
+    if (hierarchyPipeRo) {
+      hierarchyPipeRo.observe(feed);
+      for (const host of feed.querySelectorAll(".group-events")) {
+        hierarchyPipeRo.observe(host);
+      }
+    }
+  }
+}
+
+function flushHierarchyPipes() {
+  if (hierarchyPipeTimer) {
+    clearTimeout(hierarchyPipeTimer);
+    hierarchyPipeTimer = 0;
+  }
+  if (hierarchyPipeMaxTimer) {
+    clearTimeout(hierarchyPipeMaxTimer);
+    hierarchyPipeMaxTimer = 0;
+  }
+  if (hierarchyPipeDrawing) {
+    scheduleHierarchyPipes();
+    return;
+  }
+  hierarchyPipeDrawing = true;
+  requestAnimationFrame(() => {
+    try {
+      drawAllHierarchyPipes();
+    } finally {
+      hierarchyPipeDrawing = false;
+    }
+  });
+}
+
+function scheduleHierarchyPipes() {
+  // Trailing debounce — but history loading mutates the DOM continuously, so
+  // also force a draw every 200ms or pipes never appear until the feed goes quiet.
+  if (hierarchyPipeTimer) clearTimeout(hierarchyPipeTimer);
+  hierarchyPipeTimer = setTimeout(flushHierarchyPipes, 64);
+  if (!hierarchyPipeMaxTimer) {
+    hierarchyPipeMaxTimer = setTimeout(flushHierarchyPipes, 200);
+  }
+}
+
+function ensureHierarchyPipeObserver() {
+  if (typeof ResizeObserver !== "undefined" && !hierarchyPipeRo) {
+    hierarchyPipeRo = new ResizeObserver(() => scheduleHierarchyPipes());
+    hierarchyPipeRo.observe(feed);
+    for (const host of feed.querySelectorAll(".group-events")) {
+      hierarchyPipeRo.observe(host);
+    }
+  }
+  if (typeof MutationObserver !== "undefined" && !hierarchyPipeMo) {
+    // childList only — class churn (enter anim / light-cone) would never settle.
+    hierarchyPipeMo = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type !== "childList") continue;
+        const nodes = [...m.addedNodes, ...m.removedNodes];
+        if (
+          nodes.length
+          && nodes.every((n) => n.nodeType === 1 && (
+            n.classList?.contains("ev-pipes")
+            || n.closest?.(".ev-pipes")
+          ))
+        ) {
+          continue;
+        }
+        scheduleHierarchyPipes();
+        return;
+      }
+    });
+    hierarchyPipeMo.observe(feed, { childList: true, subtree: true });
+  }
 }
 
 /* ── Enter animations (tip slide then fade / history fade) ────────────── */
@@ -2229,6 +2459,7 @@ function insertTipEvents(events) {
 
   const afterSlide = () => {
     fadeInTipCards(pendingCards);
+    scheduleHierarchyPipes();
     // Free the lock after fade so the next batch measures settled layout.
     setTimeout(releaseTipAnim, FEED_ENTER_MS + 50);
   };
@@ -2618,6 +2849,7 @@ function newGroup(blockHash, ev) {
   const evs = document.createElement("div");
   evs.className = "group-events";
   g.appendChild(evs);
+  hierarchyPipeRo?.observe(evs);
   // Temporary placement; scheduleFeedResort() establishes final slot order.
   feed.prepend(g);
   groupOrder.unshift(g);
@@ -4649,8 +4881,10 @@ $("trending-track")?.addEventListener("click", (e) => {
 /* ── Boot ─────────────────────────────────────────────────────────────── */
 
 buildToolbar();
+ensureHierarchyPipeObserver();
 applyFilters();
 loadRegistryMeta();
 loadDrepMeta();
 loadGovMeta();
 connect();
+window.addEventListener("resize", scheduleHierarchyPipes);
