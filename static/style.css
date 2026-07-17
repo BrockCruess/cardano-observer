@@ -440,6 +440,17 @@ header {
 }
 .chip-sub-menu[hidden] { display: none; }
 
+.chip-sub-all {
+  font-weight: 700;
+  color: var(--text);
+}
+.chip-sub-sep {
+  height: 1px;
+  margin: 3px 4px;
+  background: var(--border);
+  flex: none;
+}
+
 .chip-sub-opt {
   display: flex;
   align-items: center;
@@ -1341,7 +1352,10 @@ footer .ft-repo:hover {
   letter-spacing: 0.01em;
   overflow-anchor: none;
 }
-.history-loader.show { visibility: visible; }
+.history-loader.show {
+  visibility: visible;
+  opacity: 1;
+}
 #feed.horizontal .history-loader {
   flex: none;
   width: 160px;
@@ -1361,6 +1375,10 @@ footer .ft-repo:hover {
 .history-loader[data-state="end"] .hist-t {
   font-weight: 500;
   opacity: 0.75;
+}
+.history-loader[data-state="seek"] .hist-t {
+  font-weight: 500;
+  opacity: 0.8;
 }
 @keyframes hist-spin {
   to { transform: rotate(360deg); }

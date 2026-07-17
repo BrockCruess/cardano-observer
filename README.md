@@ -254,7 +254,7 @@ Handle API    ◀── stake → preferred $handle (optional)
 - `src/deleg.rs` - stake/DRep from→to tracker across live + restored events
 - `src/demo.rs` - synthetic event stream when `DEMO=true`
 - `src/server.rs` - axum server: embedded UI, `/ws` stream, `/api/events`,
-  `/api/buffer`, `/api/trending`, `/api/tx`, `/api/asset`, `/api/pool`,
+  `/api/buffer` (chunked via `?before=&limit=`), `/api/trending`, `/api/tx`, `/api/asset`, `/api/pool`,
   `/api/drep`, `/api/dreps`, `/api/handle`, `/api/gov-action`,
   `/api/gov-actions`, `/api/stats`
 - `static/` - the whole frontend: one HTML file, one stylesheet, one script;
@@ -268,8 +268,10 @@ Handle API    ◀── stake → preferred $handle (optional)
 - Event colours were chosen as a colourblind-checked categorical palette; every
   card also carries an icon and a text label, so colour never stands alone.
 - Each new tab gets a short tip snapshot (~25 events); scroll loads older
-  pages from disk. The browser also background-loads `/api/buffer` (the full
-  `EVENT_RETENTION_HOURS` window) so search stays local and fast.
+  pages from the in-memory window, then disk. The browser background-hydrates
+  `/api/buffer?before=&limit=` in steady chunks (full `EVENT_RETENTION_HOURS`
+  window into RAM) so search and filter changes stay local and fast — DOM only
+  mounts a viewport (or every match, when the filtered set is small).
 
 ## Acknowledgments
 

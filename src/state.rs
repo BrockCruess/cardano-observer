@@ -367,6 +367,25 @@ impl AppState {
             "events": &*events,
             "buffered": events.len(),
             "retention_hours": self.event_retention_secs / 3600,
+            "exhausted": true,
+        })
+    }
+
+    /// One page of the in-memory retention window for progressive client hydrate.
+    /// Same cursor semantics as [`Self::events_before`], but never falls through
+    /// to disk — `exhausted` means the retention window is fully covered.
+    pub fn retention_buffer_page(&self, before_id: u64, limit: usize) -> Value {
+        let limit = limit.clamp(1, 5_000);
+        let buf = self.events.lock().unwrap();
+        let older: Vec<&ChainEvent> = buf.iter().filter(|e| e.id < before_id).collect();
+        let start = older.len().saturating_sub(limit);
+        let page: Vec<&ChainEvent> = older[start..].to_vec();
+        let exhausted = start == 0;
+        json!({
+            "events": page,
+            "buffered": buf.len(),
+            "retention_hours": self.event_retention_secs / 3600,
+            "exhausted": exhausted,
         })
     }
 

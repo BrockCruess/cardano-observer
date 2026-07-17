@@ -144,6 +144,13 @@ struct EventsQuery {
 }
 
 #[derive(Deserialize)]
+struct BufferQuery {
+    /// Only return retention-window events with id < before (newest page of older).
+    before: Option<u64>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
 struct SearchQuery {
     q: String,
     /// Only return matches with id < before (for paging older hits).
@@ -157,8 +164,16 @@ async fn api_events(State(ctx): State<ServerCtx>, Query(q): Query<EventsQuery>) 
     Json(ctx.state.events_before(before, limit)).into_response()
 }
 
-/// Full in-memory retention window for client-side search indexing.
-async fn api_buffer(State(ctx): State<ServerCtx>) -> Response {
+/// In-memory retention window for client-side search / feed hydrate.
+///
+/// - No query → full window (compat).
+/// - `?before=&limit=` → one page for progressive hydrate (never disk).
+async fn api_buffer(State(ctx): State<ServerCtx>, Query(q): Query<BufferQuery>) -> Response {
+    if q.before.is_some() || q.limit.is_some() {
+        let before = q.before.unwrap_or(u64::MAX);
+        let limit = q.limit.unwrap_or(2_500);
+        return Json(ctx.state.retention_buffer_page(before, limit)).into_response();
+    }
     Json(ctx.state.retention_buffer()).into_response()
 }
 
