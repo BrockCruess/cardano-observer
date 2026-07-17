@@ -3629,11 +3629,20 @@ function maybeLoadHistory() {
   loadHistory();
 }
 
-/** Pin viewport across a DOM mutation that would otherwise jump to the new end. */
-async function withPinnedFeedScroll(fn) {
+/**
+ * Pin viewport across a *synchronous* DOM mutation that would otherwise jump.
+ *
+ * Async work (network / yieldToBrowser) is not pinned: restoring a scrollY
+ * captured before `await` snaps the user back to the bottom if they scroll
+ * toward the tip while history is still loading.
+ */
+function withPinnedFeedScroll(fn) {
   const y = window.scrollY;
   const x = feed.scrollLeft;
-  const result = await fn();
+  const result = fn();
+  if (result != null && typeof result.then === "function") {
+    return result;
+  }
   const restore = () => {
     if (settings.layout === "vertical") {
       if (window.scrollY !== y) window.scrollTo(0, y);
