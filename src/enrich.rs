@@ -10,6 +10,7 @@
 use crate::config::Config;
 use crate::dreps::{self, DrepCache, DrepEntry};
 use crate::gov_actions::{self, GovActionCache};
+use crate::handles::HandleCache;
 use crate::pools::{PoolCache, PoolEntry};
 use crate::registry::TokenRegistry;
 use crate::trending::KeywordMeta;
@@ -32,6 +33,8 @@ pub struct Enricher {
     drep_cache: DrepCache,
     /// Durable gov-action title cache - `{tx}#{index}` → CIP-108 title.
     gov_action_cache: GovActionCache,
+    /// ADA Handle preferred-name lookups (optional).
+    handles: HandleCache,
     assets: Mutex<HashMap<String, Value>>,
 }
 
@@ -77,6 +80,7 @@ impl Enricher {
             pool_cache,
             drep_cache,
             gov_action_cache,
+            handles: HandleCache::new(config.ada_handle_url.clone(), config.ada_handle_api),
             assets: Mutex::new(HashMap::new()),
         }
     }
@@ -460,6 +464,11 @@ impl Enricher {
         };
         self.pool_cache.remember(pool_id, entry);
         meta
+    }
+
+    /// Preferred ADA Handle for a stake (or payment) address, when enabled.
+    pub async fn handle(&self, address: &str) -> Value {
+        self.handles.resolve(address).await
     }
 
     /// DRep CIP-119 givenName (and optional image / metadata url).

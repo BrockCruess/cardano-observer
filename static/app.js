@@ -879,6 +879,7 @@ function buildToolbar() {
     document.body.classList.toggle("compact", settings.compact);
     compactBtn.classList.toggle("on", settings.compact);
     store.set("co_compact_v1", settings.compact);
+    requestAnimationFrame(() => layoutTxStakes());
   };
 }
 
@@ -1009,13 +1010,15 @@ function cardBody(ev) {
       ]);
     }
     case "transaction":
+      // Stakes sit outside `sub()` so they can flex-grow and fill remaining
+      // card width (same idea as token-transfer asset chips).
       return sub([
         `<b>${fmtAda(d.ada)}</b>`,
         `${fmtInt(d.inputs)} in → ${fmtInt(d.outputs)} out`,
         `fee ${fmtAda(d.fee)}`,
         d.script ? `<span class="badge contract">contract</span>` : "",
         d.assets ? `${fmtInt(d.assets)} asset${d.assets > 1 ? "s" : ""}` : "",
-      ]);
+      ]) + txStakesHtml(d.stakes);
     case "token_transfer":
       return assetChipsHtml(d.assets);
     case "mint":
@@ -1025,7 +1028,7 @@ function cardBody(ev) {
     case "delegation": {
       const from = d.fromPool
         ? `<span class="pool-id" data-pool="${esc(d.fromPool)}" title="${esc(d.fromPool)}">${esc(short(d.fromPool, 10, 4))}</span>`
-        : (d.stake ? `<span class="hash">${esc(short(d.stake, 12, 5))}</span>` : "");
+        : stakeSpan(d.stake, 12, 5);
       const to = d.pool
         ? `<span class="pool-id" data-pool="${esc(d.pool)}" title="${esc(d.pool)}">${esc(short(d.pool, 10, 4))}</span>`
         : "";
@@ -1034,17 +1037,17 @@ function cardBody(ev) {
     case "vote_delegation": {
       const from = d.fromDrep
         ? drepSpan(d.fromDrep, d.fromDrepName)
-        : (d.stake ? `<span class="hash">${esc(short(d.stake, 12, 5))}</span>` : "");
+        : stakeSpan(d.stake, 12, 5);
       const to = drepSpan(d.drep, d.drepName);
       return sub([from && to ? `${from} <span class="sep">→</span> ${to}` : (to || from)]);
     }
     case "stake_registration":
     case "stake_deregistration":
-      return d.stake ? `<span class="hash">${esc(short(d.stake, 14, 6))}</span>` : "";
+      return stakeSpan(d.stake, 14, 6);
     case "withdrawal":
       return sub([
         `<b>${fmtAda(d.lovelace)}</b>`,
-        d.account ? `<span class="hash">${esc(short(d.account, 12, 5))}</span>` : "",
+        stakeSpan(d.account, 12, 5),
       ]);
     case "pool_registration":
       return sub([
@@ -1120,7 +1123,7 @@ function cardBody(ev) {
     case "dex_cancel": {
       const flow = dexFlowHtml(d);
       const status = dexStatusPill(ev, d);
-      return sub([flow, status]);
+      return sub([flow, status, actorSpan(d)]);
     }
     case "dapp_activity": {
       const iag = d.iag != null
@@ -1135,6 +1138,7 @@ function cardBody(ev) {
         nodeId,
         iag,
         ada,
+        actorSpan(d),
       ]);
     }
     default:
@@ -1166,6 +1170,143 @@ function isLookupDrepId(id) {
     && (id.startsWith("drep1") || id.startsWith("drep_script1"))
     && id.length >= 50
     && id.length <= 120;
+}
+
+function isLookupStakeAddr(addr) {
+  return typeof addr === "string"
+    && (addr.startsWith("stake1") || addr.startsWith("stake_test1"))
+    && addr.length >= 50
+    && addr.length <= 120;
+}
+
+function isLookupPaymentAddr(addr) {
+  return typeof addr === "string"
+    && (addr.startsWith("addr1") || addr.startsWith("addr_test1"))
+    && addr.length >= 50
+    && addr.length <= 120;
+}
+
+function isLookupHandleAddr(addr) {
+  return isLookupStakeAddr(addr) || isLookupPaymentAddr(addr);
+}
+
+/** Actor on dex/dapp cards: `data.stake` preferred, else payment `data.address`. */
+function actorSpan(d, head = 12, tail = 5) {
+  if (!d || typeof d !== "object") return "";
+  if (d.stake) return handleSpan(d.stake, head, tail);
+  if (d.address) return handleSpan(d.address, head, tail);
+  return "";
+}
+
+/** All stake pills; `layoutTxStakes` hides what won't fit and adds a +N pill. */
+function txStakesHtml(stakes) {
+  const list = Array.isArray(stakes)
+    ? stakes.filter((s) => typeof s === "string" && s)
+    : [];
+  if (!list.length) return "";
+  return `<span class="tx-stakes">${list.map((s) => handleSpan(s, 10, 4)).join("")}</span>`;
+}
+
+function stakeMoreTitle(addrs) {
+  return addrs.map((s) => {
+    const h = handleMeta.get(s)?.handle;
+    return h ? `$${h}` : short(s, 12, 5);
+  }).join(" · ");
+}
+
+/** Fit stake/handle pills into the available card width; overflow → +N. */
+function layoutTxStakes(root = document) {
+  const nodes = root.querySelectorAll
+    ? root.querySelectorAll(".tx-stakes")
+    : [];
+  nodes.forEach(fitTxStakes);
+}
+
+function fitTxStakes(el) {
+  if (!el || !el.isConnected) return;
+  el.querySelector(".stake-more")?.remove();
+  const pills = [...el.children].filter((c) => c.classList.contains("hash")
+    || c.classList.contains("ada-handle"));
+  if (!pills.length) return;
+
+  // Reveal everything to measure true widths.
+  for (const p of pills) {
+    p.hidden = false;
+    p.style.removeProperty("display");
+  }
+
+  const avail = el.clientWidth;
+  if (avail <= 1) return;
+
+  const styles = getComputedStyle(el);
+  const gap = parseFloat(styles.columnGap || styles.gap) || 4;
+
+  const widths = pills.map((p) => p.getBoundingClientRect().width);
+  const allWidth = widths.reduce((s, w, i) => s + w + (i ? gap : 0), 0);
+  if (allWidth <= avail + 0.5) return; // everything fits
+
+  // Probe +N width (worst-case digit count for this list).
+  const probe = document.createElement("span");
+  probe.className = "stake-more";
+  probe.textContent = `+${pills.length}`;
+  probe.style.visibility = "hidden";
+  el.appendChild(probe);
+  const moreW = probe.getBoundingClientRect().width;
+  probe.remove();
+
+  let used = 0;
+  let fit = 0;
+  for (let i = 0; i < pills.length; i++) {
+    const next = used + (fit ? gap : 0) + widths[i];
+    if (next + gap + moreW > avail + 0.5) break;
+    used = next;
+    fit++;
+  }
+  // Prefer at least one pill when the row can hold pill + +N.
+  if (fit === 0 && widths[0] + gap + moreW <= avail + 0.5) fit = 1;
+
+  const hiddenAddrs = [];
+  pills.forEach((p, i) => {
+    if (i < fit) {
+      p.hidden = false;
+    } else {
+      p.hidden = true;
+      hiddenAddrs.push(p.dataset.handle || p.dataset.stake || p.title || "");
+    }
+  });
+
+  if (!hiddenAddrs.length) return;
+  const more = document.createElement("span");
+  more.className = "stake-more";
+  more.textContent = `+${hiddenAddrs.length}`;
+  more.title = stakeMoreTitle(hiddenAddrs.filter(Boolean));
+  el.appendChild(more);
+}
+
+let txStakesRo = null;
+function ensureTxStakesObserver() {
+  if (txStakesRo || typeof ResizeObserver === "undefined") return;
+  txStakesRo = new ResizeObserver((entries) => {
+    for (const e of entries) layoutTxStakes(e.target);
+  });
+}
+
+/** Truncated address; enrichHandles swaps in `$handle` when known. */
+function stakeSpan(addr, head = 12, tail = 5) {
+  return handleSpan(addr, head, tail);
+}
+
+function handleSpan(addr, head = 12, tail = 5) {
+  if (!addr) return "";
+  const s = String(addr);
+  if (!isLookupHandleAddr(s)) {
+    return `<span class="hash" title="${esc(s)}">${esc(short(s, head, tail))}</span>`;
+  }
+  const known = handleMeta.get(s)?.handle || "";
+  if (known) {
+    return `<span class="ada-handle" data-handle="${esc(s)}" title="${esc(s)}"><span class="ada-handle-dollar">$</span>${esc(known)}</span>`;
+  }
+  return `<span class="hash" data-handle="${esc(s)}" title="${esc(s)}">${esc(short(s, head, tail))}</span>`;
 }
 
 /** Prefer stamped/cached givenName; enrichDreps fills misses via /api/drep. */
@@ -1208,6 +1349,20 @@ function cardSearchText(ev) {
     bits.push(id);
     const meta = drepMeta.get(id);
     if (meta?.name) bits.push(meta.name);
+  }
+  const stakeList = [
+    d.stake,
+    d.account,
+    d.address,
+    ...(Array.isArray(d.stakes) ? d.stakes : []),
+  ].filter(isLookupHandleAddr);
+  for (const addr of stakeList) {
+    bits.push(addr);
+    const h = handleMeta.get(addr)?.handle;
+    if (h) {
+      bits.push(h);
+      bits.push(`$${h}`);
+    }
   }
   // Asset registry tickers already fetched into assetMeta.
   const assetLists = [d.assets?.items, d.want?.items].filter(Array.isArray);
@@ -1604,7 +1759,15 @@ function buildCard(ev) {
   enrichAssets(card);
   enrichPools(card);
   enrichDreps(card);
+  enrichHandles(card);
   enrichGovActions(card);
+  ensureTxStakesObserver();
+  const stakesEl = card.querySelector(".tx-stakes");
+  if (stakesEl) {
+    txStakesRo?.observe(stakesEl);
+    // Two rAFs: first layout assigns width, second measures pills.
+    requestAnimationFrame(() => requestAnimationFrame(() => fitTxStakes(stakesEl)));
+  }
   return card;
 }
 
@@ -2667,6 +2830,9 @@ const poolMeta = new Map(Object.entries(store.get("co_pools_v1", {})));
 const poolWaiters = new Map(); // poolId → elements waiting on in-flight fetch
 const drepMeta = new Map(Object.entries(store.get("co_dreps_v1", {})));
 const drepWaiters = new Map(); // drepId → elements waiting on in-flight fetch
+const handleMeta = new Map(Object.entries(store.get("co_handles_v1", {})));
+const handleWaiters = new Map(); // stake → elements waiting on in-flight fetch
+let handlesDisabled = false;
 
 function persistPoolCache() {
   const obj = {};
@@ -2829,6 +2995,87 @@ function paintDrep(el, meta) {
   el.classList.remove("hash");
   el.classList.add("drep-name");
   el.title = drepId;
+}
+
+function persistHandleCache() {
+  const obj = {};
+  let i = 0;
+  for (const [k, v] of handleMeta) {
+    if (!v || !v.handle) continue;
+    if (i++ > 700) break;
+    obj[k] = { handle: v.handle };
+  }
+  store.set("co_handles_v1", obj);
+}
+
+function enrichHandles(root) {
+  if (handlesDisabled) return;
+  root.querySelectorAll("[data-handle], [data-stake]").forEach((el) => {
+    const id = el.dataset.handle || el.dataset.stake;
+    if (!id || !isLookupHandleAddr(id)) return;
+    const cached = handleMeta.get(id);
+    if (cached && cached.handle) {
+      paintHandle(el, cached);
+      return;
+    }
+    if (cached && cached.handle === null) return; // negative cache
+    if (handleWaiters.has(id)) {
+      handleWaiters.get(id).push(el);
+      return;
+    }
+    handleWaiters.set(id, [el]);
+    fetch(`/api/handle/${encodeURIComponent(id)}`)
+      .then((r) => r.json())
+      .then((meta) => {
+        if (meta && meta.disabled) {
+          handlesDisabled = true;
+          handleWaiters.delete(id);
+          return;
+        }
+        if (meta && meta.handle) {
+          handleMeta.set(id, { handle: String(meta.handle) });
+          persistHandleCache();
+        } else {
+          handleMeta.set(id, { handle: null }); // negative cache
+        }
+        const waiters = handleWaiters.get(id) || [];
+        handleWaiters.delete(id);
+        const all = new Set([
+          ...waiters,
+          ...document.querySelectorAll(
+            `[data-handle="${CSS.escape(id)}"], [data-stake="${CSS.escape(id)}"]`
+          ),
+        ]);
+        all.forEach((e) => paintHandle(e, handleMeta.get(id)));
+      })
+      .catch(() => {
+        handleWaiters.delete(id);
+        if ($("search").value.trim()) scheduleFilterRefresh();
+      });
+  });
+}
+
+function paintHandle(el, meta) {
+  if (!meta) return;
+  const handle = typeof meta.handle === "string" && meta.handle ? meta.handle : "";
+  const addr = el.dataset.handle || el.dataset.stake || "";
+  const card = el.closest(".card");
+  if (card) {
+    appendCardSearch(card, addr, handle, handle ? `$${handle}` : "");
+    const eid = Number(card.dataset.eid);
+    if (Number.isFinite(eid) && retentionCache.has(eid)) {
+      retentionIndex(retentionCache.get(eid).ev);
+    }
+    if ($("search").value.trim()) scheduleFilterRefresh();
+  }
+  if (!handle) return; // leave truncated address as fallback
+  el.innerHTML = `<span class="ada-handle-dollar">$</span>${esc(handle)}`;
+  el.classList.remove("hash");
+  el.classList.add("ada-handle");
+  el.title = addr;
+  // Handle labels change pill width — refit the +N overflow.
+  const stakesEl = el.closest(".tx-stakes");
+  if (stakesEl) requestAnimationFrame(() => fitTxStakes(stakesEl));
 }
 
 const govMeta = new Map(Object.entries(store.get("co_gov_v1", {})));

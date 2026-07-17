@@ -262,7 +262,7 @@ impl Scanner {
             }
         }
 
-        let hits = classify(tx_hash, &mint, &by_role, &spent_roles, &external);
+        let hits = classify(tx_hash, tx, &mint, &by_role, &spent_roles, &external);
 
         {
             let mut tracked = self.tracked.lock().unwrap();
@@ -297,6 +297,7 @@ impl Scanner {
 
 fn classify(
     tx_hash: &str,
+    tx: &Value,
     mint: &ValueSummary,
     by_role: &HashMap<Role, ValueSummary>,
     spent_roles: &HashMap<Role, SpentAmounts>,
@@ -306,7 +307,7 @@ fn classify(
     let mut emitted = HashSet::new();
     let mut push = |et: EventType, sum: &ValueSummary| {
         if emitted.insert(et.as_str()) {
-            hits.push((tx_hash.to_string(), hit_for(et, sum)));
+            hits.push((tx_hash.to_string(), hit_for(et, sum, actor_for(et, tx, sum))));
         }
     };
 
@@ -471,7 +472,28 @@ fn input_outpoint(input: &Value) -> Option<String> {
     Some(format!("{tx}#{index}"))
 }
 
-fn hit_for(et: EventType, sum: &ValueSummary) -> DappHit {
+/// Who is performing the action — never an Iagon script address.
+fn actor_for(et: EventType, tx: &Value, sum: &ValueSummary) -> Option<String> {
+    match et {
+        // User receives IAG from the dApp (match claimed qty, not a fat change UTxO).
+        EventType::EarningsClaim | EventType::StakeWithdrawal if sum.iag > 0 => {
+            crate::parse::actor_receiving_asset(tx, IAG_POLICY, IAG_NAME_HEX, sum.iag)
+                .or_else(|| crate::parse::actor_from_tx(tx))
+        }
+        // ADA-only fee claim: recipient of the payout.
+        EventType::EarningsClaim => {
+            crate::parse::actor_receiving_ada(tx, 1_000_000).or_else(|| crate::parse::actor_from_tx(tx))
+        }
+        // Seller receives ADA for their listed position.
+        EventType::PositionSale => {
+            crate::parse::actor_receiving_ada(tx, 1_000_000).or_else(|| crate::parse::actor_from_tx(tx))
+        }
+        // User pays into / interacts with scripts → change output is them.
+        _ => crate::parse::actor_from_tx(tx),
+    }
+}
+
+fn hit_for(et: EventType, sum: &ValueSummary, actor: Option<String>) -> DappHit {
     let mut data = json!({
         "dapp": DAPP,
         "eventType": et.as_str(),
@@ -516,6 +538,8 @@ fn hit_for(et: EventType, sum: &ValueSummary) -> DappHit {
             obj.insert("nodeId".into(), json!(node_id));
         }
     }
+
+    crate::parse::attach_actor(obj, actor.as_deref());
 
     DappHit {
         kind: "dapp_activity",
@@ -671,6 +695,11 @@ mod tests {
         assert_eq!(hits[0].1.data["eventType"], "earnings_claim");
         assert_eq!(hits[0].1.data["iag"], 1_542_781u64);
         assert!(hits[0].1.data.get("ada").is_none());
+        // Actor is the IAG recipient (not the fat change UTxO, not the batcher).
+        assert_eq!(
+            hits[0].1.data["address"],
+            "addr1qusereraaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaauser"
+        );
     }
 
     #[test]

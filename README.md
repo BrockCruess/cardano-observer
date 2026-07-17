@@ -70,6 +70,11 @@ forks, orphaned blocks and slot battles.
   `DATA_DIR/pools.json` and `DATA_DIR/dreps.json` (also refreshed daily), with
   per-miss fetches appended. CIP-108 governance action titles are fetched on
   first sight into `DATA_DIR/gov-actions.json`.
+- **ADA Handles.** Truncated stake addresses on staking cards (withdrawals,
+  registrations, delegation fallbacks) resolve to the account's preferred
+  `$handle` via the free public [Handles API](https://api.handle.me) (or your
+  own KoraLabs / Cardano Foundation Handle resolver). Disable with
+  `ADA_HANDLE_URL=none`.
 - **Delegation context.** Stake and vote re-delegations show **from → to**
   using an in-process tracker seeded from persisted history, with Blockfrost
   account lookups when the previous target is still unknown.
@@ -119,12 +124,18 @@ forks, orphaned blocks and slot battles.
   run Blockfrost RYO** - RYO is an API over a db-sync database, so enrichment
   and historical tx lookups need that stack behind `BLOCKFROST_URL`. The
   observer itself does not talk to db-sync directly.
+- An [ADA Handle](https://handle.me) resolver (optional) - defaults to the free
+  public API at `https://api.handle.me`. Self-host with
+  [handles-public-api](https://github.com/koralabs/handles-public-api) or
+  [cf-adahandle-resolver](https://github.com/cardano-foundation/cf-adahandle-resolver)
+  and point `ADA_HANDLE_URL` at it.
 - Rust 1.85+ to build (edition 2024)
 
 Without Blockfrost, the live feed still works from Ogmios alone; token
 enrichment falls back to the on-disk CIP-26 registry cache, pool/DRep names
 stay incomplete until Blockfrost is configured, and older tx modals may be
-incomplete.
+incomplete. Handle labels still work against the public API unless you set
+`ADA_HANDLE_URL=none`.
 
 ## Quick start
 
@@ -158,6 +169,8 @@ the browser after each rebuild).
 | `OGMIOS_URL` | `ws://127.0.0.1:1337` | Ogmios WebSocket endpoint (unused when `DEMO=true`) |
 | `BLOCKFROST_URL` | *(unset / disabled)* | Blockfrost RYO base URL (optional; needs db-sync behind it). Example: `http://127.0.0.1:3000` |
 | `BLOCKFROST_PROJECT_ID` | *(empty)* | `project_id` header, if your instance needs one |
+| `ADA_HANDLE_URL` | public API for `NETWORK` | Handle resolver base URL. Defaults to `https://api.handle.me` (mainnet) or the matching preprod/preview host. Point at a local instance (e.g. `http://127.0.0.1:9095`). `none` / `off` / `false` disables |
+| `ADA_HANDLE_API` | `auto` | `auto` \| `kora` \| `cf` — HTTP API shape (`auto` picks CF for port 9095 / adahandle URLs, else KoraLabs) |
 | `TOKEN_REGISTRY_ZIP` | Cardano Foundation GitHub master zip | CIP-26 mappings zip used to build `token-registry.json` on first boot (also re-downloaded daily at 00:00 UTC while running) |
 | `TOKEN_REGISTRY_REFRESH` | `false` | `true` / `1` / `yes` to re-download the registry zip on boot |
 | `POOL_CACHE_REFRESH` | `false` | `true` / `1` / `yes` to re-scrape Blockfrost `/pools` into `pools.json` on boot (also auto-refreshed daily at 00:00 UTC while running) |
@@ -200,6 +213,8 @@ cardano-node ── Ogmios (chain-sync WS) ──▶ parse / DEX / dApp ──�
                       │                             │
 Blockfrost RYO  ◀── enrichment / pools / dreps / gov┘
    └── cardano-db-sync (required by RYO)
+
+Handle API    ◀── stake → preferred $handle (optional)
 ```
 
 - `src/main.rs` - process entry: config, boot caches, spawn scrapes / daily
@@ -218,8 +233,9 @@ Blockfrost RYO  ◀── enrichment / pools / dreps / gov┘
 - `src/trending.rs` - rolling subject-keyword frequency over the retention
   window
 - `src/persist.rs` - append-only JSONL history, restore + compaction
-- `src/enrich.rs` - CIP-26 stamps, pool/DRep/gov-action caches, Blockfrost
-  account / historical-tx lookups; background + daily scrapes
+- `src/enrich.rs` - CIP-26 stamps, pool/DRep/gov-action/Handle caches,
+  Blockfrost account / historical-tx lookups; background + daily scrapes
+- `src/handles.rs` - ADA Handle preferred-name lookup (KoraLabs or CF API)
 - `src/registry.rs` - CIP-26 token registry zip → durable slim cache (daily
   re-download)
 - `src/pools.rs` - Blockfrost pool-metadata scrape → `pools.json` (daily
@@ -232,7 +248,8 @@ Blockfrost RYO  ◀── enrichment / pools / dreps / gov┘
 - `src/demo.rs` - synthetic event stream when `DEMO=true`
 - `src/server.rs` - axum server: embedded UI, `/ws` stream, `/api/events`,
   `/api/buffer`, `/api/trending`, `/api/tx`, `/api/asset`, `/api/pool`,
-  `/api/drep`, `/api/dreps`, `/api/gov-action`, `/api/gov-actions`, `/api/stats`
+  `/api/drep`, `/api/dreps`, `/api/handle`, `/api/gov-action`,
+  `/api/gov-actions`, `/api/stats`
 - `static/` - the whole frontend: one HTML file, one stylesheet, one script;
   no frameworks, no build step
 

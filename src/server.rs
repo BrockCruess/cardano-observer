@@ -38,6 +38,7 @@ pub fn router(ctx: ServerCtx) -> Router {
         .route("/api/pool/{id}", get(api_pool))
         .route("/api/drep/{id}", get(api_drep))
         .route("/api/dreps", get(api_dreps))
+        .route("/api/handle/{addr}", get(api_handle))
         .route("/api/gov-action/{tx}/{index}", get(api_gov_action))
         .route("/api/gov-actions", get(api_gov_actions))
         .route("/api/stats", get(api_stats))
@@ -180,6 +181,11 @@ async fn api_pool(State(ctx): State<ServerCtx>, Path(id): Path<String>) -> Respo
 
 async fn api_drep(State(ctx): State<ServerCtx>, Path(id): Path<String>) -> Response {
     Json(ctx.enricher.drep(&id).await).into_response()
+}
+
+/// Preferred ADA Handle for a stake/payment address (`handle` may be null).
+async fn api_handle(State(ctx): State<ServerCtx>, Path(addr): Path<String>) -> Response {
+    Json(ctx.enricher.handle(&addr).await).into_response()
 }
 
 /// Full in-memory DRep name map for browser-side labels (no per-id round-trips).

@@ -9,6 +9,7 @@ use crate::dapp::DappRegistry;
 use crate::deleg::DelegationTracker;
 use crate::dex::DexRegistry;
 use crate::model::ChainEvent;
+use bech32::primitives::decode::CheckedHrpstring;
 use bech32::{Bech32, Hrp};
 use serde_json::{json, Value};
 
@@ -177,24 +178,33 @@ fn parse_tx(
         }
     }
 
+    let stakes = collect_tx_stakes(tx, network);
+
     // ── Transaction event (always) ───────────────────────────────────────
+    let mut tx_data = json!({
+        "index": tx_index,
+        "inputs": inputs.len(),
+        "inputTxs": input_txs,
+        "outputs": outputs.len(),
+        "ada": out_ada,
+        "fee": fee,
+        "script": is_script,
+        "assets": moved.len(),
+        "size": tx.get("size").and_then(|s| s.get("bytes")).and_then(Value::as_u64),
+    });
+    if !stakes.is_empty() {
+        tx_data
+            .as_object_mut()
+            .unwrap()
+            .insert("stakes".into(), json!(stakes));
+    }
     events.push(b.make(
         "transaction",
         "transaction",
         Some(tx_hash),
         "Transaction".into(),
         String::new(),
-        json!({
-            "index": tx_index,
-            "inputs": inputs.len(),
-            "inputTxs": input_txs,
-            "outputs": outputs.len(),
-            "ada": out_ada,
-            "fee": fee,
-            "script": is_script,
-            "assets": moved.len(),
-            "size": tx.get("size").and_then(|s| s.get("bytes")).and_then(Value::as_u64),
-        }),
+        tx_data,
     ));
 
     // ── Mint / burn ──────────────────────────────────────────────────────
@@ -634,6 +644,220 @@ pub fn stake_address(cred_hex: &str, from: Option<&str>, network: Network) -> St
     }
 }
 
+/// CIP-19: address types 1/3/5/7 have a script payment credential.
+pub fn address_has_script_payment(addr: &str) -> bool {
+    let Some(header) = address_header(addr) else {
+        return false;
+    };
+    matches!(header >> 4, 1 | 3 | 5 | 7)
+}
+
+/// Derive the stake address embedded in a Shelley base payment address.
+pub fn stake_from_address(addr: &str) -> Option<String> {
+    let (hrp, bytes) = decode_address(addr)?;
+    if !hrp.starts_with("addr") {
+        return None;
+    }
+    let header = *bytes.first()?;
+    let ty = header >> 4;
+    let net = header & 0x0f;
+    // Base addresses only (payment + stake credential).
+    if !matches!(ty, 0 | 1 | 2 | 3) || bytes.len() < 57 {
+        return None;
+    }
+    let stake_hash = &bytes[29..57];
+    let stake_is_script = matches!(ty, 2 | 3);
+    let stake_header = if stake_is_script {
+        0xf0 | net
+    } else {
+        0xe0 | net
+    };
+    let mut stake_bytes = Vec::with_capacity(29);
+    stake_bytes.push(stake_header);
+    stake_bytes.extend_from_slice(stake_hash);
+    let stake_hrp = if hrp.contains("test") {
+        "stake_test"
+    } else {
+        "stake"
+    };
+    let hrp = Hrp::parse(stake_hrp).ok()?;
+    bech32::encode::<Bech32>(hrp, &stake_bytes).ok()
+}
+
+/// Best-effort **user** actor for a tx: largest key-payment output, preferring
+/// an embedded stake address over the payment address. Skips script outs
+/// (DEX pools, dApp contracts, order scripts) so we don't label the venue.
+pub fn actor_from_tx(tx: &Value) -> Option<String> {
+    actor_from_outputs(tx.get("outputs").and_then(Value::as_array)?, None)
+}
+
+/// Prefer the key-payment output whose asset qty is closest to `target`
+/// (e.g. IAG earnings equal to the claimed amount — not a large change UTxO).
+pub fn actor_receiving_asset(
+    tx: &Value,
+    policy: &str,
+    name_hex: &str,
+    target: u64,
+) -> Option<String> {
+    let outputs = tx.get("outputs").and_then(Value::as_array)?;
+    let target = target as u128;
+    let mut best: Option<(u128, &str)> = None; // distance, addr
+    for output in outputs {
+        let addr = output.get("address").and_then(Value::as_str).unwrap_or("");
+        if addr.is_empty() || address_has_script_payment(addr) {
+            continue;
+        }
+        let qty = asset_qty(output.get("value"), policy, name_hex);
+        if qty == 0 {
+            continue;
+        }
+        let dist = qty.abs_diff(target);
+        if best.is_none_or(|(d, _)| dist < d) {
+            best = Some((dist, addr));
+        }
+    }
+    best.map(|(_, addr)| prefer_stake(addr))
+}
+
+/// Prefer the key-payment output receiving the most ADA (e.g. position seller).
+pub fn actor_receiving_ada(tx: &Value, min_lovelace: u64) -> Option<String> {
+    let outputs = tx.get("outputs").and_then(Value::as_array)?;
+    actor_from_outputs(outputs, Some(min_lovelace))
+}
+
+fn actor_from_outputs<'a>(
+    outputs: &'a [Value],
+    min_lovelace: Option<u64>,
+) -> Option<String> {
+    let mut best: Option<(u64, u8, &'a str)> = None; // ada, has_stake, addr
+    for output in outputs {
+        let addr = output.get("address").and_then(Value::as_str).unwrap_or("");
+        if addr.is_empty() || address_has_script_payment(addr) {
+            continue;
+        }
+        if !(addr.starts_with("addr1") || addr.starts_with("addr_test1")) {
+            continue;
+        }
+        let ada = output
+            .get("value")
+            .and_then(|v| v.get("ada"))
+            .and_then(|a| a.get("lovelace"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if let Some(min) = min_lovelace {
+            if ada < min {
+                continue;
+            }
+        }
+        let has_stake = u8::from(stake_from_address(addr).is_some());
+        let better = match best {
+            None => true,
+            Some((b_ada, b_stake, _)) => ada > b_ada || (ada == b_ada && has_stake > b_stake),
+        };
+        if better {
+            best = Some((ada, has_stake, addr));
+        }
+    }
+    best.map(|(_, _, addr)| prefer_stake(addr))
+}
+
+fn prefer_stake(addr: &str) -> String {
+    stake_from_address(addr).unwrap_or_else(|| addr.to_string())
+}
+
+fn asset_qty(value: Option<&Value>, policy: &str, name_hex: &str) -> u128 {
+    value
+        .and_then(|v| v.get(policy))
+        .and_then(|n| n.get(name_hex))
+        .and_then(|q| {
+            q.as_u64()
+                .map(|n| n as u128)
+                .or_else(|| q.as_i64().map(|n| n.unsigned_abs() as u128))
+                .or_else(|| q.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(0)
+}
+
+/// Attach actor onto event data: `stake` when we have a stake address, else `address`.
+pub fn attach_actor(data: &mut serde_json::Map<String, Value>, actor: Option<&str>) {
+    let Some(a) = actor.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if a.starts_with("stake1") || a.starts_with("stake_test1") {
+        data.insert("stake".into(), json!(a));
+    } else {
+        data.insert("address".into(), json!(a));
+    }
+}
+
+const MAX_TX_STAKES: usize = 24;
+
+/// Unique stake addresses involved in a tx (order preserved): outputs, any
+/// resolved input addresses, withdrawals, and certificate credentials.
+/// Ogmios usually omits input addresses, so the list is output-heavy by design.
+fn collect_tx_stakes(tx: &Value, network: Network) -> Vec<String> {
+    let empty = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        if out.len() >= MAX_TX_STAKES {
+            return;
+        }
+        if (s.starts_with("stake1") || s.starts_with("stake_test1")) && !out.iter().any(|x| x == &s)
+        {
+            out.push(s);
+        }
+    };
+
+    for side in ["inputs", "outputs", "collaterals"] {
+        for o in tx.get(side).and_then(Value::as_array).unwrap_or(&empty) {
+            let Some(addr) = o.get("address").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(stake) = stake_from_address(addr) {
+                push(stake);
+            } else if addr.starts_with("stake1") || addr.starts_with("stake_test1") {
+                push(addr.to_string());
+            }
+        }
+    }
+
+    if let Some(w) = tx.get("withdrawals").and_then(Value::as_object) {
+        for account in w.keys() {
+            push(account.clone());
+        }
+    }
+
+    for cert in tx.get("certificates").and_then(Value::as_array).unwrap_or(&empty) {
+        if let Some(cred) = cert.get("credential").and_then(Value::as_str) {
+            push(stake_address(
+                cred,
+                cert.get("from").and_then(Value::as_str),
+                network,
+            ));
+        }
+    }
+
+    out
+}
+
+fn address_header(addr: &str) -> Option<u8> {
+    decode_address(addr).and_then(|(_, b)| b.first().copied())
+}
+
+fn decode_address(addr: &str) -> Option<(String, Vec<u8>)> {
+    if !(addr.starts_with("addr1")
+        || addr.starts_with("addr_test1")
+        || addr.starts_with("stake1")
+        || addr.starts_with("stake_test1"))
+    {
+        return None;
+    }
+    let checked = CheckedHrpstring::new::<Bech32>(addr).ok()?;
+    let hrp = checked.hrp().to_string();
+    let bytes: Vec<u8> = checked.byte_iter().collect();
+    Some((hrp, bytes))
+}
+
 /// Human-friendly DRep identifier (bech32 drep1… per CIP-105, or the special
 /// always-abstain / no-confidence dreps).
 pub fn drep_display(drep: &Value) -> String {
@@ -683,6 +907,84 @@ mod tests {
     use crate::dapp::DappRegistry;
     use crate::deleg::DelegationTracker;
     use crate::dex::DexRegistry;
+
+    fn encode_base_addr(payment_hex: &str, stake_hex: &str) -> String {
+        let payment = hex::decode(payment_hex).unwrap();
+        let stake = hex::decode(stake_hex).unwrap();
+        assert_eq!(payment.len(), 28);
+        assert_eq!(stake.len(), 28);
+        // CIP-19 type 0 (key+key), mainnet network bit 1 → header 0x01.
+        let mut bytes = vec![0x01];
+        bytes.extend(payment);
+        bytes.extend(stake);
+        let hrp = Hrp::parse("addr").unwrap();
+        bech32::encode::<Bech32>(hrp, &bytes).unwrap()
+    }
+
+    #[test]
+    fn stake_from_base_payment_address() {
+        let payment = "81c784f7113c761123af5442f282b4ef43a325f3537cf0b9c3542eec";
+        let stake_hash = "87098a3cfda9c3a1dec5657ce7bd4cf0757f0474d2cdf4032db71360";
+        let addr = encode_base_addr(payment, stake_hash);
+        let expected = stake_address(stake_hash, Some("verificationKey"), Network::Mainnet);
+        assert_eq!(stake_from_address(&addr).as_deref(), Some(expected.as_str()));
+        assert!(!address_has_script_payment(&addr));
+    }
+
+    #[test]
+    fn collect_tx_stakes_from_outputs_and_withdrawals() {
+        let payment = "81c784f7113c761123af5442f282b4ef43a325f3537cf0b9c3542eec";
+        let stake_hash = "87098a3cfda9c3a1dec5657ce7bd4cf0757f0474d2cdf4032db71360";
+        let user = encode_base_addr(payment, stake_hash);
+        let stake = stake_address(stake_hash, Some("verificationKey"), Network::Mainnet);
+        let other = stake_address(
+            "11111111111111111111111111111111111111111111111111111111",
+            Some("verificationKey"),
+            Network::Mainnet,
+        );
+        let tx = json!({
+            "outputs": [
+                { "address": user, "value": { "ada": { "lovelace": 2_000_000 } } },
+                { "address": user, "value": { "ada": { "lovelace": 1_000_000 } } },
+            ],
+            "withdrawals": {
+                (other.clone()): { "ada": { "lovelace": 5_000_000 } }
+            },
+            "certificates": [{
+                "type": "stakeDelegation",
+                "credential": stake_hash,
+                "from": "verificationKey",
+                "stakePool": { "id": "pool1demo" }
+            }]
+        });
+        let stakes = collect_tx_stakes(&tx, Network::Mainnet);
+        assert_eq!(stakes, vec![stake.clone(), other]);
+        // Same stake from output + cert is deduped; order is first-seen.
+        assert_eq!(stakes[0], stake);
+    }
+
+    #[test]
+    fn actor_from_tx_prefers_user_change_not_script() {
+        let payment = "81c784f7113c761123af5442f282b4ef43a325f3537cf0b9c3542eec";
+        let stake_hash = "87098a3cfda9c3a1dec5657ce7bd4cf0757f0474d2cdf4032db71360";
+        let user = encode_base_addr(payment, stake_hash);
+        // Minswap V1 order script (script payment) — must not be chosen.
+        let order = "addr1wyx22z2s4kasd3w976pnjf9xdty88epjqfvgkmfnscpd0rg3z8y6v";
+        let tx = json!({
+            "outputs": [
+                {
+                    "address": order,
+                    "value": { "ada": { "lovelace": 73_000_000u64 } }
+                },
+                {
+                    "address": user,
+                    "value": { "ada": { "lovelace": 12_500_000u64 } }
+                }
+            ]
+        });
+        let expected = stake_address(stake_hash, Some("verificationKey"), Network::Mainnet);
+        assert_eq!(actor_from_tx(&tx).as_deref(), Some(expected.as_str()));
+    }
 
     /// A tx spending two distinct earlier outputs (one of them twice) exposes
     /// the deduped set of source tx-hashes on its `transaction` event so the

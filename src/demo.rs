@@ -107,11 +107,23 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
         data,
     };
 
+    let n_stakes = rng.gen_range(0..8usize);
+    let stakes: Vec<String> = (0..n_stakes).map(|_| fake_stake(rng)).collect();
+    let mut tx_data = json!({
+        "index": index, "inputs": n_in, "outputs": n_out,
+        "ada": ada, "fee": fee, "script": script, "assets": 0,
+    });
+    if !stakes.is_empty() {
+        tx_data
+            .as_object_mut()
+            .unwrap()
+            .insert("stakes".into(), json!(stakes));
+    }
     state.publish(mk(
         "transaction",
         "transaction",
         "Transaction".into(),
-        json!({ "index": index, "inputs": n_in, "outputs": n_out, "ada": ada, "fee": fee, "script": script, "assets": 0 }),
+        tx_data,
     ));
 
     let demo_tokens: [(&str, &str, &str); 6] = [
@@ -268,7 +280,10 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                 "fingerprint": crate::parse::asset_fingerprint(p, n),
             }], "more": 0 })
         };
-        let mut order_data = json!({ "dex": dex, "side": side, "ada": order_ada, "assets": assets });
+        let mut order_data = json!({
+            "dex": dex, "side": side, "ada": order_ada, "assets": assets,
+            "stake": fake_stake(rng),
+        });
         if side == "buy" && rng.gen_bool(0.85) {
             let (p, n, _t) = demo_tokens[rng.gen_range(0..demo_tokens.len())];
             let qty = rng.gen_range(100..5_000_000i64);
@@ -312,7 +327,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
         let buy = rng.gen_bool(0.55);
         let data = if buy {
             json!({
-                "dex": dex, "side": "buy", "ada": ada,
+                "dex": dex, "side": "buy", "ada": ada, "stake": fake_stake(rng),
                 "assets": { "items": [], "more": 0 },
                 "wantMin": true, "wantQty": qty.to_string(),
                 "want": { "items": [{
@@ -324,7 +339,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
             })
         } else {
             json!({
-                "dex": dex, "side": "sell", "ada": 4_000_000u64,
+                "dex": dex, "side": "sell", "ada": 4_000_000u64, "stake": fake_stake(rng),
                 "assets": { "items": [{
                     "unit": format!("{p}{n}"), "policy": p, "nameHex": n,
                     "name": crate::parse::decode_asset_name(n),
@@ -370,7 +385,10 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
             "dex_lp",
             "dex",
             title,
-            json!({ "dex": dex, "side": side, "ada": ada, "assets": assets, "filled": false }),
+            json!({
+                "dex": dex, "side": side, "ada": ada, "assets": assets,
+                "filled": false, "stake": fake_stake(rng),
+            }),
         ));
     }
     if rng.gen_bool(0.03) {
@@ -386,6 +404,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                 "dex": dex,
                 "side": "buy",
                 "ada": ada,
+                "stake": fake_stake(rng),
                 "assets": { "items": [], "more": 0 },
                 "filled": false,
                 "wantMin": true,
@@ -415,6 +434,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
             "dapp": "Iagon",
             "eventType": event_type,
             "ada": ada,
+            "stake": fake_stake(rng),
         });
         if iag > 0 {
             let obj = data.as_object_mut().unwrap();

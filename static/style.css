@@ -26,6 +26,8 @@
   --c-dex: #c45ae0;
   --c-dapp: #3d9ead;
   --c-alert: #e5534b;
+  /* ADA Handle brand green (handle.me) — used for the leading $ */
+  --c-handle: #3de480;
 
   --vote-yes: #2ea043;
   --vote-no: #e5534b;
@@ -888,6 +890,55 @@ header {
   padding: 1px 8px;
   border-radius: 6px;
   white-space: nowrap;
+}
+
+.ada-handle {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  background: color-mix(in srgb, var(--c-handle) 16%, var(--surface-2));
+  padding: 1px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.ada-handle-dollar {
+  color: var(--c-handle);
+  font-weight: 800;
+}
+
+/* Grow into leftover .ev-sub width; JS hides pills that don't fit (+N). */
+.ev-sub > .tx-stakes {
+  flex: 1 1 8rem;
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  align-items: center;
+  overflow: hidden;
+}
+
+.tx-stakes .hash,
+.tx-stakes .ada-handle {
+  font-size: 11px;
+  padding: 1px 6px;
+  flex: none;
+}
+
+.stake-more {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 1px 7px;
+  border-radius: 99px;
+  white-space: nowrap;
+  cursor: default;
+  flex: none;
 }
 
 .gov-title {

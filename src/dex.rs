@@ -172,6 +172,8 @@ struct OrderInfo {
     assets: Value,
     /// Minimum (or exact) output the order wants, when we could read the datum.
     want: Option<WantedOut>,
+    /// Placing user's stake address (preferred) or payment address.
+    actor: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -514,6 +516,8 @@ impl DexRegistry {
             ada,
             assets: crate::parse::asset_list(&refs),
             want,
+            // Change output on the place tx — not the order/pool script.
+            actor: crate::parse::actor_from_tx(tx),
         }
     }
 
@@ -768,6 +772,7 @@ impl DexRegistry {
             None
         };
         attach_want(&mut data, &want, true);
+        crate::parse::attach_actor(&mut data, crate::parse::actor_from_tx(tx).as_deref());
         Some(DexHit {
             kind: "dex_fill",
             title: "Swap - Danogo".into(),
@@ -937,7 +942,9 @@ fn order_data(info: &OrderInfo, filled: bool) -> Value {
         "assets": info.assets,
         "filled": filled,
     });
-    attach_want(data.as_object_mut().unwrap(), &info.want, filled);
+    let obj = data.as_object_mut().unwrap();
+    attach_want(obj, &info.want, filled);
+    crate::parse::attach_actor(obj, info.actor.as_deref());
     data
 }
 
@@ -990,19 +997,8 @@ pub fn payment_credential(addr: &str) -> Option<String> {
     Some(hex::encode(&bytes[1..29]))
 }
 
-/// CIP-19: address types 1/3/5/7 have a script payment credential.
 fn address_has_script_payment(addr: &str) -> bool {
-    if !addr.starts_with("addr1") && !addr.starts_with("addr_test1") {
-        return false;
-    }
-    let Ok(checked) = CheckedHrpstring::new::<Bech32>(addr) else {
-        return false;
-    };
-    let bytes: Vec<u8> = checked.byte_iter().collect();
-    let Some(header) = bytes.first() else {
-        return false;
-    };
-    matches!(header >> 4, 1 | 3 | 5 | 7)
+    crate::parse::address_has_script_payment(addr)
 }
 
 async fn fetch_vyfi_order_pools() -> anyhow::Result<HashMap<String, PoolPair>> {

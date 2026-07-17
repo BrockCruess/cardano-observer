@@ -6,6 +6,7 @@ mod dex;
 mod dreps;
 mod enrich;
 mod gov_actions;
+mod handles;
 mod model;
 mod ogmios;
 mod parse;
@@ -30,11 +31,12 @@ async fn main() -> anyhow::Result<()> {
 
     let config = config::Config::from_env();
     tracing::info!(
-        "cardano-observer v{} - network={} ogmios={} blockfrost={} demo={}",
+        "cardano-observer v{} - network={} ogmios={} blockfrost={} handles={} demo={}",
         env!("CARGO_PKG_VERSION"),
         config.network.as_str(),
         config.ogmios_url,
         config.blockfrost_url.as_deref().unwrap_or("(disabled)"),
+        config.ada_handle_url.as_deref().unwrap_or("(disabled)"),
         config.demo,
     );
 

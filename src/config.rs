@@ -5,6 +5,11 @@ pub struct Config {
     pub ogmios_url: String,
     pub blockfrost_url: Option<String>,
     pub blockfrost_project_id: Option<String>,
+    /// Base URL for ADA Handle resolution (KoraLabs or CF resolver).
+    /// `None` disables Handle enrichment on event cards.
+    pub ada_handle_url: Option<String>,
+    /// Which Handle API shape to speak (`auto` picks from the URL).
+    pub ada_handle_api: HandleApiKind,
     /// GitHub zip (or mirror) of the CIP-26 mappings tree - fetched only when
     /// the on-disk cache is missing.
     pub token_registry_zip: String,
@@ -25,6 +30,17 @@ pub struct Config {
     /// On restart, resume chain-sync from the last persisted block if it is
     /// at most this many hours old (0 disables backfill - start at the tip).
     pub backfill_hours: u64,
+}
+
+/// Which Handle HTTP API to call behind `ADA_HANDLE_URL`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandleApiKind {
+    /// Infer from URL (port 9095 / "adahandle" → CF, else KoraLabs).
+    Auto,
+    /// KoraLabs Handles Public API (`/holders/{address}`).
+    Kora,
+    /// Cardano Foundation `cf-adahandle-resolver`.
+    Cf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +90,17 @@ impl Config {
             ogmios_url: non_empty("OGMIOS_URL").unwrap_or_else(|| "ws://127.0.0.1:1337".into()),
             blockfrost_url: non_empty("BLOCKFROST_URL").map(|u| u.trim_end_matches('/').to_string()),
             blockfrost_project_id: non_empty("BLOCKFROST_PROJECT_ID"),
+            ada_handle_url: match non_empty("ADA_HANDLE_URL").as_deref() {
+                Some("none") | Some("off") | Some("false") => None,
+                Some(url) => Some(url.trim_end_matches('/').to_string()),
+                // Default: free public Handles API for the configured network.
+                None => Some(crate::handles::default_public_url(network)),
+            },
+            ada_handle_api: match non_empty("ADA_HANDLE_API").as_deref() {
+                Some("kora") | Some("koralabs") | Some("handle.me") => HandleApiKind::Kora,
+                Some("cf") | Some("cardano-foundation") | Some("resolver") => HandleApiKind::Cf,
+                _ => HandleApiKind::Auto,
+            },
             token_registry_zip: non_empty("TOKEN_REGISTRY_ZIP").unwrap_or_else(|| {
                 crate::registry::DEFAULT_REGISTRY_ZIP.to_string()
             }),
