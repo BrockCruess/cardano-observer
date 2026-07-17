@@ -1446,6 +1446,35 @@ body.search-priming #feed {
   border-width: 2.5px;
 }
 
+/* All category filters off — bathroom-robot easter egg in the feed slot. */
+.filter-easter {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  min-height: calc(100vh - 220px);
+  padding: 28px 16px 48px;
+  text-align: center;
+  pointer-events: none;
+}
+.filter-easter.show { display: flex; }
+.filter-easter img {
+  width: min(420px, 88vw);
+  height: auto;
+}
+.filter-easter-t {
+  margin: 0;
+  max-width: 22rem;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--muted);
+  line-height: 1.4;
+}
+#feed.filter-easter-hide {
+  display: none !important;
+}
+
 .search-empty {
   display: none;
   flex-direction: column;

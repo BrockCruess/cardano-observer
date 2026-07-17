@@ -154,7 +154,9 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(demo::run(state.clone()));
     } else {
         let dex = Arc::new(dex::DexRegistry::new());
-        let dapp = Arc::new(dapp::DappRegistry::new());
+        let dapp = Arc::new(dapp::DappRegistry::with_restored_txs(
+            state.cached_tx_entries(),
+        ));
         if config.network == config::Network::Mainnet {
             tokio::spawn(dex.clone().refresh_vyfi_loop());
             tokio::spawn(dex.clone().refresh_minswap_pools_loop());

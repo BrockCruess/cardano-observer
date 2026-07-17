@@ -26,6 +26,14 @@ impl DappRegistry {
         }
     }
 
+    /// Like [`new`], then let each scanner rebuild any restart-sensitive state
+    /// from restored `{ tx, block }` cache entries (no events emitted).
+    pub fn with_restored_txs(entries: Vec<(String, Value)>) -> Self {
+        let reg = Self::new();
+        reg.iagon.warm_from_tx_entries(&entries);
+        reg
+    }
+
     /// Run every registered dApp scanner over the block's transactions.
     pub fn scan_block(&self, txs: &[(&str, &Value)]) -> Vec<(String, DappHit)> {
         self.iagon.scan_block(txs)

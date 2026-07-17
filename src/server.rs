@@ -28,6 +28,7 @@ pub fn router(ctx: ServerCtx) -> Router {
         .route("/style.css", get(style_css))
         .route("/cardano-logo.svg", get(cardano_logo))
         .route("/favicon.svg", get(favicon))
+        .route("/no-filter-bg.png", get(no_filter_bg))
         .route("/ws", get(ws_upgrade))
         .route("/api/events", get(api_events))
         .route("/api/buffer", get(api_buffer))
@@ -62,8 +63,19 @@ async fn cardano_logo() -> Response {
 async fn favicon() -> Response {
     static_file(include_str!("../static/favicon.svg"), "image/svg+xml")
 }
+async fn no_filter_bg() -> Response {
+    static_bytes(
+        include_bytes!("../static/no-filter-bg.png"),
+        "image/png",
+    )
+}
 
 fn static_file(body: &'static str, content_type: &'static str) -> Response {
+    ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], body)
+        .into_response()
+}
+
+fn static_bytes(body: &'static [u8], content_type: &'static str) -> Response {
     ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], body)
         .into_response()
 }

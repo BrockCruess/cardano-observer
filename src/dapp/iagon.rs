@@ -224,7 +224,40 @@ impl Scanner {
         hits
     }
 
+    /// Replay persisted tx bodies into the UTxO tracker without emitting events.
+    ///
+    /// Stake-delegation detection needs to know when a later tx merely rewrites
+    /// an existing position (same IAG). That state is otherwise lost on restart,
+    /// so same-IAG datum/fee touch-ups get misclassified as fresh deposits.
+    pub fn warm_from_tx_entries(&self, entries: &[(String, Value)]) {
+        if entries.is_empty() {
+            return;
+        }
+        let mut ordered: Vec<(u64, &str, &Value)> = entries
+            .iter()
+            .filter_map(|(hash, entry)| {
+                let tx = entry.get("tx")?;
+                let slot = entry
+                    .get("block")
+                    .and_then(|b| b.get("slot"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                Some((slot, hash.as_str(), tx))
+            })
+            .collect();
+        ordered.sort_by_key(|(slot, hash, _)| (*slot, *hash));
+        let n = ordered.len();
+        for (_, hash, tx) in ordered {
+            let _ = self.scan_tx_inner(hash, tx, false);
+        }
+        tracing::info!("iagon: warmed script UTxO tracker from {n} cached txs");
+    }
+
     fn scan_tx(&self, tx_hash: &str, tx: &Value) -> Vec<(String, DappHit)> {
+        self.scan_tx_inner(tx_hash, tx, true)
+    }
+
+    fn scan_tx_inner(&self, tx_hash: &str, tx: &Value, emit: bool) -> Vec<(String, DappHit)> {
         let empty = Vec::new();
         let outputs = tx.get("outputs").and_then(Value::as_array).unwrap_or(&empty);
         let inputs = tx.get("inputs").and_then(Value::as_array).unwrap_or(&empty);
@@ -262,7 +295,11 @@ impl Scanner {
             }
         }
 
-        let hits = classify(tx_hash, tx, &mint, &by_role, &spent_roles, &external);
+        let hits = if emit {
+            classify(tx_hash, tx, &mint, &by_role, &spent_roles, &external)
+        } else {
+            Vec::new()
+        };
 
         {
             let mut tracked = self.tracked.lock().unwrap();
@@ -332,10 +369,13 @@ fn classify(
     }
 
     if let Some(sum) = by_role.get(&Role::Delegation) {
+        // Only count a net increase in IAG locked at the delegation script.
+        // Same-IAG rewrites (datum/fee touch-ups) and NFT rotations that spend
+        // the prior position then recreate it net to zero when the tracker has
+        // seen the spent UTxO — see `warm_from_tx_entries` for restart safety.
         let spent_deleg = spent_roles.get(&Role::Delegation).map(|s| s.iag).unwrap_or(0);
-        let fresh_lock = sum.has_deleg_nft && sum.iag > 0 && spent_deleg == 0;
-        let topped_up = sum.has_deleg_nft && sum.iag > spent_deleg && spent_deleg > 0;
-        if (mint.deleg_nft_delta > 0 && sum.iag > 0) || fresh_lock || topped_up {
+        let net_iag = sum.iag.saturating_sub(spent_deleg);
+        if sum.has_deleg_nft && net_iag > 0 {
             push(EventType::StakeDelegation, sum);
         }
     }
@@ -648,6 +688,80 @@ mod tests {
                 }
             }]
         });
+        assert!(s.scan_block(&[("r", &rewrite)]).is_empty());
+    }
+
+    #[test]
+    fn ignores_delegation_nft_rotation_same_iag() {
+        let s = Scanner::new();
+        let create = json!({
+            "outputs": [{
+                "address": DELEG_ADDR,
+                "value": {
+                    "ada": { "lovelace": 1_702_450 },
+                    "faecb80eee6cadf9dac5184263ed4d164b38fe71d4f6f55e8f6b0da0": { "oldnft": 1 },
+                    "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114": { "494147": 1_234_000_000u64 }
+                }
+            }]
+        });
+        assert_eq!(s.scan_block(&[("c", &create)]).len(), 1);
+        // Rotate the position NFT while locking the same IAG — not a new deposit.
+        let rotate = json!({
+            "inputs": [{ "transaction": { "id": "c" }, "index": 0 }],
+            "mint": {
+                "faecb80eee6cadf9dac5184263ed4d164b38fe71d4f6f55e8f6b0da0": { "newnft": 1 }
+            },
+            "outputs": [
+                {
+                    "address": DELEG_ADDR,
+                    "value": {
+                        "ada": { "lovelace": 1_702_450 },
+                        "faecb80eee6cadf9dac5184263ed4d164b38fe71d4f6f55e8f6b0da0": { "oldnft": 1 }
+                    }
+                },
+                {
+                    "address": DELEG_ADDR,
+                    "value": {
+                        "ada": { "lovelace": 1_693_830 },
+                        "faecb80eee6cadf9dac5184263ed4d164b38fe71d4f6f55e8f6b0da0": { "newnft": 1 },
+                        "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114": { "494147": 1_234_000_000u64 }
+                    }
+                }
+            ]
+        });
+        assert!(s.scan_block(&[("r", &rotate)]).is_empty());
+    }
+
+    #[test]
+    fn warm_from_tx_entries_suppresses_post_restart_rewrite() {
+        let create = json!({
+            "outputs": [{
+                "address": DELEG_ADDR,
+                "value": {
+                    "ada": { "lovelace": 1_719_690 },
+                    "faecb80eee6cadf9dac5184263ed4d164b38fe71d4f6f55e8f6b0da0": { "aabb": 1 },
+                    "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114": { "494147": 1_508_448_557u64 }
+                }
+            }]
+        });
+        let rewrite = json!({
+            "inputs": [{ "transaction": { "id": "c" }, "index": 0 }],
+            "outputs": [{
+                "address": DELEG_ADDR,
+                "value": {
+                    "ada": { "lovelace": 1_693_830 },
+                    "faecb80eee6cadf9dac5184263ed4d164b38fe71d4f6f55e8f6b0da0": { "aabb": 1 },
+                    "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114": { "494147": 1_508_448_557u64 }
+                }
+            }]
+        });
+        // Cold scanner (as after restart) would otherwise see the rewrite as a
+        // fresh lock — warming from the persisted create body prevents that.
+        let s = Scanner::new();
+        s.warm_from_tx_entries(&[(
+            "c".into(),
+            json!({ "block": { "slot": 1 }, "tx": create }),
+        )]);
         assert!(s.scan_block(&[("r", &rewrite)]).is_empty());
     }
 

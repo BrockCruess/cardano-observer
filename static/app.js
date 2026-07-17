@@ -869,7 +869,22 @@ function applyFilters() {
       queueMicrotask(() => onFeedFiltersChanged());
     }
   }
+  updateFilterEasterEgg();
   scheduleHierarchyPipes();
+}
+
+/** True when every category chip is off — show the bathroom-robot easter egg. */
+function allCategoryFiltersOff() {
+  return CATS.every((c) => !settings.filters[c.id]);
+}
+
+function updateFilterEasterEgg() {
+  const egg = $("filter-easter");
+  if (!egg) return;
+  const show = allCategoryFiltersOff();
+  egg.classList.toggle("show", show);
+  egg.hidden = !show;
+  feed.classList.toggle("filter-easter-hide", show);
 }
 
 /** Visible (filter-matching) events currently shown in the feed. */

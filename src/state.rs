@@ -347,6 +347,18 @@ impl AppState {
         Some(entry)
     }
 
+    /// Snapshot of in-memory tx cache entries (`hash` → `{ tx, block }`) for
+    /// warming stateful scanners after restore.
+    pub fn cached_tx_entries(&self) -> Vec<(String, Value)> {
+        self.txs
+            .lock()
+            .unwrap()
+            .map
+            .iter()
+            .map(|(h, e)| (h.clone(), e.clone()))
+            .collect()
+    }
+
     pub fn set_tip(&self, tip: Tip) {
         let msg = json!({ "type": "tip", "tip": &tip }).to_string();
         *self.tip.lock().unwrap() = tip;
