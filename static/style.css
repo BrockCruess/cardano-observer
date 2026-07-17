@@ -751,6 +751,8 @@ header {
 /* ── Horizontal layout ─────────────────────────────────────────────────── */
 
 #feed.horizontal {
+  --child-indent: 10px;
+  --events-indent: 8px;
   display: flex;
   flex-direction: row;
   gap: 0;
@@ -789,7 +791,16 @@ header {
               0 0 14px color-mix(in srgb, var(--c-block) 55%, transparent);
 }
 #feed.horizontal .block-group.orphaned > .card-block::before { background: var(--c-alert); }
-#feed.horizontal .group-events { margin: 6px 0 0; }
+#feed.horizontal .group-events {
+  margin: 6px 0 0;
+  /* Nest column events under the block card (indent only — no rails). */
+  padding-left: var(--events-indent);
+}
+#feed.horizontal .group-events .card.ev-child {
+  margin-left: var(--child-indent);
+  width: calc(100% - var(--child-indent));
+  max-width: calc(100% - var(--child-indent));
+}
 
 /* ── Cards ─────────────────────────────────────────────────────────────── */
 
@@ -1567,6 +1578,10 @@ body.search-priming #feed {
     --events-pad: 4px;
     --block-dot: 10px;
     --child-indent: 16px;
+  }
+  #feed.horizontal {
+    --child-indent: 8px;
+    --events-indent: 6px;
   }
   #feed.horizontal .block-group { width: min(86vw, 100%); max-width: 100%; }
   .ev-time { font-size: 10.5px; }
