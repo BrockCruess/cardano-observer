@@ -294,6 +294,162 @@ const settings = {
   minAda: store.get("co_minada_v1", 0),
 };
 
+/** Keys that are never filter tokens (search / misc URL controls). */
+const URL_SEARCH_KEYS = new Set(["q", "search", "filter"]);
+const URL_MISC_KEYS = new Set(["min", "minada", "min_ada", "layout", "compact"]);
+
+function normFilterKey(s) {
+  return String(s || "").toLowerCase().replace(/[\s_\-./]+/g, "");
+}
+
+/**
+ * Significant words from an on-screen category chip label.
+ * Splits on spaces / & / / ; drops "and".
+ * e.g. "Forks & Battles" → forks, battles; "Mint / Burn" → mint, burn.
+ */
+function filterLabelWords(label) {
+  return String(label || "")
+    .split(/[\s&/+,|.\-]+/)
+    .map((w) => normFilterKey(w))
+    .filter((w) => w && w !== "and");
+}
+
+/**
+ * DEX/dApp URL tokens from the on-screen name.
+ * One-word names (`VyFinance`, `SundaeSwap`) → only the full name.
+ * Multi-word names (`Dano Finance`) → full name + first word brand (`dano`).
+ */
+function brandTokens(name) {
+  const label = String(name || "").trim();
+  if (!label) return [];
+  const full = normFilterKey(label);
+  const spaced = label.split(/\s+/).filter(Boolean);
+  if (spaced.length > 1) return [full, normFilterKey(spaced[0])];
+  return [full];
+}
+
+/**
+ * Category chips: exact label/id, or any word of a multi-word label.
+ * DEX/dApp: exact one-word name, or brand root of a multi-word name.
+ */
+function matchUiFilterNames(raw, candidates, labelOf, idOf, mode) {
+  const n = normFilterKey(raw);
+  if (!n) return [];
+  const exact = candidates.filter((c) => {
+    if (idOf && normFilterKey(idOf(c)) === n) return true;
+    return normFilterKey(labelOf(c)) === n;
+  });
+  if (exact.length) return exact;
+
+  if (mode === "brand") {
+    return candidates.filter((c) => brandTokens(labelOf(c)).includes(n));
+  }
+  return candidates.filter((c) => {
+    const words = filterLabelWords(labelOf(c));
+    return words.length > 1 && words.includes(n);
+  });
+}
+
+function matchDexVenues(raw) {
+  return matchUiFilterNames(raw, DEX_VENUES, (v) => v, null, "brand");
+}
+
+function matchDappApps(raw) {
+  return matchUiFilterNames(raw, DAPP_APPS, (a) => a, null, "brand");
+}
+
+function matchFilterCategories(raw) {
+  return matchUiFilterNames(
+    raw,
+    CATS,
+    (c) => c.label,
+    (c) => c.id,
+    "category",
+  ).map((c) => c.id);
+}
+
+/**
+ * URL filter presets from the on-screen chip / submenu names:
+ *   ?filters=minswap&blocks&iagon
+ *   ?filters=forks&dano          → Forks & Battles + Dano Finance
+ *   ?filters=vyfinance           → VyFinance (full one-word name)
+ *
+ * DEX/dApp: one-word names match in full; multi-word use the first word only.
+ */
+function parseUrlFilterPreset() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("filters")) return null;
+
+  const tokens = [];
+  for (const v of params.getAll("filters")) {
+    const s = String(v || "").trim();
+    if (s) tokens.push(s);
+  }
+  // Further options as bare flags: ?filters=minswap&blocks&iagon
+  for (const [k, v] of params.entries()) {
+    if (!k || k === "filters") continue;
+    const lk = k.toLowerCase();
+    if (URL_SEARCH_KEYS.has(lk) || URL_MISC_KEYS.has(lk)) continue;
+    if (v === "" || v == null) tokens.push(k);
+  }
+  if (!tokens.length) return null;
+
+  const categories = new Set();
+  const dexVenues = new Set();
+  const dappApps = new Set();
+
+  for (const tok of tokens) {
+    const venues = matchDexVenues(tok);
+    if (venues.length) {
+      for (const v of venues) dexVenues.add(v);
+      categories.add("dex");
+      continue;
+    }
+    const dapps = matchDappApps(tok);
+    if (dapps.length) {
+      for (const a of dapps) dappApps.add(a);
+      categories.add("dapp");
+      continue;
+    }
+    for (const id of matchFilterCategories(tok)) categories.add(id);
+  }
+
+  if (!categories.size && !dexVenues.size && !dappApps.size) return null;
+  return { categories, dexVenues, dappApps };
+}
+
+/** Apply `?filters=` over localStorage defaults (shareable deep-links win). */
+function applyUrlFilterPreset() {
+  const parsed = parseUrlFilterPreset();
+  if (!parsed) return false;
+  const { categories, dexVenues, dappApps } = parsed;
+
+  for (const c of CATS) {
+    settings.filters[c.id] = categories.has(c.id);
+  }
+
+  if (dexVenues.size) {
+    for (const v of DEX_VENUES) settings.dexVenues[v] = dexVenues.has(v);
+  } else if (categories.has("dex")) {
+    for (const v of DEX_VENUES) settings.dexVenues[v] = true;
+  }
+
+  if (dappApps.size) {
+    for (const a of DAPP_APPS) settings.dappApps[a] = dappApps.has(a);
+  } else if (categories.has("dapp")) {
+    for (const a of DAPP_APPS) settings.dappApps[a] = true;
+  }
+
+  // Governance subtype menu stays all-on when the Governance chip is enabled.
+  if (categories.has("governance")) {
+    for (const g of GOV_TYPES) settings.govTypes[g.id] = true;
+  }
+
+  return true;
+}
+
+applyUrlFilterPreset();
+
 function dexVenueEnabled(venue) {
   if (!venue) return true;
   return settings.dexVenues[venue] !== false;
@@ -343,6 +499,9 @@ function indexTxGraph(ev) {
       txNode(src).outs.add(ev.tx_hash);
     }
   }
+  // Settlement txs often arrive as a transaction event before/with the DEX
+  // fill card — once edges exist, resolve any pending order pills.
+  reconcileDexSettlementsForTx(ev.tx_hash);
 }
 
 function gcTxNode(h) {
@@ -382,6 +541,101 @@ function coneReach(start, dir) {
     }
   }
   return out;
+}
+
+/* ── DEX order settlement via spend-graph ────────────────────────────────
+ * Open order / LP cards start as pulsing Pending. When a later dex_fill or
+ * dex_cancel spends that order's tx (edge in txGraph / inputTxs), flip the
+ * pill to Filled (green) or Cancelled (red) on the original card.
+ */
+const dexOrderSettlement = new Map(); // orderTxHash -> { status, dex }
+const pendingDexSettlements = [];     // fill/cancel events waiting on graph edges
+
+function parentTxsOf(txHash) {
+  if (!txHash) return [];
+  const node = txGraph.get(txHash);
+  if (node && node.ins.size) return [...node.ins];
+  return [];
+}
+
+function dexSettlementStatus(orderTx, dex) {
+  if (!orderTx) return null;
+  const hit = dexOrderSettlement.get(orderTx);
+  if (!hit) return null;
+  if (dex && hit.dex && hit.dex !== dex) return null;
+  return hit.status;
+}
+
+function dexStatusPillHtml(status) {
+  if (status === "filled") return `<span class="badge filled">Filled</span>`;
+  if (status === "cancelled") return `<span class="badge cancelled">Cancelled</span>`;
+  if (status === "pending") {
+    return `<span class="badge pending pulse-pending">Pending</span>`;
+  }
+  return "";
+}
+
+function updateDexOrderCardPill(card, status) {
+  if (!card || !status) return;
+  const sub = card.querySelector(".ev-sub");
+  if (!sub) return;
+  const pill = sub.querySelector(".badge.pending, .badge.filled, .badge.cancelled");
+  const html = dexStatusPillHtml(status);
+  if (!html) return;
+  if (pill) pill.outerHTML = html;
+  else sub.insertAdjacentHTML("beforeend", " " + html);
+  card.dataset.settlement = status;
+}
+
+function markDexOrderSettled(orderTx, status, settleEv) {
+  if (!orderTx || (status !== "filled" && status !== "cancelled")) return;
+  const dex = settleEv?.data?.dex ? String(settleEv.data.dex) : "";
+  const prev = dexOrderSettlement.get(orderTx);
+  if (prev && prev.status !== status) return; // keep first terminal status
+  dexOrderSettlement.set(orderTx, { status, dex: dex || prev?.dex || "" });
+
+  for (const { ev } of retentionCache.values()) {
+    if (ev.tx_hash !== orderTx) continue;
+    if (ev.kind !== "dex_order" && ev.kind !== "dex_lp") continue;
+    if (dex && ev.data?.dex && ev.data.dex !== dex) continue;
+    if (!ev.data || typeof ev.data !== "object") ev.data = {};
+    ev.data.settlement = status;
+  }
+
+  const key = (window.CSS && CSS.escape) ? CSS.escape(orderTx) : orderTx;
+  for (const card of feed.querySelectorAll(`.card[data-tx="${key}"]`)) {
+    if (card.dataset.kind !== "dex_order" && card.dataset.kind !== "dex_lp") continue;
+    if (dex && card.dataset.dex && card.dataset.dex !== dex) continue;
+    updateDexOrderCardPill(card, status);
+  }
+}
+
+function applyDexSettlement(settleEv) {
+  if (!settleEv?.tx_hash) return;
+  if (settleEv.kind !== "dex_fill" && settleEv.kind !== "dex_cancel") return;
+  const parents = parentTxsOf(settleEv.tx_hash);
+  if (!parents.length) {
+    if (!pendingDexSettlements.includes(settleEv)) pendingDexSettlements.push(settleEv);
+    return;
+  }
+  const status = settleEv.kind === "dex_cancel" ? "cancelled" : "filled";
+  for (const orderTx of parents) {
+    markDexOrderSettled(orderTx, status, settleEv);
+  }
+}
+
+function reconcileDexSettlementsForTx(txHash) {
+  if (!txHash) return;
+  for (let i = pendingDexSettlements.length - 1; i >= 0; i--) {
+    const ev = pendingDexSettlements[i];
+    if (ev.tx_hash !== txHash && !parentTxsOf(ev.tx_hash).length) continue;
+    pendingDexSettlements.splice(i, 1);
+    applyDexSettlement(ev);
+  }
+  for (const { ev } of retentionCache.values()) {
+    if (ev.tx_hash !== txHash) continue;
+    if (ev.kind === "dex_fill" || ev.kind === "dex_cancel") applyDexSettlement(ev);
+  }
 }
 
 let lcTx = null;   // tx hash currently focused by hover
@@ -676,9 +930,12 @@ function searchFromUrl() {
     const v = params.get(key);
     if (v != null && String(v).trim() !== "") return String(v).trim();
   }
-  // Bare flag style: http://host:9070/?minswap
+  // Bare `?term` search — not when `?filters=` is driving chip presets.
+  if (params.has("filters")) return "";
   for (const [k, v] of params.entries()) {
-    if (!k || ["q", "search", "filter"].includes(k)) continue;
+    if (!k) continue;
+    const lk = k.toLowerCase();
+    if (URL_SEARCH_KEYS.has(lk) || URL_MISC_KEYS.has(lk) || lk === "filters") continue;
     if (v === "" || v == null) return k;
   }
   return "";
@@ -1006,13 +1263,18 @@ function dexFlowHtml(d) {
 }
 
 function dexStatusPill(ev, d) {
-  if (d.filled || ev.kind === "dex_fill") return "";
-  if (ev.kind === "dex_cancel") return `<span class="badge cancelled">Cancelled</span>`;
-  if (ev.kind === "dex_lp") {
-    return `<span class="badge pending pulse-pending">Pending</span>`;
+  const settled = d.settlement
+    || dexSettlementStatus(ev.tx_hash, d.dex)
+    || (d.filled ? "filled" : null);
+  if (settled === "filled") return dexStatusPillHtml("filled");
+  if (settled === "cancelled" || ev.kind === "dex_cancel") {
+    return dexStatusPillHtml("cancelled");
   }
+  // Fill cards are the settlement itself — no status pill.
+  if (ev.kind === "dex_fill") return "";
+  if (ev.kind === "dex_lp") return dexStatusPillHtml("pending");
   if (ev.kind === "dex_order" && (d.side === "buy" || d.side === "sell")) {
-    return `<span class="badge pending pulse-pending">Pending</span>`;
+    return dexStatusPillHtml("pending");
   }
   return "";
 }
@@ -1420,6 +1682,14 @@ function retentionIndex(ev) {
   if (ev.kind === "block" && ev.block_hash) blocksByHash.set(ev.block_hash, ev);
   if (ev.kind === "transaction" && ev.tx_hash) txByHash.set(ev.tx_hash, ev);
   indexTxGraph(ev);
+  if (ev.kind === "dex_fill" || ev.kind === "dex_cancel") applyDexSettlement(ev);
+  if (ev.kind === "dex_order" || ev.kind === "dex_lp") {
+    const st = dexSettlementStatus(ev.tx_hash, ev.data?.dex);
+    if (st) {
+      if (!ev.data || typeof ev.data !== "object") ev.data = {};
+      ev.data.settlement = st;
+    }
+  }
   noteLoadedEvent(ev);
 }
 
@@ -2337,10 +2607,24 @@ const applySoon = (() => {
 
 /* ── Pause-on-read buffering ──────────────────────────────────────────── */
 
+/**
+ * "At the tip" means the top of the event list is still on screen (under the
+ * sticky header / below the filters) — not that document scrollY is ~0.
+ * Scrolling the filters off-screen is fine; pausing only starts once the
+ * first feed cards have gone under the header.
+ */
+function tipAnchorY() {
+  const header = document.querySelector("header");
+  return header ? header.getBoundingClientRect().bottom : 0;
+}
+
 function isPaused() {
-  return settings.layout === "vertical"
-    ? window.scrollY > 90
-    : feed.scrollLeft > 60;
+  if (settings.layout === "vertical") {
+    const feedTop = feed.getBoundingClientRect().top;
+    // Small slack so rubber-band / subpixel scroll doesn't flicker the pill.
+    return feedTop < tipAnchorY() - 12;
+  }
+  return feed.scrollLeft > 60;
 }
 
 /** Pending tip events that match the current filters (drives the "n new" pill). */
@@ -2422,8 +2706,13 @@ function scheduleFlushPending() {
 }
 
 $("newpill").onclick = () => {
-  if (settings.layout === "vertical") window.scrollTo({ top: 0, behavior: "smooth" });
-  else feed.scrollTo({ left: 0, behavior: "smooth" });
+  if (settings.layout === "vertical") {
+    // Scroll so the event list top sits just under the sticky header.
+    const y = window.scrollY + feed.getBoundingClientRect().top - tipAnchorY();
+    window.scrollTo({ top: Math.max(0, y), behavior: "smooth" });
+  } else {
+    feed.scrollTo({ left: 0, behavior: "smooth" });
+  }
   setTimeout(flushPending, 350);
 };
 
@@ -3870,6 +4159,8 @@ function connect() {
         retentionCache.clear();
         blocksByHash.clear();
         txByHash.clear();
+        dexOrderSettlement.clear();
+        pendingDexSettlements.length = 0;
         orphanedBlocks.clear();
         historySparsePause = false;
         historyLoadArmed = true;

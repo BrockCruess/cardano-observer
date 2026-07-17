@@ -80,9 +80,16 @@ forks, orphaned blocks and slot battles.
   account lookups when the previous target is still unknown.
 - **Filters that stick.** Per-category chips, free-text search (tx / block /
   address / policy / ticker / DEX name), URL deep-links (`?q=minswap`,
-  `?BROCK`, …), a minimum-₳ filter, layout and density toggles - all cached in
-  the browser's localStorage for your next visit. Search runs over the
-  preloaded retention window in the browser (no per-query server scan).
+  `?BROCK`, `?filters=minswap&blocks&iagon`, …), a minimum-₳ filter, layout
+  and density toggles - all cached in the browser's localStorage for your next
+  visit. Search runs over the preloaded retention window in the browser (no
+  per-query server scan). Start a preset with `?filters=` then list every
+  category / DEX venue / dApp as `&name` flags (e.g.
+  `?filters=minswap&blocks&iagon` → Minswap DEX only, Blocks, Iagon dApp only).
+  Names match the on-screen chips: category multi-word labels work via any
+  word (`forks` / `battles`); one-word DEX/dApp names match in full
+  (`vyfinance`, `sundaeswap`); multi-word DEX names use the first word
+  (`dano` for Dano Finance).
 - **Reading-friendly.** Scroll down and the feed pauses; a "new events" pill
   counts what you're missing and snaps you back to the tip when clicked.
 - **Light on the host.** Builds to a single static binary (~6 MB) with no

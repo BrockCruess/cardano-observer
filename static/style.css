@@ -1034,7 +1034,8 @@ header {
 .badge.pending.pulse-pending {
   animation: pending-pulse 1.8s ease-out infinite;
 }
-.badge.cancelled { --bc: var(--muted); }
+.badge.filled { --bc: var(--c-transaction); }
+.badge.cancelled { --bc: var(--c-alert); }
 @keyframes pending-pulse {
   0% { box-shadow: 0 0 0 0 color-mix(in srgb, #d4a017 50%, transparent); }
   70% { box-shadow: 0 0 0 7px transparent; }
