@@ -43,7 +43,7 @@ pub async fn run(state: Arc<AppState>) {
         state.counters.blocks.fetch_add(1, Ordering::Relaxed);
 
         let tx_count = rng.gen_range(0..14usize);
-        state.publish(block_event(&hash, height, slot, now, tx_count, &mut rng));
+        let block_id = state.publish(block_event(&hash, height, slot, now, tx_count, &mut rng));
 
         if let Some((loser, kind)) = battle {
             state.publish(ChainEvent {
@@ -64,7 +64,7 @@ pub async fn run(state: Arc<AppState>) {
 
         for i in 0..tx_count {
             tokio::time::sleep(Duration::from_millis(rng.gen_range(60..420))).await;
-            emit_tx(&state, &hash, height, slot, i, &mut rng);
+            emit_tx(&state, &hash, height, slot, i, block_id, &mut rng);
         }
 
         let (epoch, progress) = (slot / 432_000 + 208, (slot % 432_000) as f64 / 432_000.0);
@@ -82,7 +82,15 @@ pub async fn run(state: Arc<AppState>) {
     }
 }
 
-fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, index: usize, rng: &mut StdRng) {
+fn emit_tx(
+    state: &Arc<AppState>,
+    block_hash: &str,
+    height: u64,
+    slot: u64,
+    index: usize,
+    block_id: Option<u64>,
+    rng: &mut StdRng,
+) {
     let tx_hash = rand_hex(rng, 64);
     let now = unix_now();
     state.counters.txs.fetch_add(1, Ordering::Relaxed);
@@ -92,19 +100,21 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
     let n_in = rng.gen_range(1..6usize);
     let n_out = rng.gen_range(1..8usize);
 
-    let mk = |kind: &'static str, category: &'static str, title: String, data: Value| ChainEvent {
-        id: 0,
-        parent_id: None,
-        kind: kind.into(),
-        category: category.into(),
-        slot,
-        height: Some(height),
-        block_hash: Some(block_hash.to_string()),
-        tx_hash: Some(tx_hash.clone()),
-        timestamp: now,
-        title,
-        summary: String::new(),
-        data,
+    let mk = |kind: &'static str, category: &'static str, title: String, data: Value, parent_id: Option<u64>| {
+        ChainEvent {
+            id: 0,
+            parent_id,
+            kind: kind.into(),
+            category: category.into(),
+            slot,
+            height: Some(height),
+            block_hash: Some(block_hash.to_string()),
+            tx_hash: Some(tx_hash.clone()),
+            timestamp: now,
+            title,
+            summary: String::new(),
+            data,
+        }
     };
 
     let n_stakes = rng.gen_range(0..8usize);
@@ -119,12 +129,18 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
             .unwrap()
             .insert("stakes".into(), json!(stakes));
     }
-    state.publish(mk(
+    let Some(tx_id) = state.publish(mk(
         "transaction",
         "transaction",
         "Transaction".into(),
         tx_data,
-    ));
+        block_id,
+    )) else {
+        return;
+    };
+    let publish_child = |kind: &'static str, category: &'static str, title: String, data: Value| {
+        state.publish(mk(kind, category, title, data, Some(tx_id)));
+    };
 
     let demo_tokens: [(&str, &str, &str); 6] = [
         ("f66d78b4a3cb3d37afa0ec36461e51ecbde00f26c8f0a68f94b69880", "69555344", "iUSD"),
@@ -150,19 +166,19 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                 })
             })
             .collect();
-        state.publish(mk(
+        publish_child(
             "token_transfer",
             "token",
             if items.len() == 1 { "Token Transfer".into() } else { format!("Token Transfer ×{}", items.len()) },
             json!({ "assets": { "items": items, "more": 0 } }),
-        ));
+        );
     }
 
     if rng.gen_bool(0.10) {
         let name_hex = hex::encode(format!("DemoNFT{}", rng.gen_range(1..9999)));
         let policy = rand_hex(rng, 56);
         let burn = rng.gen_bool(0.25);
-        state.publish(mk(
+        publish_child(
             if burn { "burn" } else { "mint" },
             "mint",
             if burn { "Token Burn".into() } else { "Token Mint".into() },
@@ -174,43 +190,43 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                 "qty": if burn { "-1" } else { "1" },
                 "fingerprint": crate::parse::asset_fingerprint(&policy, &name_hex),
             }], "more": 0 } }),
-        ));
+        );
     }
 
     if rng.gen_bool(0.12) {
         let from = fake_pool(rng);
         let mut to = fake_pool(rng);
         while to == from { to = fake_pool(rng); }
-        state.publish(mk(
+        publish_child(
             "delegation",
             "staking",
             "Stake Delegation".into(),
             json!({ "stake": fake_stake(rng), "fromPool": from, "pool": to }),
-        ));
+        );
     }
     if rng.gen_bool(0.05) {
-        state.publish(mk(
+        publish_child(
             "stake_registration",
             "staking",
             "Stake Key Registered".into(),
             json!({ "stake": fake_stake(rng) }),
-        ));
+        );
     }
     if rng.gen_bool(0.08) {
-        state.publish(mk(
+        publish_child(
             "withdrawal",
             "staking",
             "Reward Withdrawal".into(),
             json!({ "account": fake_stake(rng), "lovelace": rng.gen_range(1_000_000..2_000_000_000u64) }),
-        ));
+        );
     }
     if rng.gen_bool(0.03) {
-        state.publish(mk(
+        publish_child(
             "pool_registration",
             "pool",
             "Pool Registration".into(),
             json!({ "pool": fake_pool(rng), "pledge": 25_000_000_000u64, "cost": 340_000_000u64, "margin": "1/50" }),
-        ));
+        );
     }
     if rng.gen_bool(0.05) {
         let votes = ["yes", "no", "abstain"];
@@ -220,7 +236,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
         } else {
             ("stakePoolOperator", fake_pool(rng), "SPO Vote")
         };
-        state.publish(mk(
+        publish_child(
             "gov_vote",
             "governance",
             format!("{who}: {}", vote.to_uppercase()),
@@ -231,34 +247,34 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                 "proposalTx": rand_hex(rng, 64),
                 "proposalIndex": 0,
             }),
-        ));
+        );
     }
     if rng.gen_bool(0.02) {
-        state.publish(mk(
+        publish_child(
             "gov_proposal",
             "governance",
             "Governance Action: Treasury withdrawal".into(),
             json!({ "actionType": "treasuryWithdrawals", "index": 0, "deposit": 100_000_000_000u64, "anchorUrl": "ipfs://demo" }),
-        ));
+        );
     }
     if rng.gen_bool(0.04) {
         let from = fake_drep(rng);
         let mut to = fake_drep(rng);
         while to == from { to = fake_drep(rng); }
-        state.publish(mk(
+        publish_child(
             "vote_delegation",
             "governance",
             "DRep Delegation".into(),
             json!({ "stake": fake_stake(rng), "fromDrep": from, "drep": to }),
-        ));
+        );
     }
     if rng.gen_bool(0.07) {
-        state.publish(mk(
+        publish_child(
             "tx_metadata",
             "metadata",
             "Message".into(),
             json!({ "labels": ["674"], "msg": "gm Cardano - sent from cardano-observer demo" }),
-        ));
+        );
     }
 
     // ── DEX activity ────────────────────────────────────────────────────
@@ -308,7 +324,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
             obj.insert("wantQty".into(), json!(want_ada.to_string()));
             obj.insert("wantAda".into(), json!(want_ada));
         }
-        state.publish(mk(
+        publish_child(
             "dex_order",
             "dex",
             match side {
@@ -317,7 +333,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                 _ => format!("Swap - {dex}"),
             },
             order_data,
-        ));
+        );
     }
     if rng.gen_bool(0.14) {
         let dex = dexes[rng.gen_range(0..dexes.len())];
@@ -349,7 +365,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                 "wantMin": true, "wantAda": ada, "wantQty": ada.to_string(),
             })
         };
-        state.publish(mk("dex_fill", "dex", format!("Order Fill - {dex}"), data));
+        publish_child("dex_fill", "dex", format!("Order Fill - {dex}"), data);
     }
     if rng.gen_bool(0.08) {
         let dex = dexes[rng.gen_range(0..dexes.len())];
@@ -381,7 +397,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                 format!("LP Deposit - {dex}"),
             )
         };
-        state.publish(mk(
+        publish_child(
             "dex_lp",
             "dex",
             title,
@@ -389,14 +405,14 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                 "dex": dex, "side": side, "ada": ada, "assets": assets,
                 "filled": false, "stake": fake_stake(rng),
             }),
-        ));
+        );
     }
     if rng.gen_bool(0.03) {
         let dex = dexes[rng.gen_range(0..dexes.len())];
         let (p, n, _t) = demo_tokens[rng.gen_range(0..demo_tokens.len())];
         let ada = rng.gen_range(20..400u64) * 1_000_000;
         let want_qty = rng.gen_range(1_000..5_000_000i64);
-        state.publish(mk(
+        publish_child(
             "dex_cancel",
             "dex",
             format!("Buy Cancelled - {dex}"),
@@ -416,7 +432,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                     "fingerprint": crate::parse::asset_fingerprint(p, n),
                 }], "more": 0 },
             }),
-        ));
+        );
     }
     if rng.gen_bool(0.10) {
         let (event_type, title, iag, ada) = match rng.gen_range(0..9u8) {
@@ -455,7 +471,7 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
                 }),
             );
         }
-        state.publish(mk("dapp_activity", "dapp", title.into(), data));
+        publish_child("dapp_activity", "dapp", title.into(), data);
     }
 
     // Cache a plausible raw tx so the detail modal has something to show.

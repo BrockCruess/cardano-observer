@@ -228,14 +228,15 @@ async fn handle_forward(
     let mut block_id: Option<u64> = None;
     let mut tx_ids: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for mut event in parsed.events {
+        // Never fall back to the block id for detail events — that sorts them
+        // above every transaction as fake "children of the block".
         event.parent_id = match event.kind.as_str() {
             "block" | "orphaned_block" => None,
             "transaction" => block_id,
             _ => event
                 .tx_hash
                 .as_deref()
-                .and_then(|h| tx_ids.get(h).copied())
-                .or(block_id),
+                .and_then(|h| tx_ids.get(h).copied()),
         };
         let is_block = event.kind == "block";
         let tx_hash = (event.kind == "transaction").then(|| event.tx_hash.clone()).flatten();

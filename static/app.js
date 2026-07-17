@@ -517,13 +517,36 @@ function applyFilters() {
   const q = $("search").value.trim().toLowerCase();
   for (const g of groupOrder) {
     let visible = 0;
+    // Pass 1: non-min-ADA hide reasons (needed to know which tx children stay).
+    const baseHide = new Map();
     g.querySelectorAll(".card").forEach((card) => {
       let hide = false;
-      if (minL > 0 && card.dataset.category === "transaction" && Number(card.dataset.ada || 0) < minL) hide = true;
       if (q && !(card.dataset.search || "").includes(q)) hide = true;
       if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) hide = true;
       if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) hide = true;
       if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) hide = true;
+      baseHide.set(card, hide);
+    });
+    // Tx ids that still have a visible child — keep those parents despite min-ADA.
+    const parentsWithKids = new Set();
+    if (minL > 0) {
+      g.querySelectorAll(".card").forEach((card) => {
+        if (baseHide.get(card)) return;
+        if (!settings.filters[card.dataset.category]) return;
+        const parent = card.dataset.parent;
+        if (parent && card.dataset.kind !== "transaction") parentsWithKids.add(parent);
+      });
+    }
+    g.querySelectorAll(".card").forEach((card) => {
+      let hide = baseHide.get(card) || false;
+      if (
+        minL > 0
+        && card.dataset.category === "transaction"
+        && Number(card.dataset.ada || 0) < minL
+        && !parentsWithKids.has(card.dataset.eid)
+      ) {
+        hide = true;
+      }
       card.classList.toggle("f-hide", hide);
       if (!hide && settings.filters[card.dataset.category]) {
         visible++;
@@ -1382,6 +1405,9 @@ function cardSearchText(ev) {
 
 /** Block hashes marked orphaned — hidden with Forks & Battles filter off. */
 const orphanedBlocks = new Set();
+/** Fast lookup for ensureBlockCard / parent wiring. */
+const blocksByHash = new Map(); // block_hash -> block event
+const txByHash = new Map();     // tx_hash -> transaction event
 
 /** Index one event into the client-side 24h retention cache. */
 function retentionIndex(ev) {
@@ -1391,6 +1417,8 @@ function retentionIndex(ev) {
     orphanedBlocks.add(ev.block_hash);
   }
   retentionCache.set(ev.id, { ev, hay: cardSearchText(ev) });
+  if (ev.kind === "block" && ev.block_hash) blocksByHash.set(ev.block_hash, ev);
+  if (ev.kind === "transaction" && ev.tx_hash) txByHash.set(ev.tx_hash, ev);
   indexTxGraph(ev);
   noteLoadedEvent(ev);
 }
@@ -1401,8 +1429,15 @@ function retentionTrim() {
   for (const [id, row] of retentionCache) {
     if ((row.ev.timestamp || 0) < cutoff) {
       retentionCache.delete(id);
-      unindexTxGraph(row.ev);
-      forgetLoadedEvent(row.ev);
+      const ev = row.ev;
+      if (ev.kind === "block" && ev.block_hash && blocksByHash.get(ev.block_hash) === ev) {
+        blocksByHash.delete(ev.block_hash);
+      }
+      if (ev.kind === "transaction" && ev.tx_hash && txByHash.get(ev.tx_hash) === ev) {
+        txByHash.delete(ev.tx_hash);
+      }
+      unindexTxGraph(ev);
+      forgetLoadedEvent(ev);
     }
   }
 }
@@ -1459,8 +1494,12 @@ function startRetentionPreload(force = false) {
   return retentionLoading;
 }
 
-/** Category / gov-type / DEX venue / min-ADA (search text is separate). */
-function eventPassesFeedFilters(ev) {
+/**
+ * Category / gov-type / DEX venue / min-ADA (search text is separate).
+ * Pass `{ ignoreMinAda: true }` when pulling a parent Transaction for hierarchy
+ * so a small tx isn't dropped while its DEX/token children still show.
+ */
+function eventPassesFeedFilters(ev, opts = {}) {
   if (!ev || !keepDexEvent(ev)) return false;
   if (!settings.filters[ev.category]) return false;
   // Orphaned-block content is gated by Forks & Battles (not only alert cards).
@@ -1477,10 +1516,21 @@ function eventPassesFeedFilters(ev) {
     const gt = govTypeKey(ev);
     if (gt && !govTypeEnabled(gt)) return false;
   }
-  if (settings.minAda > 0 && ev.category === "transaction") {
+  if (!opts.ignoreMinAda && settings.minAda > 0 && ev.category === "transaction") {
     if (Number(ev.data?.ada || 0) < settings.minAda * 1e6) return false;
   }
   return true;
+}
+
+/** Parent Transaction event for a tx-scoped child (via parent_id or tx_hash). */
+function parentTransactionEvent(ev) {
+  if (!ev || ev.kind === "block" || ev.kind === "transaction") return null;
+  if (ev.parent_id != null) {
+    const row = retentionCache.get(ev.parent_id);
+    if (row?.ev?.kind === "transaction") return row.ev;
+  }
+  if (ev.tx_hash) return txByHash.get(ev.tx_hash) || null;
+  return null;
 }
 
 function feedFilterKey() {
@@ -1493,9 +1543,17 @@ function feedFilterKey() {
   });
 }
 
-/** Newest-first by slot (chain order), then id within the same slot. */
+/** Newest-first by slot (chain order). Within a slot, the block header comes
+ *  first so paged loads never paint orphan child groups without their Block. */
 function sortEventsNewestFirst(events) {
-  events.sort((a, b) => (b.slot || 0) - (a.slot || 0) || (b.id || 0) - (a.id || 0));
+  events.sort((a, b) => {
+    const slotDiff = (b.slot || 0) - (a.slot || 0);
+    if (slotDiff) return slotDiff;
+    const aBlock = a.kind === "block" ? 0 : 1;
+    const bBlock = b.kind === "block" ? 0 : 1;
+    if (aBlock !== bBlock) return aBlock - bBlock;
+    return (b.id || 0) - (a.id || 0);
+  });
   return events;
 }
 
@@ -1551,6 +1609,26 @@ function cmpHierarchy(a, b) {
   return (ka[0] - kb[0]) || (ka[1] - kb[1]) || (ka[2] - kb[2]);
 }
 
+/**
+ * When parent_id is missing (demo / older rows), attach children to the
+ * Transaction card that shares their tx_hash so hierarchy sort still works.
+ */
+function resolveCardParents(host) {
+  const txIds = new Map();
+  for (const card of host.querySelectorAll(":scope > .card")) {
+    if (card.dataset.kind === "transaction" && card.dataset.tx && card.dataset.eid) {
+      txIds.set(card.dataset.tx, card.dataset.eid);
+    }
+  }
+  for (const card of host.querySelectorAll(":scope > .card")) {
+    if (card.dataset.kind === "block" || card.dataset.kind === "transaction") continue;
+    if (!card.dataset.parent && card.dataset.tx && txIds.has(card.dataset.tx)) {
+      card.dataset.parent = txIds.get(card.dataset.tx);
+    }
+    if (card.dataset.parent) card.classList.add("ev-child");
+  }
+}
+
 function resortFeedBySlot() {
   // Re-appending every group resets the browser's scroll anchoring and reads as
   // a flash when history pages land under sparse filters. Pin the viewport.
@@ -1558,8 +1636,10 @@ function resortFeedBySlot() {
   const x = feed.scrollLeft;
   const items = [...feed.querySelectorAll(":scope > .block-group")];
   for (const g of items) {
+    repairBlockGroup(g);
     const host = g.querySelector(".group-events");
     if (host) {
+      resolveCardParents(host);
       const cards = [...host.querySelectorAll(":scope > .card")];
       cards.sort(cmpHierarchy);
       for (const c of cards) host.appendChild(c);
@@ -1583,6 +1663,200 @@ function resortFeedBySlot() {
   }
 }
 
+/* ── Enter animations (tip slide then fade / history fade) ────────────── */
+
+/** `tip` | `hist` | null — controls markEnter on newly built cards. */
+let enterMode = null;
+const FEED_ENTER_MS = 700;
+const reduceMotion = () =>
+  typeof matchMedia === "function"
+  && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function withEnterMode(mode, fn) {
+  const prev = enterMode;
+  enterMode = mode;
+  try {
+    return fn();
+  } finally {
+    enterMode = prev;
+  }
+}
+
+function markEnter(el) {
+  if (!el || !enterMode) return;
+  if (enterMode === "tip") {
+    // Stay invisible until the list finishes sliding, then fade in.
+    el.classList.remove("enter-tip", "enter-hist");
+    el.classList.add("enter-tip-pending");
+    return;
+  }
+  el.classList.remove("enter-tip", "enter-hist", "enter-tip-pending");
+  void el.offsetWidth;
+  el.classList.add("enter-hist");
+  const clear = () => el.classList.remove("enter-hist");
+  el.addEventListener("animationend", clear, { once: true });
+  setTimeout(clear, FEED_ENTER_MS + 100);
+}
+
+function captureGroupRects() {
+  const first = new Map();
+  for (const el of feed.querySelectorAll(":scope > .block-group")) {
+    if (el.classList.contains("f-hide")) continue;
+    first.set(el, el.getBoundingClientRect());
+  }
+  return first;
+}
+
+/** Invert existing groups to their pre-insert positions (must run before paint). */
+function applyFlipInvert(first) {
+  const movers = [];
+  for (const el of feed.querySelectorAll(":scope > .block-group")) {
+    const a = first.get(el);
+    if (!a || el.classList.contains("f-hide")) continue;
+    const b = el.getBoundingClientRect();
+    const dx = a.left - b.left;
+    const dy = a.top - b.top;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
+    el.classList.remove("flip-moving");
+    el.style.transition = "none";
+    el.style.transform = `translate(${dx}px, ${dy}px)`;
+    movers.push(el);
+  }
+  return movers;
+}
+
+function clearFlip(movers) {
+  for (const el of movers) {
+    el.classList.remove("flip-moving");
+    el.style.transition = "";
+    el.style.transform = "";
+  }
+}
+
+function fadeInTipCards(cards) {
+  for (const card of cards) {
+    if (!card.isConnected) continue;
+    card.classList.remove("enter-tip-pending");
+    if (reduceMotion()) continue;
+    void card.offsetWidth;
+    card.classList.add("enter-tip");
+    const clear = () => card.classList.remove("enter-tip");
+    card.addEventListener("animationend", clear, { once: true });
+    setTimeout(clear, FEED_ENTER_MS + 100);
+  }
+}
+
+/** Serialize tip slide+fade so a second batch doesn't capture mid-FLIP rects. */
+let tipAnimBusy = false;
+let tipAnimQueue = [];
+
+function releaseTipAnim() {
+  tipAnimBusy = false;
+  if (!tipAnimQueue.length) return;
+  const next = tipAnimQueue.splice(0);
+  insertTipEvents(next);
+}
+
+/**
+ * Tip insert: 1) mount new cards invisible, 2) slide existing groups down,
+ * 3) fade new cards in. History uses fade-only via insertHistEvents.
+ */
+function insertTipEvents(events) {
+  if (!events.length) return;
+
+  if (tipAnimBusy) {
+    tipAnimQueue.push(...events);
+    return;
+  }
+  tipAnimBusy = true;
+
+  if (reduceMotion()) {
+    withEnterMode(null, () => {
+      suppressFeedResort = true;
+      try {
+        for (const ev of events) routeEvent(ev);
+      } finally {
+        suppressFeedResort = false;
+      }
+      resortFeedBySlot();
+    });
+    releaseTipAnim();
+    return;
+  }
+
+  const first = captureGroupRects();
+
+  withEnterMode("tip", () => {
+    suppressFeedResort = true;
+    try {
+      for (const ev of events) routeEvent(ev);
+    } finally {
+      suppressFeedResort = false;
+    }
+    resortFeedBySlot();
+  });
+
+  const pendingCards = [...feed.querySelectorAll(".card.enter-tip-pending")];
+  // Invert before the browser paints the jumped layout.
+  const movers = applyFlipInvert(first);
+  // Flush so the inverted frame is committed (still with transition:none).
+  void feed.offsetWidth;
+
+  const afterSlide = () => {
+    fadeInTipCards(pendingCards);
+    // Free the lock after fade so the next batch measures settled layout.
+    setTimeout(releaseTipAnim, FEED_ENTER_MS + 50);
+  };
+
+  if (!movers.length) {
+    afterSlide();
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    for (const el of movers) {
+      // Must clear inline transition:none or .flip-moving never animates.
+      el.style.transition = "";
+      el.classList.add("flip-moving");
+    }
+    // Ensure transition is active before releasing the invert.
+    void feed.offsetWidth;
+    for (const el of movers) {
+      el.style.transform = "";
+    }
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearFlip(movers);
+      afterSlide();
+    };
+    let left = movers.length;
+    for (const el of movers) {
+      el.addEventListener("transitionend", function te(e) {
+        if (e.target !== el) return;
+        if (e.propertyName && e.propertyName !== "transform") return;
+        el.removeEventListener("transitionend", te);
+        if (--left <= 0) finish();
+      });
+    }
+    setTimeout(finish, FEED_ENTER_MS + 50);
+  });
+}
+
+/** Insert history events with fade-in only (no list jump animation). */
+function insertHistEvents(run) {
+  withEnterMode("hist", () => {
+    suppressFeedResort = true;
+    try {
+      run();
+    } finally {
+      suppressFeedResort = false;
+    }
+    resortFeedBySlot();
+  });
+}
+
 let feedResortQueued = false;
 /** When true, routeEvent skips scheduling a resort (caller will resort once). */
 let suppressFeedResort = false;
@@ -1598,11 +1872,21 @@ function scheduleFeedResort() {
 
 /** Newest-first events from the 24h cache that pass the current feed filters. */
 function collectFeedHits() {
-  const hits = [];
+  const byId = new Map();
   for (const { ev } of retentionCache.values()) {
-    if (eventPassesFeedFilters(ev)) hits.push(ev);
+    if (!eventPassesFeedFilters(ev)) continue;
+    byId.set(ev.id, ev);
+    // Keep the parent Transaction with its children (bypass min-ADA only).
+    const parent = parentTransactionEvent(ev);
+    if (
+      parent
+      && !byId.has(parent.id)
+      && eventPassesFeedFilters(parent, { ignoreMinAda: true })
+    ) {
+      byId.set(parent.id, parent);
+    }
   }
-  return sortEventsNewestFirst(hits);
+  return sortEventsNewestFirst([...byId.values()]);
 }
 
 function syncFeedHitOffset() {
@@ -1631,23 +1915,56 @@ function ensureFeedHitBuffer(force = false) {
  * Render the next FEED_PAGE_SIZE *new* matches from feedHitBuffer into the DOM.
  * Returns how many cards were added.
  */
-function renderFeedPage() {
+function renderFeedPage(opts = {}) {
+  const animate = opts.animate !== false;
   const batch = [];
+  const batchIds = new Set();
   while (batch.length < FEED_PAGE_SIZE && feedHitOffset < feedHitBuffer.length) {
     const ev = feedHitBuffer[feedHitOffset++];
-    if (ev?.id == null || seenEventIds.has(ev.id)) continue;
+    if (ev?.id == null || seenEventIds.has(ev.id) || batchIds.has(ev.id)) continue;
+    // Pull the parent Block into this page when we hit its children first.
+    if (ev.kind !== "block" && ev.block_hash) {
+      const blockEv = findBlockEvent(ev.block_hash);
+      if (
+        blockEv
+        && !seenEventIds.has(blockEv.id)
+        && !batchIds.has(blockEv.id)
+      ) {
+        batch.push(blockEv);
+        batchIds.add(blockEv.id);
+      }
+    }
+    // Same for the parent Transaction — children must not mount as orphans.
+    if (ev.kind !== "block" && ev.kind !== "transaction") {
+      const parentTx = parentTransactionEvent(ev);
+      if (
+        parentTx
+        && !seenEventIds.has(parentTx.id)
+        && !batchIds.has(parentTx.id)
+      ) {
+        batch.push(parentTx);
+        batchIds.add(parentTx.id);
+      }
+    }
     batch.push(ev);
+    batchIds.add(ev.id);
   }
   retentionHistoryDone = feedHitOffset >= feedHitBuffer.length;
   if (!batch.length) return 0;
-  // One resort after the batch — per-event scheduleFeedResort was a major flash.
-  suppressFeedResort = true;
-  try {
+  const paint = () => {
     for (const ev of batch) routeEvent(ev);
-  } finally {
-    suppressFeedResort = false;
+  };
+  if (animate) {
+    insertHistEvents(paint);
+  } else {
+    suppressFeedResort = true;
+    try {
+      paint();
+    } finally {
+      suppressFeedResort = false;
+    }
+    resortFeedBySlot();
   }
-  resortFeedBySlot();
   prefetchUnitsFromEvents(batch);
   applyFilters();
   return batch.length;
@@ -1678,7 +1995,7 @@ function onFeedFiltersChanged() {
   ensureFeedHitBuffer(true);
   clearFeedDom();
   while (!visibleFeedFillsPage() && feedHitOffset < feedHitBuffer.length) {
-    if (!renderFeedPage()) break;
+    if (!renderFeedPage({ animate: false })) break;
   }
   resortFeedBySlot();
   applyFilters();
@@ -1768,6 +2085,7 @@ function buildCard(ev) {
     // Two rAFs: first layout assigns width, second measures pills.
     requestAnimationFrame(() => requestAnimationFrame(() => fitTxStakes(stakesEl)));
   }
+  markEnter(card);
   return card;
 }
 
@@ -1808,16 +2126,121 @@ function noteEventId(ev) {
   retentionIndex(ev);
 }
 
+function findBlockEvent(blockHash) {
+  if (!blockHash) return null;
+  const hit = blocksByHash.get(blockHash);
+  if (hit) return hit;
+  for (const { ev } of retentionCache.values()) {
+    if (ev.kind === "block" && ev.block_hash === blockHash) {
+      blocksByHash.set(blockHash, ev);
+      return ev;
+    }
+  }
+  for (const ev of feedHitBuffer) {
+    if (ev.kind === "block" && ev.block_hash === blockHash) return ev;
+  }
+  return null;
+}
+
+/**
+ * Make sure a block-group has its Block card. Paged feeds can otherwise mount
+ * txs/tokens first and leave the header missing until a later page.
+ * Structural cards skip tip/hist enter animation so they don't leave an
+ * invisible card-sized hole above their children.
+ */
+function ensureBlockCard(blockHash) {
+  if (!blockHash) return;
+  let g = groups.get(blockHash);
+  if (g?.querySelector(".card-block")) return;
+  const blockEv = findBlockEvent(blockHash);
+  if (!blockEv) return;
+  if (!g) g = newGroup(blockHash, blockEv);
+  if (g.querySelector(".card-block")) return;
+  // Card missing even if we already counted the id (DOM rebuild / page skew).
+  if (!seenEventIds.has(blockEv.id)) {
+    sessionEvents++;
+    noteEventId(blockEv);
+  }
+  withEnterMode(null, () => {
+    g.prepend(buildCard(blockEv));
+  });
+}
+
+/**
+ * Mount the parent Transaction before a child so hierarchy sort can cluster
+ * DEX / token / metadata under it (and not above the next unrelated tx).
+ */
+function ensureParentTransaction(ev) {
+  const parent = parentTransactionEvent(ev);
+  if (!parent) return;
+  const blockHash = parent.block_hash || ev.block_hash;
+  if (blockHash) ensureBlockCard(blockHash);
+  let g = blockHash ? groups.get(blockHash) : null;
+  if (!g) g = newGroup(blockHash, parent);
+  if (g.querySelector(`.card[data-eid="${parent.id}"]`)) return;
+  if (!seenEventIds.has(parent.id)) {
+    sessionEvents++;
+    noteEventId(parent);
+  }
+  withEnterMode(null, () => {
+    g.querySelector(".group-events").appendChild(buildCard(parent));
+  });
+}
+
+/**
+ * Groups that somehow lost their Block header (or have a stuck opacity-0 tip
+ * pending on it) leave a dead gap on the spine. Repair before each resort.
+ */
+function repairBlockGroup(g) {
+  if (!g) return;
+  const hash = g.dataset.block;
+  if (hash && !g.querySelector(".card-block")) {
+    ensureBlockCard(hash);
+  }
+  const host = g.querySelector(".group-events");
+  if (!host) return;
+  const visibleEvent = [...host.querySelectorAll(":scope > .card")].some(
+    (c) => !c.classList.contains("enter-tip-pending") && !c.classList.contains("f-hide"),
+  );
+  // Header still invisible while children already show → card-sized hole.
+  if (visibleEvent) {
+    g.querySelectorAll(".card-block.enter-tip-pending").forEach((card) => {
+      card.classList.remove("enter-tip-pending", "enter-tip", "enter-hist");
+    });
+  }
+  host.querySelectorAll(".card[data-kind=transaction].enter-tip-pending").forEach((tx) => {
+    const eid = tx.dataset.eid;
+    if (!eid) return;
+    const kidVisible = [...host.querySelectorAll(`.card[data-parent="${eid}"]`)].some(
+      (c) => !c.classList.contains("enter-tip-pending") && !c.classList.contains("f-hide"),
+    );
+    if (kidVisible) tx.classList.remove("enter-tip-pending", "enter-tip", "enter-hist");
+  });
+}
+
 function routeEvent(ev) {
   if (!keepDexEvent(ev)) return;
-  if (ev?.id != null && seenEventIds.has(ev.id)) return;
+  if (ev?.id != null && seenEventIds.has(ev.id)) {
+    // Block id was recorded but the header card never landed (group eviction /
+    // ensure raced). Remount so children aren't orphaned under a spine gap.
+    if (ev.kind === "block" && ev.block_hash) {
+      const g = groups.get(ev.block_hash);
+      if (g && !g.querySelector(".card-block")) {
+        withEnterMode(null, () => g.prepend(buildCard(ev)));
+        scheduleFeedResort();
+      }
+    }
+    return;
+  }
   sessionEvents++;
   noteEventId(ev);
 
   if (ev.kind === "block") {
     let g = ev.block_hash ? groups.get(ev.block_hash) : null;
     if (!g) g = newGroup(ev.block_hash, ev);
-    g.prepend(buildCard(ev));
+    if (!g.querySelector(".card-block")) {
+      withEnterMode(null, () => g.prepend(buildCard(ev)));
+    }
     scheduleFeedResort();
     return;
   }
@@ -1843,6 +2266,8 @@ function routeEvent(ev) {
     return;
   }
 
+  if (ev.block_hash) ensureBlockCard(ev.block_hash);
+  if (ev.kind !== "transaction") ensureParentTransaction(ev);
   let g = ev.block_hash ? groups.get(ev.block_hash) : null;
   if (!g) g = newGroup(ev.block_hash, ev);
   g.querySelector(".group-events").appendChild(buildCard(ev));
@@ -1859,9 +2284,8 @@ function standaloneCard(ev) {
  * Insert a page of events. Final order always comes from resortFeedBySlot().
  */
 function routeHistoricalBatch(events) {
-  const anchors = new Map();
-  suppressFeedResort = true;
-  try {
+  insertHistEvents(() => {
+    const anchors = new Map();
     for (const ev of events) {
       if (!keepDexEvent(ev)) continue;
       if (ev?.id != null && seenEventIds.has(ev.id)) continue;
@@ -1881,6 +2305,10 @@ function routeHistoricalBatch(events) {
       let g = ev.block_hash ? groups.get(ev.block_hash) : null;
       const created = !g;
       if (!g) g = newGroup(ev.block_hash, ev);
+      if (ev.block_hash) ensureBlockCard(ev.block_hash);
+      if (ev.kind !== "block" && ev.kind !== "transaction") {
+        ensureParentTransaction(ev);
+      }
 
       if (ev.kind === "block") {
         if (!g.querySelector(".card-block")) {
@@ -1898,10 +2326,7 @@ function routeHistoricalBatch(events) {
         host.insertBefore(card, anchors.get(key) || null);
       }
     }
-  } finally {
-    suppressFeedResort = false;
-  }
-  resortFeedBySlot();
+  });
 }
 
 /* min-ADA / search / category filters must also apply to fresh cards */
@@ -1949,20 +2374,39 @@ function onEvent(ev) {
     if (pending.length > 800) pending.shift();
     updateNewPill();
   } else {
-    routeEvent(ev);
-    applySoon();
+    tipBatch.push(ev);
+    scheduleTipFlush();
   }
+}
+
+/** Coalesce live tip events into one FLIP+fade frame (avoids per-event flash). */
+let tipBatch = [];
+let tipFlushQueued = false;
+function scheduleTipFlush() {
+  if (tipFlushQueued) return;
+  tipFlushQueued = true;
+  requestAnimationFrame(() => {
+    tipFlushQueued = false;
+    if (isPaused()) {
+      // Scrolled away mid-frame — park anything still queued.
+      while (tipBatch.length) {
+        pending.push(tipBatch.shift());
+        if (pending.length > 800) pending.shift();
+      }
+      updateNewPill();
+      return;
+    }
+    const batch = tipBatch.splice(0);
+    if (!batch.length) return;
+    insertTipEvents(batch);
+    applySoon();
+  });
 }
 
 function flushPending() {
   if (!pending.length) return;
-  suppressFeedResort = true;
-  try {
-    while (pending.length) routeEvent(pending.shift());
-  } finally {
-    suppressFeedResort = false;
-  }
-  resortFeedBySlot();
+  const batch = pending.splice(0);
+  insertTipEvents(batch);
   updateNewPill();
   applySoon();
 }
@@ -3424,6 +3868,8 @@ function connect() {
         // Tip events re-index via noteEventId; full 24h window loads in the
         // background without blocking the initial paint.
         retentionCache.clear();
+        blocksByHash.clear();
+        txByHash.clear();
         orphanedBlocks.clear();
         historySparsePause = false;
         historyLoadArmed = true;

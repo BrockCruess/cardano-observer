@@ -37,6 +37,8 @@
   --radius-sm: 9px;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  /* Tip list-slide + card fade; history fade. */
+  --feed-enter-ms: 400ms;
 }
 
 * { box-sizing: border-box; }
@@ -758,17 +760,69 @@ header {
   gap: 11px;
   align-items: flex-start;
   cursor: pointer;
-  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
-  animation: card-in 0.35s ease both;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  /* No default enter animation — resortFeedBySlot re-appends nodes and would
+     retrigger it as a flash. Tip/history paths opt in via .enter-tip/.enter-hist. */
 }
 .card:hover {
   border-color: color-mix(in srgb, var(--evc) 55%, var(--border));
   transform: translateY(-1px);
   box-shadow: 0 6px 22px rgba(0, 0, 0, 0.35);
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
-@keyframes card-in {
-  from { opacity: 0; transform: translateY(-7px); }
-  to { opacity: 1; transform: none; }
+
+/* Live tip arrivals: held invisible while the list slides, then faded in. */
+.card.enter-tip-pending {
+  opacity: 0 !important;
+  pointer-events: none;
+}
+.card.enter-tip {
+  animation: enter-tip var(--feed-enter-ms, 400ms) ease both;
+  pointer-events: none;
+}
+.card.enter-tip:hover {
+  transform: none;
+  box-shadow: none;
+}
+@keyframes enter-tip {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* History pages: fade in at the bottom — no vertical jump. */
+.card.enter-hist {
+  animation: enter-hist var(--feed-enter-ms, 400ms) ease both;
+  pointer-events: none;
+}
+.card.enter-hist:hover {
+  transform: none;
+  box-shadow: none;
+}
+@keyframes enter-hist {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card.enter-tip-pending {
+    opacity: 1 !important;
+  }
+  .card.enter-tip,
+  .card.enter-hist {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .block-group.flip-moving {
+    transition: none !important;
+  }
+}
+
+/* FLIP slide of existing block groups when tip content lands above. */
+.block-group.flip-moving {
+  transition: transform var(--feed-enter-ms, 400ms) cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+  z-index: 1;
 }
 
 .card[data-category="block"] { --evc: var(--c-block); }
