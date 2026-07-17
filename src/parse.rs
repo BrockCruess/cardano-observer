@@ -314,11 +314,17 @@ fn parse_tx(
             .and_then(|p| p.get("transaction"))
             .and_then(|t| t.get("id"))
             .and_then(Value::as_str);
+        let who = match role {
+            "delegateRepresentative" => "DRep Vote",
+            "stakePoolOperator" => "SPO Vote",
+            "constitutionalCommittee" => "CC Vote",
+            _ => "Vote",
+        };
         events.push(b.make(
             "gov_vote",
             "governance",
             Some(tx_hash),
-            format!("Vote: {}", vote.to_uppercase()),
+            format!("{who}: {}", vote.to_uppercase()),
             String::new(),
             json!({
                 "vote": vote,

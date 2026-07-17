@@ -203,14 +203,19 @@ fn emit_tx(state: &Arc<AppState>, block_hash: &str, height: u64, slot: u64, inde
     if rng.gen_bool(0.05) {
         let votes = ["yes", "no", "abstain"];
         let vote = votes[rng.gen_range(0..3)];
+        let (role, voter, who) = if rng.gen_bool(0.7) {
+            ("delegateRepresentative", fake_drep(rng), "DRep Vote")
+        } else {
+            ("stakePoolOperator", fake_pool(rng), "SPO Vote")
+        };
         state.publish(mk(
             "gov_vote",
             "governance",
-            format!("Vote: {}", vote.to_uppercase()),
+            format!("{who}: {}", vote.to_uppercase()),
             json!({
                 "vote": vote,
-                "role": "delegateRepresentative",
-                "voter": fake_drep(rng),
+                "role": role,
+                "voter": voter,
                 "proposalTx": rand_hex(rng, 64),
                 "proposalIndex": 0,
             }),

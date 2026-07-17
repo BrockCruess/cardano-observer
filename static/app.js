@@ -437,6 +437,12 @@ const pending = [];            // buffered events while user is reading
 let oldestEventId = null;      // smallest id currently in the feed
 let historyExhausted = false;
 let historyLoading = false;
+/** Coalesce scroll/wheel storms so sparse filters don't flash-load every frame. */
+let historyLoadTimer = 0;
+/** After several disk pages add nothing visible, pause until filters change. */
+let historySparsePause = false;
+/** One load per approach to the history end; re-arms after leaving the end zone. */
+let historyLoadArmed = true;
 /** Non-empty when the page was opened with `?term` / `?q=` - drives search priming. */
 let urlSearchPreset = "";
 /** True while preloading history to fill the first search page. */
@@ -536,6 +542,7 @@ function applyFilters() {
   store.set("co_dapp_apps_v1", settings.dappApps);
   store.set("co_gov_types_v1", settings.govTypes);
   updateLoadedEventCount();
+  if (pending.length) updateNewPill();
   if (!searchPriming && $("search").value.trim()) {
     updateSearchEmptyPrompt();
   } else if (!$("search").value.trim()) {
@@ -1390,6 +1397,10 @@ function cmpHierarchy(a, b) {
 }
 
 function resortFeedBySlot() {
+  // Re-appending every group resets the browser's scroll anchoring and reads as
+  // a flash when history pages land under sparse filters. Pin the viewport.
+  const y = window.scrollY;
+  const x = feed.scrollLeft;
   const items = [...feed.querySelectorAll(":scope > .block-group")];
   for (const g of items) {
     const host = g.querySelector(".group-events");
@@ -1410,15 +1421,23 @@ function resortFeedBySlot() {
   groupOrder.length = 0;
   groupOrder.push(...items);
   pinHistoryLoader();
+  if (settings.layout === "vertical") {
+    if (window.scrollY !== y) window.scrollTo(0, y);
+  } else if (feed.scrollLeft !== x) {
+    feed.scrollLeft = x;
+  }
 }
 
 let feedResortQueued = false;
+/** When true, routeEvent skips scheduling a resort (caller will resort once). */
+let suppressFeedResort = false;
 function scheduleFeedResort() {
+  if (suppressFeedResort) return;
   if (feedResortQueued) return;
   feedResortQueued = true;
   queueMicrotask(() => {
     feedResortQueued = false;
-    resortFeedBySlot();
+    if (!suppressFeedResort) resortFeedBySlot();
   });
 }
 
@@ -1466,8 +1485,13 @@ function renderFeedPage() {
   }
   retentionHistoryDone = feedHitOffset >= feedHitBuffer.length;
   if (!batch.length) return 0;
-  // Buffer is newest-first by slot; resortFeedBySlot is the final authority.
-  for (const ev of batch) routeEvent(ev);
+  // One resort after the batch — per-event scheduleFeedResort was a major flash.
+  suppressFeedResort = true;
+  try {
+    for (const ev of batch) routeEvent(ev);
+  } finally {
+    suppressFeedResort = false;
+  }
   resortFeedBySlot();
   prefetchUnitsFromEvents(batch);
   applyFilters();
@@ -1494,6 +1518,8 @@ function clearFeedDom() {
 function onFeedFiltersChanged() {
   if ($("search").value.trim()) return;
   if (!retentionReady) return;
+  historySparsePause = false;
+  historyLoadArmed = true;
   ensureFeedHitBuffer(true);
   clearFeedDom();
   while (!visibleFeedFillsPage() && feedHitOffset < feedHitBuffer.length) {
@@ -1671,41 +1697,46 @@ function standaloneCard(ev) {
  */
 function routeHistoricalBatch(events) {
   const anchors = new Map();
-  for (const ev of events) {
-    if (!keepDexEvent(ev)) continue;
-    if (ev?.id != null && seenEventIds.has(ev.id)) continue;
-    sessionEvents++;
-    noteEventId(ev);
+  suppressFeedResort = true;
+  try {
+    for (const ev of events) {
+      if (!keepDexEvent(ev)) continue;
+      if (ev?.id != null && seenEventIds.has(ev.id)) continue;
+      sessionEvents++;
+      noteEventId(ev);
 
-    if (ev.kind === "rollback" || ev.kind === "slot_battle" || ev.kind === "orphaned_block") {
-      if (ev.kind === "orphaned_block") {
-        const g = ev.block_hash && groups.get(ev.block_hash);
-        if (g) g.classList.add("orphaned");
+      if (ev.kind === "rollback" || ev.kind === "slot_battle" || ev.kind === "orphaned_block") {
+        if (ev.kind === "orphaned_block") {
+          const g = ev.block_hash && groups.get(ev.block_hash);
+          if (g) g.classList.add("orphaned");
+        }
+        standaloneCard(ev);
+        continue;
       }
-      standaloneCard(ev);
-      continue;
-    }
 
-    const key = ev.block_hash || `__id_${ev.id}`;
-    let g = ev.block_hash ? groups.get(ev.block_hash) : null;
-    const created = !g;
-    if (!g) g = newGroup(ev.block_hash, ev);
+      const key = ev.block_hash || `__id_${ev.id}`;
+      let g = ev.block_hash ? groups.get(ev.block_hash) : null;
+      const created = !g;
+      if (!g) g = newGroup(ev.block_hash, ev);
 
-    if (ev.kind === "block") {
-      if (!g.querySelector(".card-block")) {
-        g.insertBefore(buildCard(ev), g.querySelector(".group-events"));
+      if (ev.kind === "block") {
+        if (!g.querySelector(".card-block")) {
+          g.insertBefore(buildCard(ev), g.querySelector(".group-events"));
+        }
+        continue;
       }
-      continue;
-    }
 
-    const host = g.querySelector(".group-events");
-    const card = buildCard(ev);
-    if (created) {
-      host.appendChild(card);
-    } else {
-      if (!anchors.has(key)) anchors.set(key, host.firstChild);
-      host.insertBefore(card, anchors.get(key) || null);
+      const host = g.querySelector(".group-events");
+      const card = buildCard(ev);
+      if (created) {
+        host.appendChild(card);
+      } else {
+        if (!anchors.has(key)) anchors.set(key, host.firstChild);
+        host.insertBefore(card, anchors.get(key) || null);
+      }
     }
+  } finally {
+    suppressFeedResort = false;
   }
   resortFeedBySlot();
 }
@@ -1724,12 +1755,36 @@ function isPaused() {
     : feed.scrollLeft > 60;
 }
 
+/** Pending tip events that match the current filters (drives the "n new" pill). */
+function pendingVisibleCount() {
+  const q = $("search").value.trim().toLowerCase();
+  let n = 0;
+  for (const ev of pending) {
+    if (!eventPassesFeedFilters(ev)) continue;
+    if (q && !cardSearchText(ev).includes(q)) continue;
+    n++;
+  }
+  return n;
+}
+
+function updateNewPill() {
+  const el = $("newpill");
+  const nEl = $("newpill-n");
+  if (!el || !nEl) return;
+  const n = pendingVisibleCount();
+  if (n > 0) {
+    nEl.textContent = fmtInt(n);
+    el.classList.add("show");
+  } else {
+    el.classList.remove("show");
+  }
+}
+
 function onEvent(ev) {
   if (isPaused()) {
     pending.push(ev);
     if (pending.length > 800) pending.shift();
-    $("newpill-n").textContent = fmtInt(pending.length);
-    $("newpill").classList.add("show");
+    updateNewPill();
   } else {
     routeEvent(ev);
     applySoon();
@@ -1737,9 +1792,26 @@ function onEvent(ev) {
 }
 
 function flushPending() {
-  while (pending.length) routeEvent(pending.shift());
-  $("newpill").classList.remove("show");
+  if (!pending.length) return;
+  suppressFeedResort = true;
+  try {
+    while (pending.length) routeEvent(pending.shift());
+  } finally {
+    suppressFeedResort = false;
+  }
+  resortFeedBySlot();
+  updateNewPill();
   applySoon();
+}
+
+/** Debounced tip-unpause flush — avoids a flash of N inserts when rubber-banding to top. */
+let flushPendingTimer = 0;
+function scheduleFlushPending() {
+  if (isPaused() || !pending.length) return;
+  clearTimeout(flushPendingTimer);
+  flushPendingTimer = setTimeout(() => {
+    if (!isPaused() && pending.length) flushPending();
+  }, 280);
 }
 
 $("newpill").onclick = () => {
@@ -1747,41 +1819,73 @@ $("newpill").onclick = () => {
   else feed.scrollTo({ left: 0, behavior: "smooth" });
   setTimeout(flushPending, 350);
 };
-addEventListener("scroll", () => {
-  if (!isPaused() && pending.length) flushPending();
-  onFeedScroll();
-}, { passive: true });
-feed.addEventListener("scroll", () => {
-  if (!isPaused() && pending.length) flushPending();
-  onFeedScroll();
-}, { passive: true });
+
+/** Only load older pages while scrolling toward history (not back to tip). */
+let lastScrollPos = 0;
+/**
+ * Approaching the history end consumes historyLoadArmed for one load. It
+ * re-arms only after the user scrolls back out of the end zone — so appending
+ * a page cannot immediately chain-trigger the next page (the flash/load loop).
+ */
+function feedScrollPos() {
+  return settings.layout === "vertical" ? window.scrollY : feed.scrollLeft;
+}
+/** @returns {boolean} true once when the user newly arrives in the end zone */
+function consumeHistoryLoadArm() {
+  if (!nearHistoryEnd()) {
+    historyLoadArmed = true;
+    return false;
+  }
+  if (!historyLoadArmed) return false;
+  historyLoadArmed = false;
+  return true;
+}
+function onScrollDirection() {
+  const pos = feedScrollPos();
+  // Require clear movement toward history — ignore jitter / overscroll bounce.
+  const towardHistory = pos > lastScrollPos + 2;
+  const towardTip = pos < lastScrollPos - 2;
+  lastScrollPos = pos;
+  if (towardTip) scheduleFlushPending();
+  if (!towardHistory) {
+    if (!nearHistoryEnd()) historyLoadArmed = true;
+    return;
+  }
+  const q = $("search").value.trim();
+  if (q) {
+    if (searchPriming || searchExtending) return;
+    if (!visibleFeedFillsPage() || consumeHistoryLoadArm()) extendSearchHistory();
+    return;
+  }
+  if (consumeHistoryLoadArm()) scheduleLoadHistory();
+}
+addEventListener("scroll", onScrollDirection, { passive: true });
+feed.addEventListener("scroll", onScrollDirection, { passive: true });
 
 // Feeds that don't fill the viewport can't scroll - treat wheel-down as load-more.
 addEventListener("wheel", (e) => {
   if (e.deltaY <= 0) return;
   if (searchPriming || searchExtending) return;
   if (visibleFeedFillsPage()) return;
+  // Short view: one wheel burst → one fill attempt (latch re-arms when short).
+  if (!historyLoadArmed) return;
+  historyLoadArmed = false;
   if ($("search").value.trim()) extendSearchHistory();
-  else maybeLoadHistory();
+  else scheduleLoadHistory();
 }, { passive: true });
 
-/** While searching, only page the match buffer - never crawl raw history. */
-function onFeedScroll() {
-  const q = $("search").value.trim();
-  if (q) {
-    if (searchPriming || searchExtending) return;
-    if (!visibleFeedFillsPage() || nearHistoryEnd()) extendSearchHistory();
-    return;
-  }
-  maybeLoadHistory();
-}
-
+/** True only at the last ~64px of the feed (not hundreds of px early). */
 function nearHistoryEnd() {
   if (settings.layout === "vertical") {
-    const room = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
-    return room < 800;
+    const scrollable = document.documentElement.scrollHeight - window.innerHeight;
+    // Not scrollable yet — leave fill-on-wheel to the wheel handler, otherwise
+    // rubber-band / layout thrash would spam history loads in both directions.
+    if (scrollable < 48) return false;
+    return scrollable - window.scrollY < 64;
   }
-  return feed.scrollWidth - feed.scrollLeft - feed.clientWidth < 800;
+  const scrollable = feed.scrollWidth - feed.clientWidth;
+  if (scrollable < 48) return false;
+  return scrollable - feed.scrollLeft < 64;
 }
 
 /** True when visible (filter-matching) cards fill at least one viewport. */
@@ -2040,20 +2144,51 @@ async function extendSearchHistory() {
   updateSearchEmptyPrompt();
 }
 
+function scheduleLoadHistory() {
+  clearTimeout(historyLoadTimer);
+  historyLoadTimer = setTimeout(maybeLoadHistory, 120);
+}
+
 function maybeLoadHistory() {
   // Active search pages matches from searchHitBuffer only.
   if ($("search").value.trim()) return;
   if (searchPriming || searchExtending || historyLoading || oldestEventId == null) return;
-  if (!nearHistoryEnd()) return;
+  if (historySparsePause) return;
   // Nothing left in the 24h page buffer and disk history is exhausted.
   if (retentionHistoryDone && historyExhausted) return;
+  // Load when the filtered view is short, or the user scrolled near the end.
+  if (visibleFeedFillsPage() && !nearHistoryEnd()) return;
   loadHistory();
 }
 
-/** One older page from the in-memory 24h buffer (or disk once that is exhausted). */
+/** Pin viewport across a DOM mutation that would otherwise jump to the new end. */
+async function withPinnedFeedScroll(fn) {
+  const y = window.scrollY;
+  const x = feed.scrollLeft;
+  const result = await fn();
+  const restore = () => {
+    if (settings.layout === "vertical") {
+      if (window.scrollY !== y) window.scrollTo(0, y);
+    } else if (feed.scrollLeft !== x) {
+      feed.scrollLeft = x;
+    }
+  };
+  restore();
+  requestAnimationFrame(restore);
+  return result;
+}
+
+/**
+ * Load older events. Two modes:
+ *  - Short filtered view: drain pages until the viewport fills (one session).
+ *  - Normal scroll-near-end: append exactly one more page (buffer or disk).
+ * The scroll latch ensures a load cannot chain into the next page until the
+ * user scrolls back through the newly loaded content.
+ */
 async function loadHistory() {
   if (searchPriming) return;
   if ($("search").value.trim()) return;
+  if (historyLoading) return;
 
   if (!retentionReady) {
     startRetentionPreload();
@@ -2066,38 +2201,96 @@ async function loadHistory() {
   }
 
   historyLoading = true;
-  setHistoryLoading(true);
-
   ensureFeedHitBuffer();
-  if (feedHitOffset < feedHitBuffer.length) {
-    renderFeedPage();
+  const beforeVisible = visibleMatchCount();
+
+  // Short filtered view: drain in-memory pages until the viewport fills (no spinner).
+  await withPinnedFeedScroll(() => {
+    while (feedHitOffset < feedHitBuffer.length && !visibleFeedFillsPage()) {
+      if (!renderFeedPage()) break;
+    }
+  });
+
+  // Viewport already full: append exactly one more buffer page.
+  if (feedHitOffset < feedHitBuffer.length && visibleFeedFillsPage()) {
+    await withPinnedFeedScroll(() => { renderFeedPage(); });
     historyLoading = false;
     setHistoryLoading(false, false);
+    // Stay disarmed while still in the end zone; re-arm when user scrolls up.
+    if (!nearHistoryEnd()) historyLoadArmed = true;
     return;
   }
 
-  // Past the 24h window - fall through to disk history (one page per scroll).
+  // More buffer left but nothing to do this tick (not near end / still filling).
+  if (feedHitOffset < feedHitBuffer.length) {
+    historyLoading = false;
+    setHistoryLoading(false, false);
+    if (!visibleFeedFillsPage()) historyLoadArmed = true;
+    return;
+  }
+
+  // Past the 24h filtered buffer — disk history.
   retentionHistoryDone = true;
+  if (historyExhausted) {
+    historyLoading = false;
+    setHistoryLoading(false, true);
+    return;
+  }
+
+  setHistoryLoading(true);
   const ac = new AbortController();
   historyAbort = ac;
   try {
-    const r = await fetch(`/api/events?before=${oldestEventId}&limit=${HISTORY_PAGE_SIZE}`, {
-      signal: ac.signal,
-    });
-    const m = await r.json();
-    const events = m.events || [];
-    if (m.exhausted || !events.length) historyExhausted = true;
-    if (events.length) {
-      routeHistoricalBatch(events);
-      prefetchUnitsFromEvents(events);
-      applyFilters();
+    if (!visibleFeedFillsPage()) {
+      // Sparse filters: crawl until the view fills or we stop making progress.
+      let emptyStreak = 0;
+      while (!visibleFeedFillsPage() && !historyExhausted && emptyStreak < 10) {
+        const before = visibleMatchCount();
+        const events = await withPinnedFeedScroll(() => fetchHistoryPage(ac.signal));
+        if (events == null) break;
+        if (visibleMatchCount() <= before) emptyStreak++;
+        else emptyStreak = 0;
+      }
+      if (!visibleFeedFillsPage() && !historyExhausted && emptyStreak >= 10) {
+        historySparsePause = true;
+      }
+      historyLoadArmed = true; // short view may need another wheel burst
+    } else {
+      // Normal infinite scroll — one disk page, pinned so we don't jump to its end.
+      const events = await withPinnedFeedScroll(() => fetchHistoryPage(ac.signal));
+      if (events == null || visibleMatchCount() <= beforeVisible) {
+        // Nothing new visible (filtered out or exhausted) — allow a retry scroll,
+        // but stop completely when the server says we're done.
+        if (!historyExhausted) historyLoadArmed = true;
+      } else if (!nearHistoryEnd()) {
+        historyLoadArmed = true;
+      }
+      // else: still in end zone after pin — stay disarmed until user scrolls up
     }
   } catch (e) {
     if (e?.name !== "AbortError") { /* best-effort */ }
+    historyLoadArmed = true;
   }
   if (historyAbort === ac) historyAbort = null;
   historyLoading = false;
   setHistoryLoading(false, historyExhausted);
+}
+
+/** Fetch one older disk page into the feed. Returns events, or null on abort/empty. */
+async function fetchHistoryPage(signal) {
+  if (oldestEventId == null || historyExhausted) return null;
+  const r = await fetch(`/api/events?before=${oldestEventId}&limit=${HISTORY_PAGE_SIZE}`, {
+    signal,
+  });
+  const m = await r.json();
+  const events = m.events || [];
+  if (m.exhausted || !events.length) historyExhausted = true;
+  if (events.length) {
+    routeHistoricalBatch(events);
+    prefetchUnitsFromEvents(events);
+    applyFilters();
+  }
+  return events.length ? events : null;
 }
 
 function routeSearchHits(events) {
@@ -2985,6 +3178,8 @@ function connect() {
         // background without blocking the initial paint.
         retentionCache.clear();
         orphanedBlocks.clear();
+        historySparsePause = false;
+        historyLoadArmed = true;
         retentionReady = false;
         resetLoadedCounts();
         for (const ev of m.events || []) routeEvent(ev);
