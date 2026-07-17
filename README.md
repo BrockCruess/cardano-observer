@@ -35,7 +35,7 @@ forks, orphaned blocks and slot battles.
 - **DEX awareness.** Swap orders, batch settlements, cancellations, and LP
   deposits / redeems on every major Cardano DEX - Minswap (V1+V2), SundaeSwap
   (V1+V3), WingRiders (V1+V2), MuesliSwap, Splash/Spectrum, VyFi, CSWAP,
-  Genius Yield, ChadSwap, and Danogo - detected from order-script credentials
+  Genius Yield, ChadSwap, and Dano Finance - detected from order-script credentials
   and pool NFTs, with buy / sell / swap / deposit / redeem inferred from the
   deposited assets. No separate DEX indexer needed.
   **CIP-26 filter:** swap / order / fill / cancel cards are only shown when

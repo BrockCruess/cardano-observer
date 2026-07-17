@@ -14,7 +14,7 @@ const DEX_VENUES = [
   "CSWAP",
   "GeniusYield",
   "ChadSwap",
-  "Danogo",
+  "Dano Finance",
 ];
 
 /** dApps emitted as `data.dapp` - keep in sync with `src/dapp/`. */

@@ -633,16 +633,21 @@ header {
   background: var(--evc, var(--muted));
 }
 
-/* ── Child event hierarchy: indent + guide line under the parent tx ─────── */
-#feed.vertical { --child-indent: 22px; --child-guide: 10px; }
+/* ── Child event hierarchy: indent + guide from the parent event-dot ───── */
+#feed.vertical {
+  --child-indent: 22px;
+  /* Child card edge → parent event-dot center (same column as the green node). */
+  --child-rail: calc(var(--child-indent) + var(--event-dot-gap));
+  /* Reach from the gap above the first child up to the parent's mid-dot. */
+  --child-rail-up: 32px;
+}
 
 #feed.vertical .group-events .card.ev-child {
   margin-left: var(--child-indent);
 }
-/* Repurpose the block-spine connector into a guide up to the parent tx:
-   a continuous vertical line down the run of children, plus an elbow tick. */
+/* Vertical rail in the parent-dot column + elbow into the child card. */
 #feed.vertical .group-events .card.ev-child::before {
-  left: calc(-1 * var(--child-guide));
+  left: calc(-1 * var(--child-rail));
   top: -6px;         /* bridge the 6px gap so consecutive children join up */
   bottom: 0;
   width: 2px;
@@ -650,10 +655,26 @@ header {
   transform: none;
   background: color-mix(in srgb, var(--muted) 45%, transparent);
 }
+/* First child under a parent: extend the rail up to the parent's event-dot. */
+#feed.vertical .group-events .card:not(.ev-child) + .card.ev-child::before {
+  top: calc(-6px - var(--child-rail-up));
+}
+/* Last child in a run: stop at the elbow instead of trailing past the card. */
+#feed.vertical .group-events .card.ev-child:last-child::before,
+#feed.vertical .group-events .card.ev-child:has(+ .card:not(.ev-child))::before {
+  bottom: auto;
+  height: calc(50% + 6px);
+}
+#feed.vertical .group-events .card:not(.ev-child) + .card.ev-child:last-child::before,
+#feed.vertical .group-events .card:not(.ev-child) + .card.ev-child:has(+ .card:not(.ev-child))::before {
+  top: calc(-6px - var(--child-rail-up));
+  bottom: auto;
+  height: calc(var(--child-rail-up) + 6px + 50%);
+}
 #feed.vertical .group-events .card.ev-child::after {
-  left: calc(-1 * var(--child-guide));
+  left: calc(-1 * var(--child-rail));
   top: 50%;
-  width: var(--child-guide);
+  width: var(--child-rail);
   height: 2px;
   border-radius: 0;
   transform: translateY(-50%);
@@ -989,6 +1010,7 @@ header {
 body.compact .card { padding: 6px 12px; border-radius: 10px; }
 body.compact .ev-icon { width: 26px; height: 26px; border-radius: 8px; margin-top: 1px; }
 body.compact .ev-icon svg { width: 14px; height: 14px; }
+body.compact #feed.vertical { --child-rail-up: 26px; }
 body.compact .ev-title { font-size: 13px; }
 body.compact .ev-sub { font-size: 12px; margin-top: 0; }
 body.compact .group-events { gap: 4px; margin: 2px 0 4px; }
