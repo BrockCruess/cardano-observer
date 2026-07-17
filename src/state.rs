@@ -84,6 +84,10 @@ impl AppState {
         self.event_retention_secs
     }
 
+    pub fn persister(&self) -> Option<Arc<Persister>> {
+        self.persister.clone()
+    }
+
     /// Attach the enricher so trending can resolve CIP-26 / pool tickers.
     pub fn set_keyword_meta(&self, enricher: Arc<Enricher>) {
         *self.keyword_meta.lock().unwrap() = Some(enricher);
@@ -157,12 +161,9 @@ impl AppState {
         }
         let mut cache = self.txs.lock().unwrap();
         for (hash, entry) in txs {
-            if cache.map.len() >= self.tx_cache_size {
-                if let Some(old) = cache.order.pop_front() {
-                    cache.map.remove(&old);
-                }
+            if !cache.map.contains_key(&hash) {
+                cache.order.push_back(hash.clone());
             }
-            cache.order.push_back(hash.clone());
             cache.map.insert(hash, entry);
         }
     }
@@ -217,11 +218,17 @@ impl AppState {
         if let Some(p) = &self.persister {
             p.append_event(&event);
         }
+        let cutoff = Self::retention_cutoff(Self::now_unix(), self.event_retention_secs);
+        let trimmed_events;
         {
             let mut buf = self.events.lock().unwrap();
+            let before = buf.len();
             buf.push_back(event);
-            let cutoff = Self::retention_cutoff(Self::now_unix(), self.event_retention_secs);
             Self::trim_events(&mut buf, cutoff);
+            trimmed_events = buf.len() < before + 1;
+        }
+        if trimmed_events {
+            self.trim_txs_to_retention(cutoff);
         }
         let _ = self.sender.send(msg);
         Some(assigned_id)
@@ -265,18 +272,79 @@ impl AppState {
         if let Some(p) = &self.persister {
             p.append_tx(&hash, &entry);
         }
+        {
+            let mut cache = self.txs.lock().unwrap();
+            if !cache.map.contains_key(&hash) {
+                cache.order.push_back(hash.clone());
+            }
+            cache.map.insert(hash, entry);
+        }
+        let cutoff = Self::retention_cutoff(Self::now_unix(), self.event_retention_secs);
+        self.trim_txs_memory(cutoff);
+    }
+
+    /// Persist a tx body only if it is not already indexed on disk (or memory).
+    pub fn cache_tx_if_absent(&self, hash: String, tx: Value, block: Value) -> bool {
+        if let Some(p) = &self.persister {
+            if p.has_tx(&hash) {
+                return false;
+            }
+        } else if self.txs.lock().unwrap().map.contains_key(&hash) {
+            return false;
+        }
+        self.cache_tx(hash, tx, block);
+        true
+    }
+
+    /// Drop in-memory tx bodies older than the retention window.
+    /// Full history stays on disk (indexed) for deep scrollback modals.
+    fn trim_txs_to_retention(&self, cutoff: i64) {
+        self.trim_txs_memory(cutoff);
+    }
+
+    fn trim_txs_memory(&self, cutoff: i64) {
         let mut cache = self.txs.lock().unwrap();
-        if cache.map.len() >= self.tx_cache_size {
-            if let Some(old) = cache.order.pop_front() {
+        let stale: Vec<String> = cache
+            .map
+            .iter()
+            .filter(|(_, e)| tx_entry_timestamp(e) < cutoff)
+            .map(|(h, _)| h.clone())
+            .collect();
+        for h in &stale {
+            cache.map.remove(h);
+        }
+        if !stale.is_empty() {
+            let stale_set: std::collections::HashSet<&str> =
+                stale.iter().map(String::as_str).collect();
+            cache.order.retain(|h| !stale_set.contains(h.as_str()));
+        }
+        // Optional soft ceiling (TX_CACHE > 0) — OOM guard; can drop in-window txs.
+        if self.tx_cache_size > 0 {
+            while cache.map.len() > self.tx_cache_size {
+                let Some(old) = cache.order.pop_front() else { break };
                 cache.map.remove(&old);
             }
         }
-        cache.order.push_back(hash.clone());
-        cache.map.insert(hash, entry);
     }
 
     pub fn get_tx(&self, hash: &str) -> Option<Value> {
-        self.txs.lock().unwrap().map.get(hash).cloned()
+        if let Some(v) = self.txs.lock().unwrap().map.get(hash).cloned() {
+            return Some(v);
+        }
+        let Some(p) = &self.persister else {
+            return None;
+        };
+        let entry = p.find_tx(hash)?;
+        // Re-warm memory for txs still inside the retention window.
+        let cutoff = Self::retention_cutoff(Self::now_unix(), self.event_retention_secs);
+        if tx_entry_timestamp(&entry) >= cutoff {
+            let mut cache = self.txs.lock().unwrap();
+            if !cache.map.contains_key(hash) {
+                cache.order.push_back(hash.to_string());
+                cache.map.insert(hash.to_string(), entry.clone());
+            }
+        }
+        Some(entry)
     }
 
     pub fn set_tip(&self, tip: Tip) {
@@ -542,6 +610,14 @@ fn event_matches_query(ev: &ChainEvent, q: &str, meta: Option<&dyn KeywordMeta>)
 fn contains_ci(hay: &str, needle: &str) -> bool {
     // needle is already lowercase ASCII.
     hay.to_ascii_lowercase().contains(needle)
+}
+
+fn tx_entry_timestamp(entry: &Value) -> i64 {
+    entry
+        .get("block")
+        .and_then(|b| b.get("timestamp"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
 }
 
 fn value_contains_ci(v: &Value, q: &str) -> bool {

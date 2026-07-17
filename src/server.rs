@@ -134,7 +134,19 @@ async fn api_tx(State(ctx): State<ServerCtx>, Path(hash): Path<String>) -> Respo
     if let Some(fallback) = ctx.enricher.tx_fallback(&hash).await {
         return Json(fallback).into_response();
     }
-    (StatusCode::NOT_FOUND, Json(json!({ "error": "transaction not found" }))).into_response()
+    let reason = if ctx.enricher.has_blockfrost() {
+        "cache_miss_blockfrost_failed"
+    } else {
+        "cache_miss_no_blockfrost"
+    };
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "error": "transaction not found",
+            "reason": reason,
+        })),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]

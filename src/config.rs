@@ -122,7 +122,9 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(24)
                 .max(1),
-            tx_cache: non_empty("TX_CACHE").and_then(|v| v.parse().ok()).unwrap_or(4000),
+            // Soft ceiling for in-memory tx bodies (0 = unlimited within retention).
+            // Prefer leaving at 0 so txs stay available for the full EVENT_RETENTION_HOURS window.
+            tx_cache: non_empty("TX_CACHE").and_then(|v| v.parse().ok()).unwrap_or(0),
             demo: matches!(non_empty("DEMO").as_deref(), Some("true") | Some("1") | Some("yes")),
             data_dir: match non_empty("DATA_DIR").as_deref() {
                 Some("none") | Some("off") | Some("false") => None,

@@ -4367,15 +4367,19 @@ async function openTx(ev) {
   const hash = ev.tx_hash;
   try {
     const r = await fetch(`/api/tx/${hash}`);
-    if (!r.ok) throw new Error("not found");
-    const detail = await r.json();
+    const detail = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      mBody.innerHTML =
+        `<div class="m-empty">Full transaction details are unavailable right now.</div>${renderEventDetail(ev)}${explorers(hash)}`;
+      return;
+    }
     mBody.innerHTML = detail.tx
       ? renderOgmiosTx(hash, detail.tx, detail.block, ev)
       : renderBlockfrostTx(hash, detail.blockfrost, ev);
     enrichAssets(mBody);
   } catch {
-    mBody.innerHTML = `<div class="m-empty">Transaction details are no longer in the live cache.<br>
-      Configure <code>BLOCKFROST_URL</code> for history lookups.</div>${explorers(hash)}`;
+    mBody.innerHTML =
+      `<div class="m-empty">Transaction details are unavailable.</div>${renderEventDetail(ev)}${explorers(hash)}`;
   }
 }
 

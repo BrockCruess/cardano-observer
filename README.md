@@ -95,9 +95,9 @@ forks, orphaned blocks and slot battles.
 - **Light on the host.** Builds to a single static binary (~6 MB) with no
   database of its own and no JS build chain - the UI is three hand-written
   files embedded at compile time. RAM scales with `EVENT_RETENTION_HOURS`
-  (and `TX_CACHE`): a 24h mainnet window is typically on the order of
-  hundreds of MB for the event buffer alone, plus a matching browser-side
-  copy for fast search.
+  (events + matching tx bodies for the detail modal): a 24h mainnet window
+  is typically on the order of hundreds of MB for the event buffer alone,
+  plus a matching browser-side copy for fast search.
 
 | Vertical layout | Horizontal layout |
 |---|---|
@@ -184,10 +184,10 @@ the browser after each rebuild).
 | `DREP_CACHE_REFRESH` | `false` | `true` / `1` / `yes` to re-scrape Blockfrost `/governance/dreps` into `dreps.json` on boot (also auto-refreshed daily at 00:00 UTC while running) |
 | `NETWORK` | `mainnet` | `mainnet` \| `preprod` \| `preview` (addresses & explorer links) |
 | `BIND` | `0.0.0.0:9070` | web UI listen address |
-| `DATA_DIR` | `./data` | persisted event/tx history + registry/pool/drep/gov-action caches (JSONL/JSON); `none` / `off` / `false` disables persistence |
+| `DATA_DIR` | `./data` | persisted event/tx history + registry/pool/drep/gov-action caches (JSONL/JSON); tx bodies are kept forever on disk with a hash index; on startup any event whose tx body is missing is refilled from Ogmios (no event republish); `none` / `off` / `false` disables persistence |
 | `BACKFILL_HOURS` | `24` | resume chain-sync from the last persisted block if younger than this; `0` = start at tip |
-| `EVENT_RETENTION_HOURS` | `24` | hours of events kept in memory for trending + fast search (full history still on disk) |
-| `TX_CACHE` | `4000` | transactions kept for the detail modal |
+| `EVENT_RETENTION_HOURS` | `24` | hours of events (and hot tx bodies) kept in memory for trending, search, and fast tip modals; full event + tx history still on disk |
+| `TX_CACHE` | `0` | optional soft max for in-memory tx bodies (`0` = keep all txs in the retention window) |
 | `DEMO` | `false` | synthetic event stream - try the UI with no node (persistence off) |
 | `RUST_LOG` | `info` | log level (`error` \| `warn` \| `info` \| `debug` \| `trace`) |
 

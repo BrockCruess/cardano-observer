@@ -42,6 +42,172 @@ pub async fn run(
     }
 }
 
+/// Replay historical blocks from Ogmios and `cache_tx` only — never republish
+/// events. Fills gaps left by older count-based `txs.jsonl` compaction so deep
+/// scrollback modals can load full bodies from disk.
+pub async fn backfill_missing_txs(config: Config, state: Arc<AppState>) {
+    let Some(persister) = state.persister() else {
+        return;
+    };
+    let Some(mut plan) = persister.tx_gap_plan() else {
+        tracing::info!("tx backfill: nothing to do");
+        return;
+    };
+    let total = plan.missing.len();
+    match backfill_once(&config, &state, &mut plan).await {
+        Ok(filled) => tracing::info!(
+            "tx backfill complete: filled {filled}/{total} missing bodies ({} still missing)",
+            plan.missing.len()
+        ),
+        Err(e) => tracing::warn!("tx backfill stopped early: {e:#} ({} still missing)", plan.missing.len()),
+    }
+}
+
+async fn backfill_once(
+    config: &Config,
+    state: &Arc<AppState>,
+    plan: &mut crate::persist::TxGapPlan,
+) -> Result<usize> {
+    tracing::info!(
+        "tx backfill: connecting to ogmios at {} ({} missing)",
+        config.ogmios_url,
+        plan.missing.len()
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(&config.ogmios_url)
+        .await
+        .context("tx backfill websocket connect failed")?;
+
+    let start = rpc(&mut ws, "queryNetwork/startTime", json!({})).await?;
+    let system_start = parse_start_time(&start)
+        .ok_or_else(|| anyhow!("cannot parse queryNetwork/startTime: {start}"))?;
+    let eras = rpc(&mut ws, "queryLedgerState/eraSummaries", json!({})).await?;
+    let time_model = TimeModel {
+        system_start,
+        eras: parse_era_summaries(&eras),
+    };
+
+    let mut points: Vec<Value> = plan
+        .points
+        .iter()
+        .map(|b| json!({ "slot": b.slot, "id": b.hash }))
+        .collect();
+    points.push(json!("origin"));
+    let intersection = rpc(&mut ws, "findIntersection", json!({ "points": points })).await?;
+    let matched_origin = intersection
+        .get("intersection")
+        .map(|i| i.get("slot").is_none())
+        .unwrap_or(true);
+    if matched_origin {
+        bail!(
+            "tx backfill: node has no common history with our event points \
+             (intersection collapsed to origin) — cannot refill older txs"
+        );
+    }
+    tracing::info!(
+        "tx backfill intersection: {}",
+        intersection
+            .get("intersection")
+            .map(|v| v.to_string())
+            .unwrap_or_default()
+    );
+
+    for _ in 0..PIPELINE {
+        send_req(&mut ws, "nextBlock", json!({}), json!("next")).await?;
+    }
+
+    let mut filled = 0usize;
+    let stop_slot = plan.max_slot.saturating_add(50);
+    let mut last_log = std::time::Instant::now();
+
+    loop {
+        if plan.missing.is_empty() {
+            break;
+        }
+        let msg = tokio::time::timeout(Duration::from_secs(120), ws.next())
+            .await
+            .context("tx backfill: no message from ogmios")?
+            .ok_or_else(|| anyhow!("tx backfill: ogmios closed"))??;
+        let text = match msg {
+            Message::Text(t) => t,
+            Message::Ping(p) => {
+                ws.send(Message::Pong(p)).await?;
+                continue;
+            }
+            Message::Close(_) => bail!("tx backfill: ogmios closed"),
+            _ => continue,
+        };
+        let v: Value = serde_json::from_str(text.as_ref())?;
+        if v.get("method").and_then(Value::as_str) != Some("nextBlock") {
+            continue;
+        }
+        let result = v
+            .get("result")
+            .ok_or_else(|| anyhow!("nextBlock error: {}", v.get("error").cloned().unwrap_or_default()))?;
+
+        match result.get("direction").and_then(Value::as_str) {
+            Some("forward") => {
+                if let Some(block) = result.get("block") {
+                    let slot = block.get("slot").and_then(Value::as_u64).unwrap_or(0);
+                    filled += cache_block_txs(state, &time_model, block, &mut plan.missing);
+                    if last_log.elapsed() > Duration::from_secs(5) {
+                        tracing::info!(
+                            "tx backfill: slot {slot}, filled {filled}, {} still missing",
+                            plan.missing.len()
+                        );
+                        last_log = std::time::Instant::now();
+                    }
+                    if slot > stop_slot {
+                        break;
+                    }
+                }
+            }
+            Some("backward") => {}
+            _ => {}
+        }
+        send_req(&mut ws, "nextBlock", json!({}), json!("next")).await?;
+    }
+    Ok(filled)
+}
+
+fn cache_block_txs(
+    state: &AppState,
+    tm: &TimeModel,
+    block: &Value,
+    missing: &mut std::collections::HashSet<String>,
+) -> usize {
+    let Some(hash) = block.get("id").and_then(Value::as_str) else {
+        return 0;
+    };
+    let slot = block.get("slot").and_then(Value::as_u64).unwrap_or(0);
+    let height = block.get("height").and_then(Value::as_u64).unwrap_or(0);
+    let timestamp = tm.slot_to_unix(slot);
+    let block_ctx = json!({
+        "hash": hash,
+        "height": height,
+        "slot": slot,
+        "timestamp": timestamp,
+    });
+    let empty = Vec::new();
+    let txs = block
+        .get("transactions")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let mut filled = 0usize;
+    for tx in txs {
+        let Some(tx_hash) = tx.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !missing.contains(tx_hash) {
+            continue;
+        }
+        if state.cache_tx_if_absent(tx_hash.to_string(), tx.clone(), block_ctx.clone()) {
+            filled += 1;
+        }
+        missing.remove(tx_hash);
+    }
+    filled
+}
+
 type WsStream = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;

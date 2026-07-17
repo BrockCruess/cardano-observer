@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     // the on-disk history of a real deployment.
     let persister = match (&config.data_dir, config.demo) {
         (Some(dir), false) => {
-            let p = persist::Persister::open(std::path::Path::new(dir), config.tx_cache)?;
+            let p = persist::Persister::open(std::path::Path::new(dir))?;
             tracing::info!("persisting events to {dir}");
             Some(Arc::new(p))
         }
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
                 .collect();
             state.restore_recent_blocks(blocks);
         }
-        state.restore(events, p.load_txs());
+        state.restore(events, p.load_txs_since(retention_cutoff));
     }
     let enricher = Arc::new(enrich::Enricher::new(&config).await);
     state.set_keyword_meta(enricher.clone());
@@ -167,6 +167,9 @@ async fn main() -> anyhow::Result<()> {
             enricher.clone(),
             deleg,
         ));
+        // Refill txs.jsonl for any events whose bodies were lost to older
+        // count-based compaction — Ogmios replay only, never republishes events.
+        tokio::spawn(ogmios::backfill_missing_txs(config.clone(), state.clone()));
     }
 
     let app = server::router(server::ServerCtx { state, enricher });

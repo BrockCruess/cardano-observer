@@ -670,17 +670,53 @@ impl Enricher {
         None
     }
 
-    /// Fallback tx lookup when a hash has left the in-memory ring buffer.
+    /// Fallback tx lookup when a hash is not in the local tx index.
+    /// Local Blockfrost RYO often hangs on `/txs/{hash}` — keep this short.
     pub async fn tx_fallback(&self, hash: &str) -> Option<Value> {
+        if self.blockfrost_url.is_none() {
+            return None;
+        }
         if !hash.chars().all(|c| c.is_ascii_hexdigit()) || hash.len() != 64 {
             return None;
         }
-        let tx: Value = self.bf(&format!("/txs/{hash}"))?.send().await.ok()?.error_for_status().ok()?.json().await.ok()?;
+        let tx: Value = match self.bf(&format!("/txs/{hash}")) {
+            Some(req) => match tokio::time::timeout(Duration::from_secs(2), req.send()).await {
+                Ok(Ok(resp)) => match resp.error_for_status() {
+                    Ok(ok) => match ok.json().await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!("blockfrost tx {hash}: bad json: {e}");
+                            return None;
+                        }
+                    },
+                    Err(e) => {
+                        tracing::debug!("blockfrost tx {hash}: {e}");
+                        return None;
+                    }
+                },
+                Ok(Err(e)) => {
+                    tracing::debug!("blockfrost tx {hash}: {e}");
+                    return None;
+                }
+                Err(_) => {
+                    tracing::debug!("blockfrost tx {hash}: timed out");
+                    return None;
+                }
+            },
+            None => return None,
+        };
         let utxos: Option<Value> = match self.bf(&format!("/txs/{hash}/utxos")) {
-            Some(req) => req.send().await.ok()?.error_for_status().ok()?.json().await.ok(),
+            Some(req) => match tokio::time::timeout(Duration::from_secs(2), req.send()).await {
+                Ok(Ok(resp)) => resp.error_for_status().ok()?.json().await.ok(),
+                _ => None,
+            },
             None => None,
         };
         Some(json!({ "blockfrost": { "tx": tx, "utxos": utxos } }))
+    }
+
+    pub fn has_blockfrost(&self) -> bool {
+        self.blockfrost_url.is_some()
     }
 }
 
