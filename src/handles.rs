@@ -3,6 +3,7 @@
 //! addresses on event cards with `$handle` when the account has one.
 
 use crate::config::{HandleApiKind, Network};
+use crate::parse::stake_from_address;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -93,8 +94,12 @@ impl HandleCache {
         c.insert(address.to_string(), handle.unwrap_or("").to_string());
     }
 
-    /// Resolve preferred Handle for a stake (or other) address.
+    /// Resolve preferred Handle for a stake or base payment address.
     /// Returns `{ address, handle }` where `handle` is without `$`, or null when unknown.
+    ///
+    /// Holders are indexed by stake key. Base `addr1…` payment addresses are
+    /// converted to their embedded stake address before lookup (tx detail UTxOs
+    /// only expose payment addresses).
     pub async fn resolve(&self, address: &str) -> Value {
         let addr = address.trim();
         if !is_lookup_address(addr) {
@@ -103,17 +108,27 @@ impl HandleCache {
         if self.base.is_none() {
             return json!({ "address": addr, "handle": Value::Null, "disabled": true });
         }
+        let lookup = stake_from_address(addr).unwrap_or_else(|| addr.to_string());
         if let Some(cached) = self.get_cached(addr) {
             return json!({ "address": addr, "handle": cached });
         }
-        let handle = match self.fetch(addr).await {
+        if lookup != addr {
+            if let Some(cached) = self.get_cached(&lookup) {
+                self.remember(addr, cached.as_deref());
+                return json!({ "address": addr, "handle": cached });
+            }
+        }
+        let handle = match self.fetch(&lookup).await {
             Ok(h) => h,
             Err(e) => {
-                tracing::debug!("handle lookup {addr}: {e:#}");
+                tracing::debug!("handle lookup {lookup} (from {addr}): {e:#}");
                 None
             }
         };
         self.remember(addr, handle.as_deref());
+        if lookup != addr {
+            self.remember(&lookup, handle.as_deref());
+        }
         json!({ "address": addr, "handle": handle })
     }
 

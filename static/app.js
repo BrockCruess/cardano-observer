@@ -1696,6 +1696,22 @@ function handleSpan(addr, head = 12, tail = 5) {
   return `<span class="hash" data-handle="${esc(s)}" title="${esc(s)}">${esc(short(s, head, tail))}</span>`;
 }
 
+/** Modal/detail address: truncated or `$handle`, click-to-copy full address. */
+function addressSpan(addr, head = 14, tail = 8) {
+  if (!addr || addr === "?") {
+    return `<span class="hash">?</span>`;
+  }
+  const s = String(addr);
+  if (!isLookupHandleAddr(s)) {
+    return `<span class="hash copyable" data-copy="${esc(s)}" title="click to copy">${esc(short(s, head, tail))}</span>`;
+  }
+  const known = handleMeta.get(s)?.handle || "";
+  if (known) {
+    return `<span class="ada-handle copyable" data-handle="${esc(s)}" data-copy="${esc(s)}" title="click to copy"><span class="ada-handle-dollar">$</span>${esc(known)}</span>`;
+  }
+  return `<span class="hash copyable" data-handle="${esc(s)}" data-copy="${esc(s)}" title="click to copy">${esc(short(s, head, tail))}</span>`;
+}
+
 /** Prefer stamped/cached givenName; enrichDreps fills misses via /api/drep. */
 function drepSpan(id, stampedName) {
   if (!id) return "";
@@ -4413,7 +4429,8 @@ function paintHandle(el, meta) {
   el.innerHTML = `<span class="ada-handle-dollar">$</span>${esc(handle)}`;
   el.classList.remove("hash");
   el.classList.add("ada-handle");
-  el.title = addr;
+  // Keep copyable titles; otherwise show the underlying address on hover.
+  el.title = el.classList.contains("copyable") ? "click to copy" : addr;
   // Handle labels change pill width — refit the +N overflow.
   const stakesEl = el.closest(".tx-stakes");
   if (stakesEl) requestAnimationFrame(() => fitTxStakes(stakesEl));
@@ -4609,6 +4626,7 @@ async function openTx(ev) {
       ? renderOgmiosTx(hash, detail.tx, detail.block, ev)
       : renderBlockfrostTx(hash, detail.blockfrost, ev);
     enrichAssets(mBody);
+    enrichHandles(mBody);
   } catch {
     mBody.innerHTML =
       `<div class="m-empty">Transaction details are unavailable.</div>${renderEventDetail(ev)}${explorers(hash)}`;
@@ -4645,7 +4663,7 @@ function renderOgmiosTx(hash, tx, block, ev) {
 
   const outHtml = outputs.map((o) => `
     <div class="utxo">
-      <div>${mono(o.address || "?", o.address)}</div>
+      <div>${addressSpan(o.address || "?")}</div>
       <div class="amt">${fmtAda(o.value?.ada?.lovelace || 0)}</div>
       ${valueAssetsChips(o.value)}
     </div>`).join("") || `<div class="m-empty">-</div>`;
@@ -4688,7 +4706,7 @@ function renderBlockfrostTx(hash, bf, ev) {
   const utxos = bf.utxos || {};
   const io = (list, dir) => (list || []).map((u) => `
     <div class="utxo">
-      <div>${mono(u.address || "?", u.address)}</div>
+      <div>${addressSpan(u.address || "?")}</div>
       <div class="amt">${fmtAda((u.amount || []).find((a) => a.unit === "lovelace")?.quantity || 0)}</div>
       ${assetChipsHtml({
         items: (u.amount || []).filter((a) => a.unit !== "lovelace").slice(0, 10).map((a) => ({
