@@ -18,7 +18,7 @@ const DEX_VENUES = [
 ];
 
 /** dApps emitted as `data.dapp` - keep in sync with `src/dapp/`. */
-const DAPP_APPS = ["Iagon", "Indigo Protocol"];
+const DAPP_APPS = ["Iagon", "Indigo Protocol", "FluidTokens"];
 
 /**
  * Governance subtype filters - CIP-1694 action types (proposals) plus other
@@ -1312,6 +1312,15 @@ const sub = (parts) =>
     .map((p) => `<span class="sub-i">${p}</span>`)
     .join('<span class="sep">·</span>');
 
+/** Stake/DRep delegation: `who → to` or `who → from → to` (arrows, not bullets). */
+const delegationFlow = (who, from, to) => {
+  const parts = [who, from, to].filter(Boolean);
+  if (!parts.length) return "";
+  return parts
+    .map((p) => `<span class="sub-i">${p}</span>`)
+    .join('<span class="sep"> → </span>');
+};
+
 function assetChipsHtml(assets) {
   if (!assets || !assets.items || !assets.items.length) return "";
   const chips = assets.items
@@ -1448,7 +1457,7 @@ function cardBody(ev) {
     case "burn":
       return `<span class="badge minus">burn</span>` + assetChipsHtml(d.assets);
     case "delegation": {
-      // Always show the delegating stake (or $handle); from→to is the pool change.
+      // stake (or $handle) → pool; redelegations: stake → from → to
       const who = stakeSpan(d.stake, 12, 5);
       const from = d.fromPool
         ? `<span class="pool-id" data-pool="${esc(d.fromPool)}" title="${esc(d.fromPool)}">${esc(short(d.fromPool, 10, 4))}</span>`
@@ -1456,22 +1465,16 @@ function cardBody(ev) {
       const to = d.pool
         ? `<span class="pool-id" data-pool="${esc(d.pool)}" title="${esc(d.pool)}">${esc(short(d.pool, 10, 4))}</span>`
         : "";
-      const arrow = from && to
-        ? `${from} <span class="sep">→</span> ${to}`
-        : (to || from);
-      return sub([who, arrow]);
+      return delegationFlow(who, from, to);
     }
     case "vote_delegation": {
-      // Always show the delegating stake (or $handle); from→to is the DRep change.
+      // stake (or $handle) → DRep; redelegations: stake → from → to
       const who = stakeSpan(d.stake, 12, 5);
       const from = d.fromDrep
         ? drepSpan(d.fromDrep, d.fromDrepName)
         : "";
       const to = drepSpan(d.drep, d.drepName);
-      const arrow = from && to
-        ? `${from} <span class="sep">→</span> ${to}`
-        : (to || from);
-      return sub([who, arrow]);
+      return delegationFlow(who, from, to);
     }
     case "stake_registration":
     case "stake_deregistration":
@@ -1567,6 +1570,9 @@ function cardBody(ev) {
       const indy = !chips && d.indy != null
         ? `<b>${fmtTokenQty(d.indy, 6)}</b> INDY`
         : "";
+      const fldt = !chips && d.fldt != null
+        ? `<b>${fmtTokenQty(d.fldt, 6)}</b> FLDT`
+        : "";
       const nodeId = d.nodeId
         ? `node id <span class="hash" title="Node ID">${esc(d.nodeId)}</span>`
         : "";
@@ -1576,6 +1582,7 @@ function cardBody(ev) {
         nodeId,
         iag,
         indy,
+        fldt,
         ada,
         actorSpan(d),
       ]) + chips;

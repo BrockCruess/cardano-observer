@@ -3,6 +3,7 @@
 //! Per-dApp scanners live in sibling modules. This module only aggregates
 //! their hits into `category: "dapp"` events; `data.dapp` names the app.
 
+mod fluidtokens;
 mod iagon;
 mod indigo;
 
@@ -19,6 +20,7 @@ pub struct DappHit {
 pub struct DappRegistry {
     iagon: iagon::Scanner,
     indigo: indigo::Scanner,
+    fluidtokens: fluidtokens::Scanner,
 }
 
 impl DappRegistry {
@@ -26,6 +28,7 @@ impl DappRegistry {
         Self {
             iagon: iagon::Scanner::new(),
             indigo: indigo::Scanner::new(),
+            fluidtokens: fluidtokens::Scanner::new(),
         }
     }
 
@@ -35,6 +38,7 @@ impl DappRegistry {
         let reg = Self::new();
         reg.iagon.warm_from_tx_entries(&entries);
         reg.indigo.warm_from_tx_entries(&entries);
+        reg.fluidtokens.warm_from_tx_entries(&entries);
         reg
     }
 
@@ -42,6 +46,7 @@ impl DappRegistry {
     pub fn scan_block(&self, txs: &[(&str, &Value)]) -> Vec<(String, DappHit)> {
         let mut hits = self.iagon.scan_block(txs);
         hits.extend(self.indigo.scan_block(txs));
+        hits.extend(self.fluidtokens.scan_block(txs));
         hits
     }
 }

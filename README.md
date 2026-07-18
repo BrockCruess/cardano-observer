@@ -53,6 +53,9 @@ forks, orphaned blocks and slot battles.
     accounts, INDY staking, ROB orders, stableswap, interest, and governance
     touches (mainnet V3 validator set from
     `config.indigoprotocol.io`).
+  - [FluidTokens](https://docs.fluidtokens.com/) — V3 lending pools / requests /
+    loans (repay, liquidate, recast, collateral changes), dutch auctions,
+    Aquarium sponsored-fee tanks, $FLDT staking, and legacy P2P lending.
 - **History survives restarts.** Events and transaction details are persisted
   to append-only JSONL files (full history on disk; never compacted) and
   restored on startup, so the feed never starts empty. Chain-sync then
@@ -92,11 +95,12 @@ forks, orphaned blocks and slot battles.
   window in the browser (no per-query server scan). Start a preset with
   `?filters=` then list every category / DEX venue / dApp as `&name` flags
   (e.g.   `?filters=minswap&blocks&iagon` → Minswap DEX only, Blocks, Iagon
-  dApp only; `?filters=indigo` → Indigo Protocol). Names match the on-screen
-  chips: category multi-word labels work via any word (`forks` / `battles`);
+  dApp only; `?filters=indigo` → Indigo Protocol;
+  `?filters=fluidtokens` → FluidTokens). Names match the on-screen chips:
+  category multi-word labels work via any word (`forks` / `battles`);
   one-word DEX/dApp names match in full (`vyfinance`, `sundaeswap`,
-  `geniusyield`); multi-word names use the first word (`dano` for Dano
-  Finance, `indigo` for Indigo Protocol).
+  `geniusyield`, `fluidtokens`); multi-word names use the first word (`dano`
+  for Dano Finance, `indigo` for Indigo Protocol).
 - **Reading-friendly.** Scroll down and the feed pauses; a "new events" pill
   counts what you're missing and snaps you back to the tip when clicked.
 - **Light on the host.** Builds to a single static binary (~4 MB) with no
@@ -119,7 +123,7 @@ forks, orphaned blocks and slot battles.
 | Blocks | blue | every block, with issuer pool, size, fees, output volume |
 | Transactions | teal | every transaction: amounts, fees, in/out counts, contract flag |
 | DEX | fuchsia | swap orders (buy/sell/swap), LP deposits/redeems, batch settlements, cancellations across all major DEXes |
-| dApp | teal-cyan | known dApp activity (Iagon stake / node / market; Indigo CDP / SP / staking / ROB / …) |
+| dApp | teal-cyan | known dApp activity (Iagon; Indigo CDP / SP / staking; FluidTokens lending / Aquarium / …) |
 | Tokens | gold | native asset transfers, enriched with registry metadata |
 | Mint / Burn | orange | token mints and burns, incl. NFT name decoding (CIP-67/68 aware) |
 | Staking | green | pool delegations (stake/`$handle` + from→to when known), stake key (de)registrations, reward withdrawals |
@@ -243,7 +247,8 @@ Handle API    ◀── stake → preferred $handle (optional)
   DRep/asset-fingerprint encoding, CIP-14/20/67 handling
 - `src/dex.rs` - DEX order / fill / cancel / LP detection from script
   credentials and datums
-- `src/dapp/` - dApp detectors (`mod.rs` dispatcher; `iagon.rs`, `indigo.rs`)
+- `src/dapp/` - dApp detectors (`mod.rs` dispatcher; `iagon.rs`, `indigo.rs`,
+  `fluidtokens.rs`)
 - `src/state.rs` - time-bounded event buffer, tx cache, orphan & battle
   bookkeeping, broadcast channel
 - `src/trending.rs` - rolling subject-keyword frequency over the retention

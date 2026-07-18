@@ -194,6 +194,10 @@ struct SpentAmounts {
     ada: u64,
     indy: u64,
     iasset: u64,
+    /// iAsset on spent stability-pool *state* UTxOs (carry `STABILITY_POOL` token).
+    pool_iasset: u64,
+    /// iAsset on other spent SP-script UTxOs (accounts / pending requests).
+    sp_other_iasset: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -202,6 +206,17 @@ struct TrackedUtxo {
     ada: u64,
     indy: u64,
     iasset: u64,
+    /// Stability pool state UTxO (has `STABILITY_POOL` auth token).
+    is_sp_pool: bool,
+}
+
+/// iAsset flows at the stability-pool script for deposit sizing.
+#[derive(Clone, Copy, Debug, Default)]
+struct SpFlows {
+    pool_out: u64,
+    account_out: u64,
+    pool_spent: u64,
+    other_spent: u64,
 }
 
 struct TrackedSet {
@@ -347,6 +362,13 @@ impl Scanner {
                     s.ada = s.ada.saturating_add(u.ada);
                     s.indy = s.indy.saturating_add(u.indy);
                     s.iasset = s.iasset.saturating_add(u.iasset);
+                    if u.role == Role::StabilityPool {
+                        if u.is_sp_pool {
+                            s.pool_iasset = s.pool_iasset.saturating_add(u.iasset);
+                        } else {
+                            s.sp_other_iasset = s.sp_other_iasset.saturating_add(u.iasset);
+                        }
+                    }
                 }
             }
         }
@@ -360,8 +382,28 @@ impl Scanner {
             }
         }
 
+        let spent_sp = spent_roles
+            .get(&Role::StabilityPool)
+            .copied()
+            .unwrap_or_default();
+        let mut sp_flows = SpFlows {
+            pool_spent: spent_sp.pool_iasset,
+            other_spent: spent_sp.sp_other_iasset,
+            ..SpFlows::default()
+        };
+        for &(addr, ref sum) in &output_sums {
+            if self.role_for_addr(addr) != Some(Role::StabilityPool) {
+                continue;
+            }
+            if sum.has_sp_token {
+                sp_flows.pool_out = sp_flows.pool_out.saturating_add(sum.iasset);
+            } else if sum.has_sp_account {
+                sp_flows.account_out = sp_flows.account_out.saturating_add(sum.iasset);
+            }
+        }
+
         let hits = if emit {
-            classify(tx_hash, tx, &mint, &by_role, &spent_roles, spent_any)
+            classify(tx_hash, tx, &mint, &by_role, &spent_roles, spent_any, sp_flows)
         } else {
             Vec::new()
         };
@@ -397,6 +439,7 @@ impl Scanner {
                         ada: sum.ada,
                         indy: sum.indy,
                         iasset: sum.iasset,
+                        is_sp_pool: sum.has_sp_token,
                     },
                 );
             }
@@ -413,6 +456,7 @@ fn classify(
     by_role: &HashMap<Role, ValueSummary>,
     spent_roles: &HashMap<Role, SpentAmounts>,
     spent_any: bool,
+    sp_flows: SpFlows,
 ) -> Vec<(String, DappHit)> {
     let auth_touch =
         mint.cdp_nft_delta != 0 || mint.sp_account_delta != 0 || mint.staking_pos_delta != 0;
@@ -475,9 +519,16 @@ fn classify(
     }
 
     if mint.sp_account_delta > 0 {
-        let mut sum = sp_out.cloned().unwrap_or_default();
-        if sum.iasset == 0 {
-            sum.iasset = mint.iasset.max(spent_sp.iasset);
+        // Never attribute the whole pool balance — only the net deposit.
+        let mut sum = ValueSummary {
+            iasset: sp_deposit_amount(sp_flows),
+            ..ValueSummary::default()
+        };
+        if let Some(s) = sp_out {
+            sum.iasset_ticker.clone_from(&s.iasset_ticker);
+            sum.iasset_name_hex.clone_from(&s.iasset_name_hex);
+        }
+        if sum.iasset_ticker.is_none() {
             sum.iasset_ticker.clone_from(&mint.iasset_ticker);
             sum.iasset_name_hex.clone_from(&mint.iasset_name_hex);
         }
@@ -486,7 +537,10 @@ fn classify(
         pending.push((
             EventType::CloseSpAccount,
             ValueSummary {
-                iasset: spent_sp.iasset.max(mint.iasset),
+                iasset: spent_sp
+                    .sp_other_iasset
+                    .max(spent_sp.iasset)
+                    .max(mint.iasset),
                 iasset_ticker: mint.iasset_ticker.clone(),
                 iasset_name_hex: mint.iasset_name_hex.clone(),
                 ..ValueSummary::default()
@@ -576,8 +630,13 @@ fn classify(
     }
 
     if mint.sp_account_delta == 0 && touches_sp && !liquidated {
-        let sp_iasset_out = sp_out.map(|s| s.iasset).unwrap_or(0);
-        let net = sp_iasset_out as i128 - spent_sp.iasset as i128;
+        // Prefer net change on the pool state UTxO (SP_TOKEN), not every SP output.
+        let net = if sp_flows.pool_spent > 0 || sp_flows.pool_out > 0 {
+            sp_flows.pool_out as i128 - sp_flows.pool_spent as i128
+        } else {
+            let sp_iasset_out = sp_out.map(|s| s.iasset).unwrap_or(0);
+            sp_iasset_out as i128 - spent_sp.iasset as i128
+        };
         if net != 0
             && (sp_out.is_some_and(|s| s.has_sp_account)
                 || spent_sp.iasset > 0
@@ -655,6 +714,23 @@ fn classify(
         .into_iter()
         .map(|(et, sum)| (tx_hash.to_string(), hit_for(et, &sum, actor.clone())))
         .collect()
+}
+
+/// Deposit size for a new stability-pool account.
+///
+/// The SP script also holds the shared pool state UTxO (often hundreds of
+/// thousands of iAsset). Using that balance as the "deposit" is wrong — use:
+/// 1. net increase on the `STABILITY_POOL` token UTxO when the prior is known
+/// 2. else iAsset spent from non-pool SP UTxOs (pending request consolidation)
+/// 3. else iAsset on the new `SP_ACCOUNT` output (rare / tests)
+fn sp_deposit_amount(f: SpFlows) -> u64 {
+    if f.pool_spent > 0 {
+        return f.pool_out.saturating_sub(f.pool_spent);
+    }
+    if f.other_spent > 0 {
+        return f.other_spent;
+    }
+    f.account_out
 }
 
 fn signed_iasset_mint(tx: &Value) -> i128 {
@@ -943,6 +1019,88 @@ mod tests {
         });
         let hits = s.scan_block(&[("sp", &tx)]);
         assert_eq!(types(&hits), vec!["create_sp_account"]);
+        // iUSD on the new account output (no prior pool) is the deposit.
+        assert_eq!(hits[0].1.data["assets"]["items"][0]["qty"], "2000000000");
+    }
+
+    #[test]
+    fn sp_deposit_uses_pool_net_not_full_balance() {
+        // Mirrors c1ce2f25…: rewrite pool UTxO (+105 iUSD) while minting SP_ACCOUNT.
+        // Must not report the entire ~579k pool balance as the deposit.
+        let s = Scanner::new();
+        let sp = STABILITY_POOL_HASH;
+        let fund_pool = json!({
+            "outputs": [{
+                "address": sp,
+                "value": {
+                    "ada": { "lovelace": 537_992_488_392u64 },
+                    SP_TOKEN_POLICY: { "53544142494c4954595f504f4f4c": 1 },
+                    IASSET_POLICY: { "69555344": 579_373_658_500u64 }
+                }
+            }]
+        });
+        // Seed tracker with prior pool state (may emit an unrelated adjust event).
+        let _ = s.scan_block(&[("fund_pool", &fund_pool)]);
+
+        let deposit = json!({
+            "mint": {
+                SP_ACCOUNT_POLICY: { SP_ACCOUNT_NAME: 1 }
+            },
+            "inputs": [{ "transaction": { "id": "fund_pool" }, "index": 0 }],
+            "outputs": [
+                {
+                    "address": sp,
+                    "value": {
+                        "ada": { "lovelace": 537_997_488_392u64 },
+                        SP_TOKEN_POLICY: { "53544142494c4954595f504f4f4c": 1 },
+                        IASSET_POLICY: { "69555344": 579_478_658_500u64 }
+                    }
+                },
+                {
+                    "address": sp,
+                    "value": {
+                        "ada": { "lovelace": 2_368_822u64 },
+                        SP_ACCOUNT_POLICY: { SP_ACCOUNT_NAME: 1 }
+                    }
+                }
+            ]
+        });
+        let hits = s.scan_block(&[("dep", &deposit)]);
+        assert_eq!(types(&hits), vec!["create_sp_account"]);
+        // 579478658500 - 579373658500 = 105000000 (105 iUSD, 6 decimals)
+        assert_eq!(hits[0].1.data["assets"]["items"][0]["qty"], "105000000");
+    }
+
+    #[test]
+    fn sp_deposit_omits_amount_when_prior_pool_unknown() {
+        // Without a tracked prior pool, do not treat the full pool UTxO as a deposit.
+        let s = Scanner::new();
+        let sp = STABILITY_POOL_HASH;
+        let tx = json!({
+            "mint": {
+                SP_ACCOUNT_POLICY: { SP_ACCOUNT_NAME: 1 }
+            },
+            "outputs": [
+                {
+                    "address": sp,
+                    "value": {
+                        "ada": { "lovelace": 537_997_488_392u64 },
+                        SP_TOKEN_POLICY: { "53544142494c4954595f504f4f4c": 1 },
+                        IASSET_POLICY: { "69555344": 579_478_658_500u64 }
+                    }
+                },
+                {
+                    "address": sp,
+                    "value": {
+                        "ada": { "lovelace": 2_368_822u64 },
+                        SP_ACCOUNT_POLICY: { SP_ACCOUNT_NAME: 1 }
+                    }
+                }
+            ]
+        });
+        let hits = s.scan_block(&[("blind", &tx)]);
+        assert_eq!(types(&hits), vec!["create_sp_account"]);
+        assert!(hits[0].1.data.get("assets").is_none());
     }
 
     #[test]
