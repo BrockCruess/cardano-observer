@@ -26,7 +26,10 @@ pub fn router(ctx: ServerCtx) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/dex/mod.js", get(dex_mod_js))
+        .route("/dex/logos/{name}", get(dex_logo))
         .route("/dapp/mod.js", get(dapp_mod_js))
+        .route("/dapp/logos/{name}", get(dapp_logo))
         .route("/style.css", get(style_css))
         .route("/cardano-logo.svg", get(cardano_logo))
         .route("/favicon.svg", get(favicon))
@@ -75,6 +78,62 @@ async fn app_js(headers: HeaderMap) -> Response {
     )
 }
 
+async fn dex_mod_js(headers: HeaderMap) -> Response {
+    static_asset(
+        include_str!("../static/dex/mod.js").as_bytes(),
+        "application/javascript; charset=utf-8",
+        CACHE_ASSET,
+        &headers,
+    )
+}
+
+async fn dex_logo(Path(name): Path<String>, headers: HeaderMap) -> Response {
+    let (bytes, ctype): (&[u8], &str) = match name.as_str() {
+        "minswap.svg" => (
+            include_bytes!("../static/dex/logos/minswap.svg"),
+            "image/svg+xml",
+        ),
+        "sundaeswap.png" => (
+            include_bytes!("../static/dex/logos/sundaeswap.png"),
+            "image/png",
+        ),
+        "wingriders.png" => (
+            include_bytes!("../static/dex/logos/wingriders.png"),
+            "image/png",
+        ),
+        "muesliswap.png" => (
+            include_bytes!("../static/dex/logos/muesliswap.png"),
+            "image/png",
+        ),
+        "splash.svg" => (
+            include_bytes!("../static/dex/logos/splash.svg"),
+            "image/svg+xml",
+        ),
+        "vyfinance.png" => (
+            include_bytes!("../static/dex/logos/vyfinance.png"),
+            "image/png",
+        ),
+        "cswap.png" => (
+            include_bytes!("../static/dex/logos/cswap.png"),
+            "image/png",
+        ),
+        "geniusyield.png" => (
+            include_bytes!("../static/dex/logos/geniusyield.png"),
+            "image/png",
+        ),
+        "chadswap.png" => (
+            include_bytes!("../static/dex/logos/chadswap.png"),
+            "image/png",
+        ),
+        "danofinance.png" => (
+            include_bytes!("../static/dex/logos/danofinance.png"),
+            "image/png",
+        ),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    static_asset(bytes, ctype, CACHE_ASSET, &headers)
+}
+
 /// Optional dApp UI pack. 404 when `src/dapp/` was absent at compile time.
 #[cfg(has_dapp)]
 async fn dapp_mod_js(headers: HeaderMap) -> Response {
@@ -88,6 +147,46 @@ async fn dapp_mod_js(headers: HeaderMap) -> Response {
 
 #[cfg(not(has_dapp))]
 async fn dapp_mod_js() -> StatusCode {
+    StatusCode::NOT_FOUND
+}
+
+/// Optional dApp brand marks for event-card icons.
+#[cfg(has_dapp)]
+async fn dapp_logo(Path(name): Path<String>, headers: HeaderMap) -> Response {
+    let (bytes, ctype): (&[u8], &str) = match name.as_str() {
+        "iagon.png" => (
+            include_bytes!("../static/dapp/logos/iagon.png"),
+            "image/png",
+        ),
+        "indigo.png" => (
+            include_bytes!("../static/dapp/logos/indigo.png"),
+            "image/png",
+        ),
+        "fluidtokens.png" => (
+            include_bytes!("../static/dapp/logos/fluidtokens.png"),
+            "image/png",
+        ),
+        "strike.png" => (
+            include_bytes!("../static/dapp/logos/strike.png"),
+            "image/png",
+        ),
+        "surf.png" => (
+            include_bytes!("../static/dapp/logos/surf.png"),
+            "image/png",
+        ),
+        "wayup.svg" => (
+            include_bytes!("../static/dapp/logos/wayup.svg"),
+            "image/svg+xml",
+        ),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    // Same cache policy as JS/CSS so logo tweaks show up after rebuild+refresh
+    // (CACHE_IMAGE's 24h max-age was hiding updates in the browser).
+    static_asset(bytes, ctype, CACHE_ASSET, &headers)
+}
+
+#[cfg(not(has_dapp))]
+async fn dapp_logo(Path(_name): Path<String>) -> StatusCode {
     StatusCode::NOT_FOUND
 }
 

@@ -9,11 +9,27 @@ use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-changed=src/dapp/mod.rs");
     println!("cargo:rerun-if-changed=static/dapp/mod.js");
+    println!("cargo:rerun-if-changed=static/dapp/logos");
+    println!("cargo:rerun-if-changed=static/dex/mod.js");
+    println!("cargo:rerun-if-changed=static/dex/logos");
     println!("cargo:rustc-check-cfg=cfg(has_dapp)");
 
     if Path::new("src/dapp/mod.rs").exists() {
         if !Path::new("static/dapp/mod.js").exists() {
             panic!("src/dapp is present but static/dapp/mod.js is missing");
+        }
+        for name in [
+            "iagon.png",
+            "indigo.png",
+            "fluidtokens.png",
+            "strike.png",
+            "surf.png",
+            "wayup.svg",
+        ] {
+            let path = Path::new("static/dapp/logos").join(name);
+            if !path.exists() {
+                panic!("src/dapp is present but {} is missing", path.display());
+            }
         }
         println!("cargo:rustc-cfg=has_dapp");
     }

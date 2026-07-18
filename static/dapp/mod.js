@@ -3,6 +3,10 @@
  *
  * Linked from the core frontend via dynamic `import("/dapp/mod.js")`.
  * Keep `DAPP_APPS` in sync with scanners registered in `src/dapp/mod.rs`.
+ *
+ * Logos in `/dapp/logos/` (sourced from each project's site / Cardano.org
+ * app-icon submissions); `badge: true` = solid-plate mark that fills the
+ * rounded icon frame (not a circle floating inside it).
  */
 
 /** dApps emitted as `data.dapp`. */
@@ -14,6 +18,63 @@ export const DAPP_APPS = [
   "Surf",
   "Wayup",
 ];
+
+/**
+ * Brand marks. `badge` logos are circular plates — we paint `plate` on the
+ * icon frame so the brand color fills the rounded square behind the
+ * unchanged logo artwork. `?v=` busts long-lived browser image caches.
+ * @type {Record<string, { src: string, badge?: boolean, plate?: string }>}
+ */
+const DAPP_LOGOS = {
+  Iagon: { src: "/dapp/logos/iagon.png?v=2" },
+  "Indigo Protocol": {
+    src: "/dapp/logos/indigo.png?v=2",
+    badge: true,
+    plate: "#4805bb",
+  },
+  FluidTokens: {
+    src: "/dapp/logos/fluidtokens.png?v=2",
+    badge: true,
+    plate: "#ffffff",
+  },
+  Strike: {
+    src: "/dapp/logos/strike.png?v=2",
+    badge: true,
+    plate: "#21f9b1",
+  },
+  Surf: {
+    src: "/dapp/logos/surf.png?v=2",
+    badge: true,
+    plate: "#0e1629",
+  },
+  Wayup: { src: "/dapp/logos/wayup.svg?v=2" },
+};
+
+/**
+ * Brand icon for a dApp event card, or null when unknown/missing.
+ * @param {string|undefined|null} dappName `data.dapp`
+ * @returns {{ html: string, badge: boolean, plate: string }|null}
+ */
+export function dappIconHtml(dappName) {
+  const logo = DAPP_LOGOS[String(dappName || "")];
+  if (!logo) return null;
+  const cls = logo.badge ? "ev-logo ev-logo-badge" : "ev-logo";
+  const name = escAttr(String(dappName));
+  return {
+    html:
+      `<img class="${cls}" src="${logo.src}" alt="${name}" ` +
+      `title="${name}" decoding="async">`,
+    badge: !!logo.badge,
+    plate: logo.plate || "",
+  };
+}
+
+function escAttr(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;");
+}
 
 /**
  * Card body for `kind: "dapp_activity"`.

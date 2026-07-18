@@ -1,24 +1,8 @@
 /* cardano-observer frontend - zero dependencies, one WebSocket. */
 
-/* ── Optional dApp UI pack (`static/dapp/mod.js`) ──────────────────────── */
-/** Names for per-dApp filters; empty when the dApp pack is absent. */
-let DAPP_APPS = [];
-/** Card renderer from the pack; null when absent. */
-let renderDappActivityHtml = null;
-try {
-  const dappMod = await import("/dapp/mod.js");
-  DAPP_APPS = Array.isArray(dappMod.DAPP_APPS) ? dappMod.DAPP_APPS : [];
-  if (typeof dappMod.renderDappActivityHtml === "function") {
-    renderDappActivityHtml = dappMod.renderDappActivityHtml;
-  }
-} catch {
-  // Core UI runs without `static/dapp/` (or when the server was built without it).
-}
-
-/* ── Category & icon registry ─────────────────────────────────────────── */
-
-/** DEX venues emitted as `data.dex` - keep in sync with `src/dex.rs`. */
-const DEX_VENUES = [
+/* ── DEX UI pack (`static/dex/mod.js`) ─────────────────────────────────── */
+/** DEX venues emitted as `data.dex` — fallback if `/dex/mod.js` is missing. */
+let DEX_VENUES = [
   "Minswap",
   "SundaeSwap",
   "WingRiders",
@@ -30,6 +14,41 @@ const DEX_VENUES = [
   "ChadSwap",
   "Dano Finance",
 ];
+/** Brand icon for DEX cards; null when pack/absent. */
+let dexIconHtml = null;
+try {
+  const dexMod = await import("/dex/mod.js");
+  if (Array.isArray(dexMod.DEX_VENUES) && dexMod.DEX_VENUES.length) {
+    DEX_VENUES = dexMod.DEX_VENUES;
+  }
+  if (typeof dexMod.dexIconHtml === "function") {
+    dexIconHtml = dexMod.dexIconHtml;
+  }
+} catch {
+  // Venues list above still works without the logo pack.
+}
+
+/* ── Optional dApp UI pack (`static/dapp/mod.js`) ──────────────────────── */
+/** Names for per-dApp filters; empty when the dApp pack is absent. */
+let DAPP_APPS = [];
+/** Card renderer from the pack; null when absent. */
+let renderDappActivityHtml = null;
+/** Brand icon HTML for dApp cards; null when pack/absent. */
+let dappIconHtml = null;
+try {
+  const dappMod = await import("/dapp/mod.js");
+  DAPP_APPS = Array.isArray(dappMod.DAPP_APPS) ? dappMod.DAPP_APPS : [];
+  if (typeof dappMod.renderDappActivityHtml === "function") {
+    renderDappActivityHtml = dappMod.renderDappActivityHtml;
+  }
+  if (typeof dappMod.dappIconHtml === "function") {
+    dappIconHtml = dappMod.dappIconHtml;
+  }
+} catch {
+  // Core UI runs without `static/dapp/` (or when the server was built without it).
+}
+
+/* ── Category & icon registry ─────────────────────────────────────────── */
 
 /**
  * Governance subtype filters - CIP-1694 action types (proposals) plus other
@@ -917,6 +936,65 @@ function applyFilters() {
     // hide the whole group when that filter is off.
     const hideOrphan = g.classList.contains("orphaned") && !settings.filters.alert;
     g.classList.toggle("f-hide", visible === 0 || hideOrphan);
+    // Spine diamond cutout only when the Block header is actually laid out —
+    // otherwise the cutout reads as a gap under the inter-block dotted segment.
+    const blockCard = g.querySelector(":scope > .card-block");
+    const blockSpine = !!(
+      blockCard
+      && settings.filters.block
+      && !blockCard.classList.contains("f-hide")
+      && !hideOrphan
+      && visible > 0
+    );
+    g.classList.toggle("has-block-spine", blockSpine);
+    // Drop empty event stacks (all children filtered) so their margins don't
+    // open a blank stretch above the dotted inter-block spacer.
+    const host = g.querySelector(":scope > .group-events");
+    if (host) {
+      const anyEvent = [...host.querySelectorAll(":scope > .card")].some((c) => {
+        if (c.classList.contains("f-hide")) return false;
+        if (!settings.filters[c.dataset.category]) return false;
+        if (c.dataset.category === "dex" && !dexVenueEnabled(c.dataset.dex)) return false;
+        if (c.dataset.category === "dapp" && !dappAppEnabled(c.dataset.dapp)) return false;
+        if (c.dataset.category === "governance" && !govTypeEnabled(c.dataset.govType)) {
+          return false;
+        }
+        return true;
+      });
+      host.classList.toggle("is-empty", !anyEvent);
+    }
+  }
+  // Dotted spine is inter-block only (never between cards in the same group).
+  // • Blocks filter off: always dot between different blocks — otherwise abutting
+  //   solid spines read as "same block" across minutes of chain time.
+  // • Blocks filter on: diamonds already mark boundaries; only dot when filters
+  //   hide content (or collapsed groups) between the two visible blocks.
+  const filteredMarks = collectFilteredSpineMarks();
+  const blocksVisible = !!settings.filters.block;
+  for (let i = 0; i < groupOrder.length; i++) {
+    const g = groupOrder[i];
+    if (g.classList.contains("f-hide")) {
+      g.classList.remove("spine-ellipsis");
+      continue;
+    }
+    let nextVis = -1;
+    for (let j = i + 1; j < groupOrder.length; j++) {
+      if (!groupOrder[j].classList.contains("f-hide")) {
+        nextVis = j;
+        break;
+      }
+    }
+    if (nextVis < 0 || !spineDifferentBlocks(g, groupOrder[nextVis])) {
+      g.classList.remove("spine-ellipsis");
+      continue;
+    }
+    const next = groupOrder[nextVis];
+    const skippedGroups = nextVis > i + 1;
+    const skippedFiltered = spineHasFilteredBetween(g, next, filteredMarks);
+    const mark = blocksVisible
+      ? (skippedGroups || skippedFiltered)
+      : true;
+    g.classList.toggle("spine-ellipsis", mark);
   }
   store.set("co_filters_v1", settings.filters);
   store.set("co_minada_v1", settings.minAda);
@@ -2986,8 +3064,23 @@ function buildCard(ev) {
     ? `Block <span class="height">${fmtInt(ev.height)}</span>`
     : esc(titleCaseWords(ev.kind === "vote_delegation" ? "DRep Delegation" : ev.title));
 
+  let iconHtml = iconFor(ev.kind, ev.category, ev.data?.side, ev.data?.vote);
+  let iconClass = "ev-icon";
+  let iconStyle = "";
+  const branded =
+    (ev.category === "dapp" && dappIconHtml && dappIconHtml(ev.data?.dapp))
+    || (ev.category === "dex" && dexIconHtml && dexIconHtml(ev.data?.dex))
+    || null;
+  if (branded) {
+    iconHtml = branded.html;
+    iconClass = "ev-icon has-ev-logo" + (branded.badge ? " has-ev-badge" : "");
+    if (branded.plate) {
+      iconStyle = ` style="--ev-plate:${esc(branded.plate)}"`;
+    }
+  }
+
   card.innerHTML = `
-    <div class="ev-icon">${iconFor(ev.kind, ev.category, ev.data?.side, ev.data?.vote)}</div>
+    <div class="${iconClass}"${iconStyle}>${iconHtml}</div>
     <div class="ev-body">
       <div class="ev-head">
         <span class="ev-title">${title}</span>
@@ -3130,12 +3223,115 @@ function scheduleDomPruneLoop() {
   }, 30_000);
 }
 
+/** Best-known chain height for a block-group (for spine gap detection). */
+function groupChainHeight(g) {
+  if (!g) return 0;
+  let best = Number(g.dataset.height || 0);
+  if (best <= 0) {
+    const hash = g.dataset.block;
+    if (hash) {
+      const be = blocksByHash.get(hash);
+      best = Number(be?.height || 0);
+    }
+  }
+  if (best <= 0) {
+    for (const card of g.querySelectorAll(".card[data-eid]")) {
+      const row = retentionCache.get(Number(card.dataset.eid));
+      const h = Number(row?.ev?.height || 0);
+      if (h > best) best = h;
+    }
+  }
+  if (best > 0) g.dataset.height = String(best);
+  return best > 0 ? best : 0;
+}
+
+/** True when two visible groups are distinct blocks (ellipsis is inter-block only). */
+function spineDifferentBlocks(a, b) {
+  if (!a || !b || a === b) return false;
+  const ha = a.dataset.block || "";
+  const hb = b.dataset.block || "";
+  if (ha && hb) return ha !== hb;
+  const h1 = groupChainHeight(a);
+  const h2 = groupChainHeight(b);
+  if (h1 > 0 && h2 > 0) return h1 !== h2;
+  // Standalone / unknown-hash groups: different DOM groups ⇒ treat as different.
+  return true;
+}
+
+/**
+ * Heights/slots of retained events hidden by the current filters.
+ * Block headers are excluded — turning Blocks off shouldn't dotted-line every
+ * empty inter-block stretch.
+ */
+function collectFilteredSpineMarks() {
+  const heights = [];
+  const slots = [];
+  for (const { ev } of retentionCache.values()) {
+    if (!ev || ev.kind === "block") continue;
+    if (eventPassesFeedFilters(ev)) continue;
+    const h = Number(ev.height || 0);
+    if (h > 0) heights.push(h);
+    const s = Number(ev.slot || 0);
+    if (s > 0) slots.push(s);
+  }
+  heights.sort((a, b) => a - b);
+  slots.sort((a, b) => a - b);
+  return { heights, slots };
+}
+
+/** True if a sorted numeric list has any value in (lo, hi) exclusive. */
+function sortedHasBetween(arr, lo, hi) {
+  if (!arr.length || !(hi > lo + 1)) return false;
+  let loI = 0;
+  let hiI = arr.length;
+  while (loI < hiI) {
+    const mid = (loI + hiI) >> 1;
+    if (arr[mid] <= lo) loI = mid + 1;
+    else hiI = mid;
+  }
+  return loI < arr.length && arr[loI] < hi;
+}
+
+/**
+ * Filtered non-block content lies on an intermediate block between two groups.
+ * Same-block filtered siblings never qualify (exclusive height/slot range).
+ */
+function spineHasFilteredBetween(gNew, gOld, marks) {
+  if (!spineDifferentBlocks(gNew, gOld)) return false;
+  const hNew = groupChainHeight(gNew);
+  const hOld = groupChainHeight(gOld);
+  if (hNew > 0 && hOld > 0) {
+    const lo = Math.min(hNew, hOld);
+    const hi = Math.max(hNew, hOld);
+    if (sortedHasBetween(marks.heights, lo, hi)) return true;
+  }
+  const sNew = Number(gNew.dataset.slot || 0);
+  const sOld = Number(gOld.dataset.slot || 0);
+  if (sNew > 0 && sOld > 0) {
+    const lo = Math.min(sNew, sOld);
+    const hi = Math.max(sNew, sOld);
+    if (sortedHasBetween(marks.slots, lo, hi)) return true;
+  }
+  return false;
+}
+
+function noteGroupHeight(g, ev) {
+  if (!g || ev?.height == null) return;
+  const h = Number(ev.height);
+  if (!Number.isFinite(h) || h <= 0) return;
+  const prev = Number(g.dataset.height || 0);
+  if (h >= prev) g.dataset.height = String(h);
+}
+
 function newGroup(blockHash, ev) {
   const g = document.createElement("div");
   g.className = "block-group";
   if (blockHash) g.dataset.block = blockHash;
   g.dataset.slot = String(ev?.slot || 0);
   g.dataset.eid = String(ev?.id || 0);
+  noteGroupHeight(g, ev);
+  // Resolve height from the block index when the first painted event omits it.
+  if (blockHash && !g.dataset.height) groupChainHeight(g);
   touchGroupViewed(g);
   const evs = document.createElement("div");
   evs.className = "group-events";
@@ -3325,6 +3521,7 @@ function routeEvent(ev) {
     let g = ev.block_hash ? groups.get(ev.block_hash) : null;
     if (!g) g = newGroup(ev.block_hash, ev);
     else touchGroupViewed(g);
+    noteGroupHeight(g, ev);
     // Don't mount a Block header when Blocks are filtered off.
     if (settings.filters.block && !g.querySelector(".card-block")) {
       withEnterMode(null, () => g.prepend(buildCard(ev)));
@@ -3359,6 +3556,7 @@ function routeEvent(ev) {
   let g = ev.block_hash ? groups.get(ev.block_hash) : null;
   if (!g) g = newGroup(ev.block_hash, ev);
   else touchGroupViewed(g);
+  noteGroupHeight(g, ev);
   g.querySelector(".group-events").appendChild(buildCard(ev));
   scheduleFeedResort();
 }
@@ -3395,6 +3593,7 @@ function routeHistoricalBatch(events) {
       const created = !g;
       if (!g) g = newGroup(ev.block_hash, ev);
       else touchGroupViewed(g);
+      noteGroupHeight(g, ev);
       if (ev.block_hash) ensureBlockCard(ev.block_hash);
       if (ev.kind !== "block" && ev.kind !== "transaction") {
         ensureParentTransaction(ev);
