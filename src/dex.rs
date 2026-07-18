@@ -95,15 +95,16 @@ const POOL_ADDRESSES: &[(&str, &str)] = &[
     ("addr1x94ec3t25egvhqy2n265xfhq882jxhkknurfe9ny4rl9k6dj764lvrxdayh2ux30fl0ktuh27csgmpevdu89jlxppvrst84slu", "Splash"), // Spectrum pool V2
     // CSWAP pool
     ("addr1z8ke0c9p89rjfwmuh98jpt8ky74uy5mffjft3zlcld9h7ml3lmln3mwk0y3zsh3gs3dzqlwa9rjzrxawkwm4udw9axhs6fuu6e", "CSWAP"),
-    // Danogo / Dano Finance CLMM (direct-spend pools; no batcher order UTxO)
-    ("addr1x8vtd879xcmme7kmc3rfpqlhq67zj06dn53fvervtjsk0w7dwgsd23ac468cjj8rcnyuc3s72rtupu6j9dw0xpw83exsufvrg4", "Danogo"),
-    ("addr1w8vtd879xcmme7kmc3rfpqlhq67zj06dn53fvervtjsk0wc7a283u", "Danogo"),
+    // Danogo / Dano Finance CLMM (direct-spend pools; no batcher order UTxO).
+    // Wire `data.dex` matches the UI filter chip (`Dano Finance`).
+    ("addr1x8vtd879xcmme7kmc3rfpqlhq67zj06dn53fvervtjsk0w7dwgsd23ac468cjj8rcnyuc3s72rtupu6j9dw0xpw83exsufvrg4", "Dano Finance"),
+    ("addr1w8vtd879xcmme7kmc3rfpqlhq67zj06dn53fvervtjsk0wc7a283u", "Dano Finance"),
 ];
 
 /// Pool script credentials that aren't derived from POOL_ADDRESSES alone.
 const POOL_SCRIPT_HASHES: &[(&str, &str)] = &[
     // Danogo CLMM pool validator (payment credential of both pool addresses)
-    ("d8b69fc53637bcfadbc4469083f706bc293f4d9d2296646c5ca167bb", "Danogo"),
+    ("d8b69fc53637bcfadbc4469083f706bc293f4d9d2296646c5ca167bb", "Dano Finance"),
 ];
 
 /// Danogo LP / position NFT policy (= pool script hash). Each pool UTxO carries
@@ -364,7 +365,7 @@ impl DexRegistry {
 
             // Danogo CLMM: direct pool spends (no order UTxO). Diff successive
             // pool UTxO values keyed by the LP NFT under the pool policy.
-            if pools_touched.contains("Danogo") || danogo_withdrawal(tx) {
+            if pools_touched.contains("Dano Finance") || danogo_withdrawal(tx) {
                 if let Some(hit) = self.detect_danogo_swap(tx) {
                     hits.push((tx_hash.to_string(), hit));
                 }
@@ -714,7 +715,7 @@ impl DexRegistry {
         let mut pool_out: Option<&Value> = None;
         for output in outputs {
             let addr = output.get("address").and_then(Value::as_str).unwrap_or("");
-            if self.pool_dex_for_output(output, addr) == Some("Danogo") {
+            if self.pool_dex_for_output(output, addr) == Some("Dano Finance") {
                 pool_out = Some(output);
                 break;
             }
@@ -755,7 +756,7 @@ impl DexRegistry {
         };
         let refs: Vec<&(String, String, i128)> = paid_assets.iter().collect();
         let mut data = serde_json::Map::new();
-        data.insert("dex".into(), json!("Danogo"));
+        data.insert("dex".into(), json!("Dano Finance"));
         data.insert("side".into(), json!(side));
         data.insert("filled".into(), json!(true));
         if paid_ada > 0 {
@@ -775,7 +776,7 @@ impl DexRegistry {
         crate::parse::attach_actor(&mut data, crate::parse::actor_from_tx(tx).as_deref());
         Some(DexHit {
             kind: "dex_fill",
-            title: "Swap - Danogo".into(),
+            title: "Swap - Dano Finance".into(),
             data: Value::Object(data),
         })
     }

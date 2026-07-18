@@ -475,9 +475,9 @@ const feed = $("feed");
  *   ins  = txs whose outputs this tx spends (its direct past)
  *   outs = txs that spend this tx's outputs (its direct future)
  * Built incrementally from every ingested transaction event's data.inputTxs.
- * On hover we BFS both directions to light the whole light cone and dim the
- * rest of the feed. `seen` marks a tx we actually ingested (vs. a placeholder
- * created only because a newer tx referenced it as an input).
+ * On hover we BFS both directions to light the whole light cone (inset glow;
+ * unrelated cards stay as-is). `seen` marks a tx we actually ingested (vs. a
+ * placeholder created only because a newer tx referenced it as an input).
  */
 const txGraph = new Map(); // txHash -> { ins:Set, outs:Set, seen:bool }
 
@@ -1448,20 +1448,30 @@ function cardBody(ev) {
     case "burn":
       return `<span class="badge minus">burn</span>` + assetChipsHtml(d.assets);
     case "delegation": {
+      // Always show the delegating stake (or $handle); from→to is the pool change.
+      const who = stakeSpan(d.stake, 12, 5);
       const from = d.fromPool
         ? `<span class="pool-id" data-pool="${esc(d.fromPool)}" title="${esc(d.fromPool)}">${esc(short(d.fromPool, 10, 4))}</span>`
-        : stakeSpan(d.stake, 12, 5);
+        : "";
       const to = d.pool
         ? `<span class="pool-id" data-pool="${esc(d.pool)}" title="${esc(d.pool)}">${esc(short(d.pool, 10, 4))}</span>`
         : "";
-      return sub([from && to ? `${from} <span class="sep">→</span> ${to}` : (to || from)]);
+      const arrow = from && to
+        ? `${from} <span class="sep">→</span> ${to}`
+        : (to || from);
+      return sub([who, arrow]);
     }
     case "vote_delegation": {
+      // Always show the delegating stake (or $handle); from→to is the DRep change.
+      const who = stakeSpan(d.stake, 12, 5);
       const from = d.fromDrep
         ? drepSpan(d.fromDrep, d.fromDrepName)
-        : stakeSpan(d.stake, 12, 5);
+        : "";
       const to = drepSpan(d.drep, d.drepName);
-      return sub([from && to ? `${from} <span class="sep">→</span> ${to}` : (to || from)]);
+      const arrow = from && to
+        ? `${from} <span class="sep">→</span> ${to}`
+        : (to || from);
+      return sub([who, arrow]);
     }
     case "stake_registration":
     case "stake_deregistration":

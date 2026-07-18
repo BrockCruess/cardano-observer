@@ -24,20 +24,19 @@ forks, orphaned blocks and slot battles.
   horizontally (one column per block) - toggle anytime.
 - **Light-cone hover.** Hover any tx-scoped card to light its spend-graph
   neighborhood: the hovered transaction, its input ancestry (past), and the
-  txs that spend its outputs (future) stay lit in each card's category
-  colour while the rest of the feed dims. Built from `inputTxs` on
-  transaction events; the client graph covers the live stream plus the 24h
-  retention preload and prunes with retention trim.
+  txs that spend its outputs (future) get a category-coloured inset glow.
+  Built from `inputTxs` on transaction events; the client graph covers the
+  live stream plus the 24h retention preload and prunes with retention trim.
 - **Fork visibility.** Rollbacks are detected from the chain-sync protocol
   itself: orphaned blocks are struck through and ribboned in place, a fork
   card explains the rollback, and when a competing block wins the same slot
   (or height) you get a **slot battle** card naming winner and loser.
 - **DEX awareness.** Swap orders, batch settlements, cancellations, and LP
   deposits / redeems on every major Cardano DEX - Minswap (V1+V2), SundaeSwap
-  (V1+V3), WingRiders (V1+V2), MuesliSwap, Splash/Spectrum, VyFi, CSWAP,
-  Genius Yield, ChadSwap, and Dano Finance - detected from order-script credentials
-  and pool NFTs, with buy / sell / swap / deposit / redeem inferred from the
-  deposited assets. No separate DEX indexer needed.
+  (V1+V3), WingRiders (V1+V2), MuesliSwap, Splash (incl. Spectrum contracts),
+  VyFinance, CSWAP, GeniusYield, ChadSwap, and Dano Finance - detected from
+  order-script credentials and pool NFTs, with buy / sell / swap / deposit /
+  redeem inferred from the deposited assets. No separate DEX indexer needed.
   **CIP-26 filter:** swap / order / fill / cancel cards are only shown when
   every involved native asset is in the Cardano token registry
   (`token-registry.json`). Trades in unregistered tokens (and incomplete
@@ -49,13 +48,14 @@ forks, orphaned blocks and slot battles.
   stake delegation, node registration / pledge / retirement, earnings claims,
   position listings / sales, subscriptions, and stake withdrawals).
 - **History survives restarts.** Events and transaction details are persisted
-  to append-only JSONL files (auto-compacted) and restored on startup, so the
-  feed never starts empty. Chain-sync then resumes from the last persisted
-  block, **backfilling everything that happened while the server was down** -
-  including forks: a rollback that occurred offline still gets its orphan
-  cards on the next start. Scroll further back through the full on-disk
-  history via infinite load-more; search covers the in-memory retention
-  window (default 24h) after a background preload into the browser.
+  to append-only JSONL files (full history on disk; never compacted) and
+  restored on startup, so the feed never starts empty. Chain-sync then
+  resumes from the last persisted block, **backfilling everything that
+  happened while the server was down** - including forks: a rollback that
+  occurred offline still gets its orphan cards on the next start. Scroll
+  further back through the full on-disk history via infinite load-more;
+  search covers the in-memory retention window (default 24h) after a
+  background preload into the browser.
 - **Trending subjects.** A rolling top-10 ticker of asset / pool / CIP-20
   keywords over the retention window; click a term to search.
 - **Full transaction modal.** Click any card for the complete transaction:
@@ -70,34 +70,36 @@ forks, orphaned blocks and slot battles.
   `DATA_DIR/pools.json` and `DATA_DIR/dreps.json` (also refreshed daily), with
   per-miss fetches appended. CIP-108 governance action titles are fetched on
   first sight into `DATA_DIR/gov-actions.json`.
-- **ADA Handles.** Truncated stake addresses on staking cards (withdrawals,
-  registrations, delegation fallbacks) resolve to the account's preferred
-  `$handle` via the free public [Handles API](https://api.handle.me) (or your
-  own KoraLabs / Cardano Foundation Handle resolver). Disable with
-  `ADA_HANDLE_URL=none`.
-- **Delegation context.** Stake and vote re-delegations show **from → to**
-  using an in-process tracker seeded from persisted history, with Blockfrost
-  account lookups when the previous target is still unknown.
-- **Filters that stick.** Per-category chips, free-text search (tx / block /
-  address / policy / ticker / DEX name), URL deep-links (`?q=minswap`,
-  `?BROCK`, `?filters=minswap&blocks&iagon`, …), a minimum-₳ filter, layout
-  and density toggles - all cached in the browser's localStorage for your next
-  visit. Search runs over the preloaded retention window in the browser (no
-  per-query server scan). Start a preset with `?filters=` then list every
-  category / DEX venue / dApp as `&name` flags (e.g.
-  `?filters=minswap&blocks&iagon` → Minswap DEX only, Blocks, Iagon dApp only).
-  Names match the on-screen chips: category multi-word labels work via any
-  word (`forks` / `battles`); one-word DEX/dApp names match in full
-  (`vyfinance`, `sundaeswap`); multi-word DEX names use the first word
-  (`dano` for Dano Finance).
+- **ADA Handles.** Truncated addresses on cards and in the tx modal resolve to
+  the account's preferred `$handle` when available, via the free public
+  [Handles API](https://api.handle.me) (or your own KoraLabs / Cardano
+  Foundation Handle resolver). Disable with `ADA_HANDLE_URL=none`.
+- **Delegation context.** Stake-pool and DRep delegations always show the
+  delegating stake address (or `$handle`), plus **from → to** when the
+  previous target is known - via an in-process tracker seeded from persisted
+  history, with Blockfrost account lookups for misses.
+- **Filters that stick.** Per-category chips (including governance subtypes),
+  free-text search (tx / block / address / policy / ticker / DEX name), URL
+  deep-links (`?q=minswap`, `?BROCK`, `?filters=minswap&blocks&iagon`, …), a
+  minimum-₳ filter, layout and density toggles - all cached in the browser's
+  localStorage for your next visit. Search runs over the preloaded retention
+  window in the browser (no per-query server scan). Start a preset with
+  `?filters=` then list every category / DEX venue / dApp as `&name` flags
+  (e.g. `?filters=minswap&blocks&iagon` → Minswap DEX only, Blocks, Iagon
+  dApp only). Names match the on-screen chips: category multi-word labels
+  work via any word (`forks` / `battles`); one-word DEX/dApp names match in
+  full (`vyfinance`, `sundaeswap`, `geniusyield`); multi-word DEX names use
+  the first word (`dano` for Dano Finance).
 - **Reading-friendly.** Scroll down and the feed pauses; a "new events" pill
   counts what you're missing and snaps you back to the tip when clicked.
-- **Light on the host.** Builds to a single static binary (~6 MB) with no
-  database of its own and no JS build chain - the UI is three hand-written
-  files embedded at compile time. RAM scales with `EVENT_RETENTION_HOURS`
-  (events + matching tx bodies for the detail modal): a 24h mainnet window
-  is typically on the order of hundreds of MB for the event buffer alone,
-  plus a matching browser-side copy for fast search.
+- **Light on the host.** Builds to a single static binary (~4 MB) with no
+  database of its own and no JS build chain - hand-written static assets
+  (HTML/CSS/JS plus logos/images) are embedded at compile time. Responses
+  are gzip/brotli-compressed; static assets carry ETag + Cache-Control.
+  RAM scales with `EVENT_RETENTION_HOURS` (events + matching tx bodies for
+  the detail modal): a 24h mainnet window is typically on the order of
+  hundreds of MB for the event buffer alone, plus a matching browser-side
+  copy for fast search.
 
 | Vertical layout | Horizontal layout |
 |---|---|
@@ -113,9 +115,9 @@ forks, orphaned blocks and slot battles.
 | dApp | teal-cyan | known dApp activity (e.g. Iagon stake / node / market / subscription events) |
 | Tokens | gold | native asset transfers, enriched with registry metadata |
 | Mint / Burn | orange | token mints and burns, incl. NFT name decoding (CIP-67/68 aware) |
-| Staking | green | delegations (with from→to when known), stake key (de)registrations, reward withdrawals |
+| Staking | green | pool delegations (stake/`$handle` + from→to when known), stake key (de)registrations, reward withdrawals |
 | Pools | magenta | pool registrations (pledge / margin / cost) and retirements |
-| Governance | violet | governance actions, votes (DRep/SPO/CC), vote delegations (from→to), DRep lifecycle, committee changes |
+| Governance | violet | governance actions, votes (DRep/SPO/CC), DRep delegations (stake/`$handle` + from→to), DRep lifecycle, committee changes |
 | Metadata | cyan | transaction metadata incl. CIP-20 messages, shown verbatim |
 | Forks & battles | red | rollbacks, orphaned blocks, slot & height battles |
 
@@ -239,7 +241,8 @@ Handle API    ◀── stake → preferred $handle (optional)
   bookkeeping, broadcast channel
 - `src/trending.rs` - rolling subject-keyword frequency over the retention
   window
-- `src/persist.rs` - append-only JSONL history, restore + compaction
+- `src/persist.rs` - append-only JSONL history (full event + tx history;
+  never compacted), restore on boot, hash-indexed tx lookups
 - `src/enrich.rs` - CIP-26 stamps, pool/DRep/gov-action/Handle caches,
   Blockfrost account / historical-tx lookups; background + daily scrapes
 - `src/handles.rs` - ADA Handle preferred-name lookup (KoraLabs or CF API)
@@ -253,12 +256,13 @@ Handle API    ◀── stake → preferred $handle (optional)
   `gov-actions.json`
 - `src/deleg.rs` - stake/DRep from→to tracker across live + restored events
 - `src/demo.rs` - synthetic event stream when `DEMO=true`
-- `src/server.rs` - axum server: embedded UI, `/ws` stream, `/api/events`,
-  `/api/buffer` (chunked via `?before=&limit=`), `/api/trending`, `/api/tx`, `/api/asset`, `/api/pool`,
-  `/api/drep`, `/api/dreps`, `/api/handle`, `/api/gov-action`,
-  `/api/gov-actions`, `/api/stats`
-- `static/` - the whole frontend: one HTML file, one stylesheet, one script;
-  no frameworks, no build step
+- `src/server.rs` - axum server: embedded UI, gzip/brotli, ETag caching,
+  `/ws` stream, `/api/events`, `/api/buffer` (chunked via `?before=&limit=`),
+  `/api/search`, `/api/trending`, `/api/tx`, `/api/asset`, `/api/registry`,
+  `/api/pool`, `/api/drep`, `/api/dreps`, `/api/handle`, `/api/gov-action`,
+  `/api/gov-actions`, `/api/stats`, `/healthz`
+- `static/` - the whole frontend (HTML/CSS/JS + logos/images); no frameworks,
+  no build step; embedded via `include_str!` / `include_bytes!`
 
 ### Notes
 
