@@ -70,6 +70,10 @@ forks, orphaned blocks and slot battles.
     sale, make / update / cancel / accept offer). Detection keys off native
     Ask/Bid script hashes plus CIP-20 `Wayup Transaction` metadata (covers
     aggregated checkouts of foreign listings).
+  - [Strike Finance](https://docs.strikefinance.org/perpetuals/deposits-and-withdrawals) —
+    V2 Cardano locker custody only (deposit / withdraw). Trading stays on the
+    Strike Node; L1 detection keys off the mainnet locker script payment
+    credential and net locker UTxO deltas.
 - **History survives restarts.** Events and transaction details are persisted
   to append-only JSONL files (full history on disk; never compacted) and
   restored on startup, so the feed never starts empty. Chain-sync then
@@ -110,11 +114,11 @@ forks, orphaned blocks and slot battles.
   `?filters=` then list every category / DEX venue / dApp as `&name` flags
   (e.g.   `?filters=minswap&blocks&iagon` → Minswap DEX only, Blocks, Iagon
   dApp only; `?filters=indigo` → Indigo Protocol;
-  `?filters=fluidtokens` → FluidTokens; `?filters=surf` → Surf;
-  `?filters=wayup` → Wayup). Names match
+  `?filters=fluidtokens` → FluidTokens; `?filters=strike` → Strike;
+  `?filters=surf` → Surf; `?filters=wayup` → Wayup). Names match
   the on-screen chips: category multi-word labels work via any word
   (`forks` / `battles`); one-word DEX/dApp names match in full (`vyfinance`,
-  `sundaeswap`, `geniusyield`, `fluidtokens`, `surf`, `wayup`); multi-word names use
+  `sundaeswap`, `geniusyield`, `fluidtokens`, `strike`, `surf`, `wayup`); multi-word names use
   the first word (`dano` for Dano Finance, `indigo` for Indigo Protocol).
 - **Reading-friendly.** Scroll down and the feed pauses; a "new events" pill
   counts what you're missing and snaps you back to the tip when clicked.
@@ -138,7 +142,7 @@ forks, orphaned blocks and slot battles.
 | Blocks | blue | every block, with issuer pool, size, fees, output volume |
 | Transactions | teal | every transaction: amounts, fees, in/out counts, contract flag |
 | DEX | fuchsia | swap orders (buy/sell/swap), LP deposits/redeems, batch settlements, cancellations across all major DEXes |
-| dApp | teal-cyan | known dApp activity (Iagon; Indigo CDP / SP / staking; FluidTokens lending / Aquarium; Surf lending / …) |
+| dApp | teal-cyan | known dApp activity (Iagon; Indigo CDP / SP / staking; FluidTokens lending / Aquarium; Strike V2 custody; Surf lending / …) |
 | Tokens | gold | native asset transfers, enriched with registry metadata |
 | Mint / Burn | orange | token mints and burns, incl. NFT name decoding (CIP-67/68 aware) |
 | Staking | green | pool delegations (stake/`$handle` + from→to when known), stake key (de)registrations, reward withdrawals |
@@ -263,7 +267,7 @@ Handle API    ◀── stake → preferred $handle (optional)
 - `src/dex.rs` - DEX order / fill / cancel / LP detection from script
   credentials and datums
 - `src/dapp/` - dApp detectors (`mod.rs` dispatcher; `iagon.rs`, `indigo.rs`,
-  `fluidtokens.rs`, `surf.rs`, `wayup.rs`)
+  `fluidtokens.rs`, `strike.rs`, `surf.rs`, `wayup.rs`)
 - `src/state.rs` - time-bounded event buffer, tx cache, orphan & battle
   bookkeeping, broadcast channel
 - `src/trending.rs` - rolling subject-keyword frequency over the retention

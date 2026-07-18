@@ -18,7 +18,7 @@ const DEX_VENUES = [
 ];
 
 /** dApps emitted as `data.dapp` - keep in sync with `src/dapp/`. */
-const DAPP_APPS = ["Iagon", "Indigo Protocol", "FluidTokens", "Surf", "Wayup"];
+const DAPP_APPS = ["Iagon", "Indigo Protocol", "FluidTokens", "Strike", "Surf", "Wayup"];
 
 /**
  * Governance subtype filters - CIP-1694 action types (proposals) plus other
