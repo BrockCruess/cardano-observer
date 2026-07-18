@@ -53,8 +53,8 @@ forks, orphaned blocks and slot battles.
     position listings / sales, subscriptions, and stake withdrawals.
   - [Indigo Protocol](https://docs.indigoprotocol.io/) — CDP open / close /
     mint / burn / collateral, liquidations & redemptions, stability-pool
-    accounts, INDY staking, ROB orders, stableswap, interest, and governance
-    touches (mainnet V3 validator set from
+    accounts, INDY staking (open / deposit / withdraw / close), ROB orders,
+    stableswap, interest, and governance touches (mainnet V3 validator set from
     `config.indigoprotocol.io`).
   - [FluidTokens](https://docs.fluidtokens.com/) — V3 lending pools / requests /
     loans (repay, liquidate, recast, collateral changes), dutch auctions,
@@ -66,6 +66,10 @@ forks, orphaned blocks and slot battles.
     (`POOL_NFT`, `VAULT_AT`) from the [Flow Lending contracts](https://github.com/flow-lending/flow-lending-smart-contracts).
     Amounts are **net pool deltas** from a tracked prior pool UTxO (never the
     full pool balance); pool rewrites with no user mint signal are ignored.
+  - [Wayup](https://www.wayup.io/) — NFT marketplace (list / update / unlist /
+    sale, make / update / cancel / accept offer). Detection keys off native
+    Ask/Bid script hashes plus CIP-20 `Wayup Transaction` metadata (covers
+    aggregated checkouts of foreign listings).
 - **History survives restarts.** Events and transaction details are persisted
   to append-only JSONL files (full history on disk; never compacted) and
   restored on startup, so the feed never starts empty. Chain-sync then
@@ -106,10 +110,11 @@ forks, orphaned blocks and slot battles.
   `?filters=` then list every category / DEX venue / dApp as `&name` flags
   (e.g.   `?filters=minswap&blocks&iagon` → Minswap DEX only, Blocks, Iagon
   dApp only; `?filters=indigo` → Indigo Protocol;
-  `?filters=fluidtokens` → FluidTokens; `?filters=surf` → Surf). Names match
+  `?filters=fluidtokens` → FluidTokens; `?filters=surf` → Surf;
+  `?filters=wayup` → Wayup). Names match
   the on-screen chips: category multi-word labels work via any word
   (`forks` / `battles`); one-word DEX/dApp names match in full (`vyfinance`,
-  `sundaeswap`, `geniusyield`, `fluidtokens`, `surf`); multi-word names use
+  `sundaeswap`, `geniusyield`, `fluidtokens`, `surf`, `wayup`); multi-word names use
   the first word (`dano` for Dano Finance, `indigo` for Indigo Protocol).
 - **Reading-friendly.** Scroll down and the feed pauses; a "new events" pill
   counts what you're missing and snaps you back to the tip when clicked.
@@ -258,7 +263,7 @@ Handle API    ◀── stake → preferred $handle (optional)
 - `src/dex.rs` - DEX order / fill / cancel / LP detection from script
   credentials and datums
 - `src/dapp/` - dApp detectors (`mod.rs` dispatcher; `iagon.rs`, `indigo.rs`,
-  `fluidtokens.rs`, `surf.rs`)
+  `fluidtokens.rs`, `surf.rs`, `wayup.rs`)
 - `src/state.rs` - time-bounded event buffer, tx cache, orphan & battle
   bookkeeping, broadcast channel
 - `src/trending.rs` - rolling subject-keyword frequency over the retention

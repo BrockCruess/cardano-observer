@@ -76,7 +76,8 @@ enum EventType {
     AdjustSpAccount,
     CloseSpAccount,
     OpenStaking,
-    AdjustStaking,
+    DepositStaking,
+    WithdrawStaking,
     CloseStaking,
     OpenRob,
     CancelRob,
@@ -101,7 +102,8 @@ impl EventType {
             Self::AdjustSpAccount => "adjust_sp_account",
             Self::CloseSpAccount => "close_sp_account",
             Self::OpenStaking => "open_staking",
-            Self::AdjustStaking => "adjust_staking",
+            Self::DepositStaking => "deposit_staking",
+            Self::WithdrawStaking => "withdraw_staking",
             Self::CloseStaking => "close_staking",
             Self::OpenRob => "open_rob",
             Self::CancelRob => "cancel_rob",
@@ -126,7 +128,8 @@ impl EventType {
             Self::AdjustSpAccount => "Stability Pool Adjust - Indigo",
             Self::CloseSpAccount => "Stability Pool Close - Indigo",
             Self::OpenStaking => "Stake INDY - Indigo",
-            Self::AdjustStaking => "Adjust INDY Stake - Indigo",
+            Self::DepositStaking => "Deposit INDY Stake - Indigo",
+            Self::WithdrawStaking => "Withdraw INDY Stake - Indigo",
             Self::CloseStaking => "Unstake INDY - Indigo",
             Self::OpenRob => "ROB Order - Indigo",
             Self::CancelRob => "Cancel ROB - Indigo",
@@ -647,8 +650,13 @@ fn classify(
         let out_indy = staking_out.map(|s| s.indy).unwrap_or(0);
         let net = out_indy as i128 - spent_staking.indy as i128;
         if net != 0 && !opened_staking && !closed_staking {
+            let et = if net > 0 {
+                EventType::DepositStaking
+            } else {
+                EventType::WithdrawStaking
+            };
             pending.push((
-                EventType::AdjustStaking,
+                et,
                 ValueSummary {
                     indy: net.unsigned_abs() as u64,
                     ..ValueSummary::default()
@@ -838,7 +846,8 @@ fn hit_for(et: EventType, sum: &ValueSummary, actor: Option<String>) -> DappHit 
         && matches!(
             et,
             EventType::OpenStaking
-                | EventType::AdjustStaking
+                | EventType::DepositStaking
+                | EventType::WithdrawStaking
                 | EventType::CloseStaking
                 | EventType::Governance
         )
@@ -1236,6 +1245,75 @@ mod tests {
         let hits = s.scan_block(&[("stake", &tx)]);
         assert_eq!(types(&hits), vec!["open_staking"]);
         assert_eq!(hits[0].1.data["indy"], 100_000_000);
+    }
+
+    #[test]
+    fn detects_indy_stake_deposit_vs_withdraw() {
+        let s = Scanner::new();
+        let staking = STAKING_HASH;
+        // Seed an open position with 100 INDY.
+        let open = json!({
+            "mint": { STAKING_POS_POLICY: { STAKING_POS_NAME: 1 } },
+            "outputs": [{
+                "address": staking,
+                "value": {
+                    "ada": { "lovelace": 2_000_000u64 },
+                    STAKING_POS_POLICY: { STAKING_POS_NAME: 1 },
+                    INDY_POLICY: { INDY_NAME_HEX: 100_000_000u64 }
+                }
+            }]
+        });
+        let _ = s.scan_block(&[("pos0", &open)]);
+
+        let deposit = json!({
+            "inputs": [{
+                "address": staking,
+                "transaction": { "id": "pos0" },
+                "index": 0,
+                "value": {
+                    "ada": { "lovelace": 2_000_000u64 },
+                    STAKING_POS_POLICY: { STAKING_POS_NAME: 1 },
+                    INDY_POLICY: { INDY_NAME_HEX: 100_000_000u64 }
+                }
+            }],
+            "outputs": [{
+                "address": staking,
+                "value": {
+                    "ada": { "lovelace": 2_000_000u64 },
+                    STAKING_POS_POLICY: { STAKING_POS_NAME: 1 },
+                    INDY_POLICY: { INDY_NAME_HEX: 150_000_000u64 }
+                }
+            }]
+        });
+        let hits = s.scan_block(&[("dep", &deposit)]);
+        assert_eq!(types(&hits), vec!["deposit_staking"]);
+        assert_eq!(hits[0].1.title, "Deposit INDY Stake - Indigo");
+        assert_eq!(hits[0].1.data["indy"], 50_000_000);
+
+        let withdraw = json!({
+            "inputs": [{
+                "address": staking,
+                "transaction": { "id": "dep" },
+                "index": 0,
+                "value": {
+                    "ada": { "lovelace": 2_000_000u64 },
+                    STAKING_POS_POLICY: { STAKING_POS_NAME: 1 },
+                    INDY_POLICY: { INDY_NAME_HEX: 150_000_000u64 }
+                }
+            }],
+            "outputs": [{
+                "address": staking,
+                "value": {
+                    "ada": { "lovelace": 2_000_000u64 },
+                    STAKING_POS_POLICY: { STAKING_POS_NAME: 1 },
+                    INDY_POLICY: { INDY_NAME_HEX: 80_000_000u64 }
+                }
+            }]
+        });
+        let hits = s.scan_block(&[("wd", &withdraw)]);
+        assert_eq!(types(&hits), vec!["withdraw_staking"]);
+        assert_eq!(hits[0].1.title, "Withdraw INDY Stake - Indigo");
+        assert_eq!(hits[0].1.data["indy"], 70_000_000);
     }
 
     #[test]

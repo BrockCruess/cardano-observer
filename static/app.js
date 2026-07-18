@@ -18,7 +18,7 @@ const DEX_VENUES = [
 ];
 
 /** dApps emitted as `data.dapp` - keep in sync with `src/dapp/`. */
-const DAPP_APPS = ["Iagon", "Indigo Protocol", "FluidTokens", "Surf"];
+const DAPP_APPS = ["Iagon", "Indigo Protocol", "FluidTokens", "Surf", "Wayup"];
 
 /**
  * Governance subtype filters - CIP-1694 action types (proposals) plus other
@@ -1359,7 +1359,12 @@ const delegationFlow = (who, from, to) => {
     .join('<span class="sep"> → </span>');
 };
 
-function assetChipsHtml(assets) {
+/**
+ * Asset chip row. Optional `badge` sits inside the same `.assets` flex row so
+ * labels like "collateral" stay beside the chips (the whole card body lives in
+ * a wrapping `.ev-sub`, so a bare badge sibling would land on the meta line).
+ */
+function assetChipsHtml(assets, badge) {
   if (!assets || !assets.items || !assets.items.length) return "";
   const chips = assets.items
     .map((a) => {
@@ -1371,7 +1376,10 @@ function assetChipsHtml(assets) {
     })
     .join("");
   const more = assets.more ? `<span class="asset"><span class="t">+${assets.more} more</span></span>` : "";
-  return `<div class="assets">${chips}${more}</div>`;
+  const badgeHtml = badge
+    ? `<span class="badge${badge.cls ? ` ${esc(badge.cls)}` : ""}">${esc(badge.text)}</span>`
+    : "";
+  return `<div class="assets">${badgeHtml}${chips}${more}</div>`;
 }
 
 /** Plain `₳ 123` / `16,490 COCK` - no chip chrome on DEX cards. */
@@ -1600,8 +1608,21 @@ function cardBody(ev) {
       return sub([flow, status, actorSpan(d)]);
     }
     case "dapp_activity": {
-      const chips = d.assets ? assetChipsHtml(d.assets) : "";
-      const collateral = d.collateral ? assetChipsHtml(d.collateral) : "";
+      // Surf/Indigo-style loan cards: `assets`/`ada` = principal, `collateral` = vault.
+      const principalLabel = d.eventType === "borrow"
+        ? "borrowed"
+        : d.eventType === "repay"
+          ? "repaid"
+          : "";
+      const chips = d.assets
+        ? assetChipsHtml(
+          d.assets,
+          principalLabel ? { text: principalLabel, cls: "plus" } : null,
+        )
+        : "";
+      const collateral = d.collateral
+        ? assetChipsHtml(d.collateral, { text: "collateral" })
+        : "";
       // Fallback text amounts when no asset chips (Iagon IAG path, ADA-only).
       const iag = !chips && d.iag != null
         ? `<b>${fmtTokenQty(d.iag, 6)}</b> IAG`
@@ -1619,7 +1640,11 @@ function cardBody(ev) {
       const iassetPool = d.iasset
         ? `<span class="hash" title="Stability pool">${esc(d.iasset)} pool</span>`
         : "";
-      const ada = d.ada ? `<b>${fmtAda(d.ada)}</b>` : "";
+      const ada = d.ada
+        ? (principalLabel
+          ? `<b>${fmtAda(d.ada)}</b> ${principalLabel}`
+          : `<b>${fmtAda(d.ada)}</b>`)
+        : "";
       return sub([
         `<span class="badge contract">${esc(d.dapp || "dApp")}</span>`,
         nodeId,
