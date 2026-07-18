@@ -1,5 +1,19 @@
 /* cardano-observer frontend - zero dependencies, one WebSocket. */
-"use strict";
+
+/* ── Optional dApp UI pack (`static/dapp/mod.js`) ──────────────────────── */
+/** Names for per-dApp filters; empty when the dApp pack is absent. */
+let DAPP_APPS = [];
+/** Card renderer from the pack; null when absent. */
+let renderDappActivityHtml = null;
+try {
+  const dappMod = await import("/dapp/mod.js");
+  DAPP_APPS = Array.isArray(dappMod.DAPP_APPS) ? dappMod.DAPP_APPS : [];
+  if (typeof dappMod.renderDappActivityHtml === "function") {
+    renderDappActivityHtml = dappMod.renderDappActivityHtml;
+  }
+} catch {
+  // Core UI runs without `static/dapp/` (or when the server was built without it).
+}
 
 /* ── Category & icon registry ─────────────────────────────────────────── */
 
@@ -16,9 +30,6 @@ const DEX_VENUES = [
   "ChadSwap",
   "Dano Finance",
 ];
-
-/** dApps emitted as `data.dapp` - keep in sync with `src/dapp/`. */
-const DAPP_APPS = ["Iagon", "Indigo Protocol", "FluidTokens", "Strike", "Surf", "Wayup"];
 
 /**
  * Governance subtype filters - CIP-1694 action types (proposals) plus other
@@ -1608,53 +1619,21 @@ function cardBody(ev) {
       return sub([flow, status, actorSpan(d)]);
     }
     case "dapp_activity": {
-      // Surf/Indigo-style loan cards: `assets`/`ada` = principal, `collateral` = vault.
-      const principalLabel = d.eventType === "borrow"
-        ? "borrowed"
-        : d.eventType === "repay"
-          ? "repaid"
-          : "";
-      const chips = d.assets
-        ? assetChipsHtml(
-          d.assets,
-          principalLabel ? { text: principalLabel, cls: "plus" } : null,
-        )
-        : "";
-      const collateral = d.collateral
-        ? assetChipsHtml(d.collateral, { text: "collateral" })
-        : "";
-      // Fallback text amounts when no asset chips (Iagon IAG path, ADA-only).
-      const iag = !chips && d.iag != null
-        ? `<b>${fmtTokenQty(d.iag, 6)}</b> IAG`
-        : "";
-      const indy = !chips && d.indy != null
-        ? `<b>${fmtTokenQty(d.indy, 6)}</b> INDY`
-        : "";
-      const fldt = !chips && d.fldt != null
-        ? `<b>${fmtTokenQty(d.fldt, 6)}</b> FLDT`
-        : "";
-      const nodeId = d.nodeId
-        ? `node id <span class="hash" title="Node ID">${esc(d.nodeId)}</span>`
-        : "";
-      // Indigo: one stability pool per iAsset — ticker is the pool id.
-      const iassetPool = d.iasset
-        ? `<span class="hash" title="Stability pool">${esc(d.iasset)} pool</span>`
-        : "";
-      const ada = d.ada
-        ? (principalLabel
-          ? `<b>${fmtAda(d.ada)}</b> ${principalLabel}`
-          : `<b>${fmtAda(d.ada)}</b>`)
-        : "";
+      if (renderDappActivityHtml) {
+        return renderDappActivityHtml(d, {
+          esc,
+          fmtAda,
+          fmtTokenQty,
+          assetChipsHtml,
+          actorSpan,
+          sub,
+        });
+      }
+      // Pack absent: still show a minimal card for historical dApp events.
       return sub([
         `<span class="badge contract">${esc(d.dapp || "dApp")}</span>`,
-        nodeId,
-        iassetPool,
-        iag,
-        indy,
-        fldt,
-        ada,
         actorSpan(d),
-      ]) + chips + collateral;
+      ]);
     }
     default:
       return esc(ev.summary || "");

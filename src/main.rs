@@ -1,4 +1,8 @@
 mod config;
+#[cfg(has_dapp)]
+mod dapp;
+#[cfg(not(has_dapp))]
+#[path = "dapp_stub.rs"]
 mod dapp;
 mod demo;
 mod deleg;

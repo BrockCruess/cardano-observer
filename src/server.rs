@@ -26,6 +26,7 @@ pub fn router(ctx: ServerCtx) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/dapp/mod.js", get(dapp_mod_js))
         .route("/style.css", get(style_css))
         .route("/cardano-logo.svg", get(cardano_logo))
         .route("/favicon.svg", get(favicon))
@@ -73,6 +74,23 @@ async fn app_js(headers: HeaderMap) -> Response {
         &headers,
     )
 }
+
+/// Optional dApp UI pack. 404 when `src/dapp/` was absent at compile time.
+#[cfg(has_dapp)]
+async fn dapp_mod_js(headers: HeaderMap) -> Response {
+    static_asset(
+        include_str!("../static/dapp/mod.js").as_bytes(),
+        "application/javascript; charset=utf-8",
+        CACHE_ASSET,
+        &headers,
+    )
+}
+
+#[cfg(not(has_dapp))]
+async fn dapp_mod_js() -> StatusCode {
+    StatusCode::NOT_FOUND
+}
+
 async fn style_css(headers: HeaderMap) -> Response {
     static_asset(
         include_str!("../static/style.css").as_bytes(),

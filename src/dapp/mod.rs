@@ -2,6 +2,9 @@
 //!
 //! Per-dApp scanners live in sibling modules. This module only aggregates
 //! their hits into `category: "dapp"` events; `data.dapp` names the app.
+//! Keep filter names in `static/dapp/mod.js` (`DAPP_APPS`) in sync with the
+//! scanners registered here. The whole `src/dapp/` tree is optional at build
+//! time (see `build.rs` / `src/dapp_stub.rs`).
 
 mod fluidtokens;
 mod iagon;

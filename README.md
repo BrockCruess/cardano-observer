@@ -266,8 +266,12 @@ Handle API    ◀── stake → preferred $handle (optional)
   DRep/asset-fingerprint encoding, CIP-14/20/67 handling
 - `src/dex.rs` - DEX order / fill / cancel / LP detection from script
   credentials and datums
-- `src/dapp/` - dApp detectors (`mod.rs` dispatcher; `iagon.rs`, `indigo.rs`,
-  `fluidtokens.rs`, `strike.rs`, `surf.rs`, `wayup.rs`)
+- `src/dapp/` - optional dApp detectors (`mod.rs` dispatcher; `iagon.rs`,
+  `indigo.rs`, `fluidtokens.rs`, `strike.rs`, `surf.rs`, `wayup.rs`). All
+  scanner wiring stays in `mod.rs`. If this folder is removed, the binary
+  still builds with a no-op registry (`src/dapp_stub.rs`).
+- `static/dapp/mod.js` - optional dApp UI pack (filter names + card HTML);
+  `app.js` dynamic-imports it when present and runs without it when absent
 - `src/state.rs` - time-bounded event buffer, tx cache, orphan & battle
   bookkeeping, broadcast channel
 - `src/trending.rs` - rolling subject-keyword frequency over the retention
@@ -293,7 +297,8 @@ Handle API    ◀── stake → preferred $handle (optional)
   `/api/pool`, `/api/drep`, `/api/dreps`, `/api/handle`, `/api/gov-action`,
   `/api/gov-actions`, `/api/stats`, `/healthz`
 - `static/` - the whole frontend (HTML/CSS/JS + logos/images); no frameworks,
-  no build step; embedded via `include_str!` / `include_bytes!`
+  no build step; embedded via `include_str!` / `include_bytes!`. Optional
+  dApp UI lives under `static/dapp/` and is served at `/dapp/mod.js`.
 
 ### Notes
 
