@@ -18,7 +18,7 @@ const DEX_VENUES = [
 ];
 
 /** dApps emitted as `data.dapp` - keep in sync with `src/dapp/`. */
-const DAPP_APPS = ["Iagon", "Indigo Protocol", "FluidTokens"];
+const DAPP_APPS = ["Iagon", "Indigo Protocol", "FluidTokens", "Surf"];
 
 /**
  * Governance subtype filters - CIP-1694 action types (proposals) plus other
@@ -1599,6 +1599,7 @@ function cardBody(ev) {
     }
     case "dapp_activity": {
       const chips = d.assets ? assetChipsHtml(d.assets) : "";
+      const collateral = d.collateral ? assetChipsHtml(d.collateral) : "";
       // Fallback text amounts when no asset chips (Iagon IAG path, ADA-only).
       const iag = !chips && d.iag != null
         ? `<b>${fmtTokenQty(d.iag, 6)}</b> IAG`
@@ -1621,7 +1622,7 @@ function cardBody(ev) {
         fldt,
         ada,
         actorSpan(d),
-      ]) + chips;
+      ]) + chips + collateral;
     }
     default:
       return esc(ev.summary || "");
