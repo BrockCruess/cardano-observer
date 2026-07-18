@@ -423,7 +423,7 @@ fn classify(
         return Vec::new();
     };
 
-    vec![hit_for(et, tx, pool_net)]
+    vec![hit_for(et, tx, mint, pool_net)]
 }
 
 fn summarize_mint(mint: Option<&Value>) -> MintSummary {
@@ -489,12 +489,13 @@ fn input_outpoint(input: &Value) -> Option<String> {
     Some(format!("{tx}#{index}"))
 }
 
-fn hit_for(et: EventType, tx: &Value, pool_net: &PoolNet) -> DappHit {
+fn hit_for(et: EventType, tx: &Value, mint: &MintSummary, pool_net: &PoolNet) -> DappHit {
     let mut data = json!({
         "dapp": DAPP,
         "eventType": et.as_str(),
     });
     let obj = data.as_object_mut().unwrap();
+    let actor = surf_actor(et, tx, mint);
 
     match et {
         EventType::Supply => {
@@ -524,13 +525,21 @@ fn hit_for(et: EventType, tx: &Value, pool_net: &PoolNet) -> DappHit {
             }
         }
         EventType::Repay => {
-            // Repaid principal = assets returning to the pool (net).
-            if pool_net.known {
+            // Card shows net repaid into the pool only — not batcher fee scraps
+            // (e.g. fixed ~528.94 NIGHT + dust on the batcher address).
+            let repaid_keys = if pool_net.known {
                 let (ada, assets) = pool_net.positive_side();
                 attach_amounts(obj, ada, &assets);
-            }
-            // Collateral returned to the user when the vault is closed.
-            let collateral = returned_collateral_out(tx);
+                assets
+                    .iter()
+                    .map(|(p, n, _)| (p.clone(), n.clone()))
+                    .collect::<HashSet<_>>()
+            } else {
+                HashSet::new()
+            };
+            // Real vault collateral returned to the *user* (e.g. FLOW on an ADA loan).
+            let collateral =
+                returned_collateral_to_user(tx, actor.as_deref(), &repaid_keys);
             if !collateral.is_empty() {
                 let ptrs: Vec<&(String, String, i128)> = collateral.iter().collect();
                 obj.insert("collateral".into(), crate::parse::asset_list(&ptrs));
@@ -539,12 +548,40 @@ fn hit_for(et: EventType, tx: &Value, pool_net: &PoolNet) -> DappHit {
         EventType::CreatePool | EventType::ClosePool => {}
     }
 
-    crate::parse::attach_actor(obj, crate::parse::actor_from_tx(tx).as_deref());
+    // User (key payment), never pool/vault scripts — see `surf_actor`.
+    crate::parse::attach_actor(obj, actor.as_deref());
 
     DappHit {
         kind: "dapp_activity",
         title: et.title().to_string(),
         data,
+    }
+}
+
+/// Resolve the **user** for a Surf action (not the batcher / pool script).
+///
+/// Plain `actor_from_tx` picks the largest key-ADA output, which on supply is
+/// usually the batcher’s change — the supplier only receives the cToken.
+fn surf_actor(et: EventType, tx: &Value, mint: &MintSummary) -> Option<String> {
+    match et {
+        EventType::Supply => {
+            for (policy, name, qty) in &mint.other_mints {
+                let q = qty.unsigned_abs() as u64;
+                if q == 0 {
+                    continue;
+                }
+                if let Some(a) = crate::parse::actor_receiving_asset(tx, policy, name, q) {
+                    return Some(a);
+                }
+            }
+            crate::parse::actor_from_tx(tx)
+        }
+        EventType::Withdraw => crate::parse::actor_receiving_ada(tx, 5_000_000)
+            .or_else(|| crate::parse::actor_from_tx(tx)),
+        // Repay: prefer largest key-ADA out (user change). Do not prefer the
+        // batcher’s fee CNT output (~528 NIGHT) as the actor.
+        EventType::Borrow | EventType::Repay => crate::parse::actor_from_tx(tx),
+        EventType::CreatePool | EventType::ClosePool => crate::parse::actor_from_tx(tx),
     }
 }
 
@@ -564,19 +601,36 @@ fn attach_amounts(
 
 /// Native assets on newly created vault outputs (excludes auth / pool NFTs).
 fn vault_collateral_out(tx: &Value) -> Vec<(String, String, i128)> {
-    collect_non_pool_native(tx, |o| value_has_named_asset(o.get("value"), VAULT_AT), false)
+    collect_non_pool_native(tx, |o| value_has_named_asset(o.get("value"), VAULT_AT), false, None, None)
 }
 
-/// Collateral returned on repay / liquidate (vault burned; assets leave to user).
-fn returned_collateral_out(tx: &Value) -> Vec<(String, String, i128)> {
-    // Skip 1-qty fee / ref NFTs that often ride repay txs.
-    collect_non_pool_native(tx, |_| true, true)
+/// Collateral returned to the loan user — never batcher fee CNTs.
+///
+/// Skips assets that were the repaid principal (same unit as pool net inflow).
+fn returned_collateral_to_user(
+    tx: &Value,
+    actor: Option<&str>,
+    repaid_keys: &HashSet<(String, String)>,
+) -> Vec<(String, String, i128)> {
+    collect_non_pool_native(tx, |_| true, true, actor, Some(repaid_keys))
+}
+
+fn output_matches_actor(addr: &str, actor: &str) -> bool {
+    if addr == actor {
+        return true;
+    }
+    if actor.starts_with("stake") {
+        return crate::parse::stake_from_address(addr).as_deref() == Some(actor);
+    }
+    false
 }
 
 fn collect_non_pool_native(
     tx: &Value,
     output_ok: impl Fn(&Value) -> bool,
     skip_unit_qty: bool,
+    actor: Option<&str>,
+    exclude_keys: Option<&HashSet<(String, String)>>,
 ) -> Vec<(String, String, i128)> {
     let empty = Vec::new();
     let outputs = tx.get("outputs").and_then(Value::as_array).unwrap_or(&empty);
@@ -588,6 +642,12 @@ fn collect_non_pool_native(
         if !output_ok(o) {
             continue;
         }
+        let addr = o.get("address").and_then(Value::as_str).unwrap_or("");
+        if let Some(actor) = actor {
+            if !output_matches_actor(addr, actor) {
+                continue;
+            }
+        }
         let Some(obj) = o.get("value").and_then(Value::as_object) else {
             continue;
         };
@@ -598,6 +658,9 @@ fn collect_non_pool_native(
             let Some(names) = names.as_object() else { continue };
             for (name, qty) in names {
                 if name == VAULT_AT || name == POOL_INFO_NFT || name == POOL_NFT {
+                    continue;
+                }
+                if exclude_keys.is_some_and(|ex| ex.contains(&(policy.clone(), name.clone()))) {
                     continue;
                 }
                 let q = i128::from(qty.as_i64().unwrap_or(0).unsigned_abs() as i64);
@@ -738,6 +801,46 @@ mod tests {
     }
 
     #[test]
+    fn supply_actor_is_ctoken_recipient_not_batcher_change() {
+        // Mirrors 65083c1e…: batcher holds ~₳580 change; supplier receives cToken at ₳2.
+        let s = Scanner::new();
+        seed_pool(&s, "prior", 1_000_000_000_000, json!({}));
+        let user = "addr1q9gqsphqrze8jvgjg84decguy6uwr3se5eqkdqkhp9swz5w482ekxnn442wzke60qe8q242tuyyd4qe40hvyvkkfv0cqeczymg";
+        let batcher = "addr1q8tg989f3p9wc4fum2pjhr2rm0vefjy5rqkadrqvq9rz6p8rn3drfgphm5xvuz9u5kssgf2jxvtgyhfxmef49e8xq07qdufat7";
+        let pool = "addr1x9dl26l64ggw7n8cv50gmc6ekfauw77pdfag6yvq9vxwxh3zdzu598pz3t7jwydjguxcafv8vfrd4zufq8d2kexx82asav5fly";
+        let expected_stake = crate::parse::stake_from_address(user).expect("user stake");
+        let tx = json!({
+            "inputs": [{ "transaction": { "id": "prior" }, "index": 0 }],
+            "mint": { POL_D: { "0014df1066414441": 14_210_746_109i64 } },
+            "outputs": [
+                {
+                    "address": pool,
+                    "value": {
+                        "ada": { "lovelace": 2_504_183_897_937u64 },
+                        POL_B: { POOL_NFT: 1 }
+                    }
+                },
+                {
+                    "address": batcher,
+                    "value": { "ada": { "lovelace": 579_584_951u64 } }
+                },
+                {
+                    "address": user,
+                    "value": {
+                        "ada": { "lovelace": 2_000_000u64 },
+                        POL_D: { "0014df1066414441": 14_210_746_109u64 }
+                    }
+                }
+            ]
+        });
+        let hits = s.scan_block(&[("s", &tx)]);
+        assert_eq!(types(&hits), vec!["supply"]);
+        assert_eq!(hits[0].1.data["stake"], expected_stake);
+        let batcher_stake = crate::parse::stake_from_address(batcher);
+        assert_ne!(hits[0].1.data.get("stake"), batcher_stake.as_ref().map(|s| json!(s)).as_ref());
+    }
+
+    #[test]
     fn supply_omits_amount_when_prior_unknown() {
         let s = Scanner::new();
         let tx = json!({
@@ -777,25 +880,37 @@ mod tests {
     }
 
     #[test]
-    fn repay_uses_pool_net() {
+    fn repay_uses_pool_net_and_user_collateral_not_batcher_fees() {
         let s = Scanner::new();
         seed_pool(&s, "prior", 80_000_000_000, json!({}));
+        // FLOW repay recipient from f55e00ab…
+        let user = "addr1q853wsrygpu7gf8g00w69ahw6eawfyl3j5nxr5lr8zc2je94q0a7hc0mg8vha6gu3f7nctkf7470zugh0sd7yvp0n96qnfzw82";
+        let batcher = "addr1qypvquktryfew2pjqgqmygwekjek0wx5qcmf84kr39f75twz6pjksw7xjma8my77l9v8ld8cgsz6nxs8canw5avmdqvq54rl6f";
+        let pool = "addr1x9wrqt696lm407lc9rpe7gl7tjm06gpeh3km36hs7gdg6kydct6jduhwdtq9jtgqrgsusegk4h4jg350dm5fwdv6j3csfd77c9";
         let tx = json!({
             "inputs": [{ "transaction": { "id": "prior" }, "index": 0 }],
             "mint": { POL_A: { VAULT_AT: -1 } },
             "outputs": [
                 {
-                    "address": "addr1xpool",
+                    "address": pool,
                     "value": {
                         "ada": { "lovelace": 82_000_000_000u64 },
                         POL_B: { POOL_NFT: 1 }
                     }
                 },
                 {
-                    "address": "addr1quser",
+                    "address": user,
                     "value": {
-                        "ada": { "lovelace": 3_000_000u64 },
+                        "ada": { "lovelace": 107_624_265u64 },
                         POL_C: { "464c4f57": 6_399_979_844u64 }
+                    }
+                },
+                // Batcher fee scraps must not appear as collateral.
+                {
+                    "address": batcher,
+                    "value": {
+                        "ada": { "lovelace": 6_249_763u64 },
+                        POL_C: { "4e49474854": 528_940_000u64 }
                     }
                 }
             ]
@@ -804,7 +919,63 @@ mod tests {
         assert_eq!(types(&hits), vec!["repay"]);
         assert_eq!(hits[0].1.data["ada"], 2_000_000_000u64);
         assert_eq!(hits[0].1.title, "Repay Loan - Surf");
-        assert!(hits[0].1.data.get("collateral").is_some());
+        let coll = &hits[0].1.data["collateral"]["items"];
+        assert_eq!(coll.as_array().unwrap().len(), 1);
+        assert_eq!(coll[0]["name"], "FLOW");
+        assert_eq!(coll[0]["qty"], "6399979844");
+    }
+
+    #[test]
+    fn repay_night_loan_shows_only_pool_net_not_fee_chips() {
+        // Mirrors a9a72197…: pool +16.6k NIGHT; batcher takes 528.94 + 1.66 NIGHT.
+        let s = Scanner::new();
+        seed_pool(
+            &s,
+            "prior",
+            2_000_000,
+            json!({ POL_C: { "4e49474854": 1_583_631_887_989u64 } }),
+        );
+        let user = "addr1qywlxjvvd2953sg3z85za2ug28pumf40w5shf3wjtwtff07s94np5jegg4cxlef0wvk9nmzcjqh970c82w3au5usyyhq7gmay7";
+        let batcher = "addr1qypvquktryfew2pjqgqmygwekjek0wx5qcmf84kr39f75twz6pjksw7xjma8my77l9v8ld8cgsz6nxs8canw5avmdqvq54rl6f";
+        let pool = "addr1x9wrqt696lm407lc9rpe7gl7tjm06gpeh3km36hs7gdg6kydct6jduhwdtq9jtgqrgsusegk4h4jg350dm5fwdv6j3csfd77c9";
+        let tx = json!({
+            "inputs": [{ "transaction": { "id": "prior" }, "index": 0 }],
+            "mint": { POL_A: { VAULT_AT: -1 } },
+            "outputs": [
+                {
+                    "address": user,
+                    "value": { "ada": { "lovelace": 5_229_537_659u64 } }
+                },
+                {
+                    "address": pool,
+                    "value": {
+                        "ada": { "lovelace": 2_000_000u64 },
+                        POL_B: { POOL_NFT: 1 },
+                        POL_C: { "4e49474854": 1_600_236_482_532u64 }
+                    }
+                },
+                {
+                    "address": batcher,
+                    "value": {
+                        "ada": { "lovelace": 6_249_763u64 },
+                        POL_C: { "4e49474854": 528_940_000u64 }
+                    }
+                },
+                {
+                    "address": batcher,
+                    "value": {
+                        "ada": { "lovelace": 6_178_200u64 },
+                        POL_C: { "4e49474854": 1_660_293u64 }
+                    }
+                }
+            ]
+        });
+        let hits = s.scan_block(&[("rn", &tx)]);
+        assert_eq!(types(&hits), vec!["repay"]);
+        // Net repaid = 1600236482532 - 1583631887989 = 16604594543
+        assert_eq!(hits[0].1.data["assets"]["items"][0]["qty"], "16604594543");
+        assert_eq!(hits[0].1.data["assets"]["items"][0]["name"], "NIGHT");
+        assert!(hits[0].1.data.get("collateral").is_none());
     }
 
     #[test]

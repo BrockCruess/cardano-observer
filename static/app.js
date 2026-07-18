@@ -924,7 +924,9 @@ function applyFilters() {
     }
   }
   updateFilterEasterEgg();
-  scheduleHierarchyPipes();
+  // Drop / restore `.ev-child` indent when Transactions (or other filters) toggle,
+  // so tip cards don't sit flush while older siblings stay indented.
+  refreshHierarchyIndent();
 }
 
 /** True when every category chip is off — show the bathroom-robot easter egg. */
@@ -2188,21 +2190,41 @@ function cmpHierarchy(a, b) {
 /**
  * When parent_id is missing (demo / older rows), attach children to the
  * Transaction card that shares their tx_hash so hierarchy sort still works.
+ * Only indent when the Transactions filter is on *and* the parent card is in
+ * the DOM — otherwise tip inserts (which skip mounting parents when the filter
+ * is off) sit flush while older cards keep a stale `.ev-child` from a hidden
+ * transaction still left in the group.
  */
 function resolveCardParents(host) {
   const txIds = new Map();
+  const byEid = new Map();
   for (const card of host.querySelectorAll(":scope > .card")) {
+    if (card.dataset.eid) byEid.set(card.dataset.eid, card);
     if (card.dataset.kind === "transaction" && card.dataset.tx && card.dataset.eid) {
       txIds.set(card.dataset.tx, card.dataset.eid);
     }
   }
+  const indentChildren = !!settings.filters.transaction;
   for (const card of host.querySelectorAll(":scope > .card")) {
     if (card.dataset.kind === "block" || card.dataset.kind === "transaction") continue;
     if (!card.dataset.parent && card.dataset.tx && txIds.has(card.dataset.tx)) {
       card.dataset.parent = txIds.get(card.dataset.tx);
     }
-    if (card.dataset.parent) card.classList.add("ev-child");
+    const parentMounted =
+      indentChildren
+      && card.dataset.parent
+      && byEid.has(card.dataset.parent);
+    card.classList.toggle("ev-child", !!parentMounted);
   }
+}
+
+/** Recompute child indent + pipes after filter changes (no full feed rebuild). */
+function refreshHierarchyIndent() {
+  for (const g of groupOrder) {
+    const host = g.querySelector(".group-events");
+    if (host) resolveCardParents(host);
+  }
+  scheduleHierarchyPipes();
 }
 
 function resortFeedBySlot() {
