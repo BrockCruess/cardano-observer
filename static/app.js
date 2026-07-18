@@ -675,7 +675,12 @@ function showLightCone(hash) {
 
 feed.addEventListener("mouseover", (e) => {
   const card = e.target.closest && e.target.closest(".card");
-  if (!card || !feed.contains(card)) return;
+  // Dead space between cards is still inside #feed — clear the cone so
+  // related cards don't stay lit after the cursor leaves a card.
+  if (!card || !feed.contains(card)) {
+    clearLightCone();
+    return;
+  }
   const tx = card.dataset.tx || null;
   if (tx === lcTx) return;      // still inside the same tx's cards
   if (!tx) { clearLightCone(); return; } // blocks / rollbacks have no cone
@@ -689,11 +694,24 @@ const seenEventIds = new Set(); // dedupe when merging search hits into the feed
 /** Soft safety cap while scrolling deep history. */
 const MAX_GROUPS = 50_000;
 /**
- * While parked at the tip, keep only this many newest block-groups mounted.
- * Older groups are dropped from the DOM (events stay in retentionCache and can
- * remount if the user scrolls into history).
+ * Hard ceiling on mounted block-groups (newest first). Safety net only —
+ * view-based pruning normally keeps far fewer.
  */
-const TIP_DOM_GROUPS = 200;
+const TIP_DOM_GROUPS = 80;
+/** Always keep at least this many newest groups so the tip never goes empty. */
+const TIP_DOM_MIN_GROUPS = 10;
+/**
+ * Automatic tip paint / retention-absorb hard stop (block-groups). Prevents
+ * mobile + flaky scrollHeight checks from dumping thousands of cards before
+ * the user scrolls.
+ */
+const TIP_PAINT_MAX_GROUPS = 20;
+/**
+ * Drop a mounted block-group once it has been off-screen (unviewed) this long.
+ * Intentionally loaded history is kept only while recently viewed; scroll again
+ * to remount from retentionCache / disk.
+ */
+const VIEW_STALE_MS = 5 * 60 * 1000;
 const pending = [];            // buffered events while user is reading
 let oldestEventId = null;      // smallest id currently in the feed
 let historyExhausted = false;
@@ -766,11 +784,11 @@ const HISTORY_SEEK_PAGE_SIZE = 200;
  */
 const BUFFER_PAGE_SIZE = 5000;
 /**
- * When the filtered 24h hit list is at or under this size, paint it all.
- * Sparse filters (e.g. ?filters=iagon) mount every in-memory match; dense views
- * only fill the viewport and page the rest from RAM on scroll.
+ * Never dump the whole retention window into the DOM — tip fills one viewport
+ * (plus a small buffer); older matches remount only via intentional history scroll.
+ * Kept as 0 so existing `paintAll` call sites stay false.
  */
-const SPARSE_FULL_PAINT = 5000;
+const SPARSE_FULL_PAINT = 0;
 /** Yield to the browser while indexing a hydrate chunk (keep rare — speed first). */
 const RETENTION_INDEX_CHUNK = 2500;
 /** Yield every N feed pages while painting so large match sets stay responsive. */
@@ -1253,17 +1271,19 @@ function buildToolbar() {
   $("reset-filters-btn").onclick = () => resetFilters();
 
   const layoutBtn = $("layout-btn");
-  const setLayoutBtn = () => {
+  const syncLayoutChrome = () => {
     layoutBtn.textContent = settings.layout === "vertical" ? "vertical" : "horizontal";
+    feed.className = settings.layout;
+    document.body.classList.toggle("layout-horizontal", settings.layout === "horizontal");
+    const dir = $("newpill-dir");
+    if (dir) dir.textContent = settings.layout === "horizontal" ? "◀" : "▲";
   };
-  setLayoutBtn();
-  feed.className = settings.layout;
+  syncLayoutChrome();
   layoutBtn.onclick = () => {
     clearLightCone();
     settings.layout = settings.layout === "vertical" ? "horizontal" : "vertical";
-    feed.className = settings.layout;
     store.set("co_layout_v1", settings.layout);
-    setLayoutBtn();
+    syncLayoutChrome();
     scheduleHierarchyPipes();
   };
 
@@ -1502,7 +1522,8 @@ function cardBody(ev) {
     case "tx_metadata":
       return d.msg
         ? `<span style="font-style:italic">“${esc(String(d.msg).slice(0, 160))}”</span>`
-        : sub([(d.labels || []).slice(0, 6).map((l) => `<span class="hash">label ${esc(l)}</span>`).join(" ")]);
+        : // One flex item per label so chips wrap inside the card.
+          sub((d.labels || []).slice(0, 6).map((l) => `<span class="hash">label ${esc(l)}</span>`));
     case "rollback":
       return sub([
         `<b>${fmtInt(d.depth)}</b> block${d.depth > 1 ? "s" : ""} orphaned`,
@@ -1962,12 +1983,17 @@ function startRetentionPreload(force = false) {
 /**
  * Merge newly cached retention hits into the visible feed.
  * Does not clear the DOM — tip stays up while 24h hydrates underneath.
- * Sparse filters mount every match so far; dense filters fill the viewport.
+ * Only fills toward one viewport; older matches wait for history scroll.
  */
 async function absorbRetentionHits(opts = {}) {
   if ($("search").value.trim()) return;
   if (feedRebuilding) return;
   if (opts.gen != null && opts.gen !== retentionLoadGen) return;
+  // Tip already seeded — keep hydrating retentionCache only; don't keep painting.
+  if (tipPaintBudgetExceeded() || (groupOrder.length >= TIP_DOM_MIN_GROUPS && visibleFeedFillsPage())) {
+    ensureFeedHitBuffer(true);
+    return;
+  }
 
   ensureFeedHitBuffer(true);
   const paintAll = feedHitBuffer.length <= SPARSE_FULL_PAINT;
@@ -1975,11 +2001,8 @@ async function absorbRetentionHits(opts = {}) {
   await paintFeedHitPages({ all: paintAll, gen: feedRebuildGen, sync });
   resortFeedBySlot();
   applyFilters();
-  // Re-arm scroll/wheel; do not auto-load or flash the spinner — that waits
-  // until the viewer reaches the bottom themselves.
-  if (!visibleFeedFillsPage() || nearHistoryEnd()) {
-    historyLoadArmed = true;
-  }
+  pruneTipDomGroups();
+  // Never auto-arm history load from absorb — scroll/wheel owns that.
 }
 
 /**
@@ -2433,7 +2456,12 @@ function fadeInTipCards(cards) {
 let tipAnimBusy = false;
 let tipAnimQueue = [];
 
+let tipAnimBusyWatch = 0;
 function releaseTipAnim() {
+  if (tipAnimBusyWatch) {
+    clearTimeout(tipAnimBusyWatch);
+    tipAnimBusyWatch = 0;
+  }
   tipAnimBusy = false;
   if (!tipAnimQueue.length) return;
   const next = tipAnimQueue.splice(0);
@@ -2452,6 +2480,13 @@ function insertTipEvents(events) {
     return;
   }
   tipAnimBusy = true;
+  // Failsafe: never leave the tip pipeline wedged (missed transitionend on mobile).
+  if (tipAnimBusyWatch) clearTimeout(tipAnimBusyWatch);
+  tipAnimBusyWatch = setTimeout(() => {
+    if (tipAnimBusy) releaseTipAnim();
+  }, FEED_ENTER_MS + 400);
+
+  const stayAtTip = !isPaused();
 
   if (reduceMotion()) {
     withEnterMode(null, () => {
@@ -2463,6 +2498,7 @@ function insertTipEvents(events) {
       }
       resortFeedBySlot();
     });
+    if (stayAtTip && settings.layout === "vertical") scrollFeedToTip("auto");
     pruneTipDomGroups();
     releaseTipAnim();
     return;
@@ -2480,6 +2516,7 @@ function insertTipEvents(events) {
     resortFeedBySlot();
   });
 
+  if (stayAtTip && settings.layout === "vertical") scrollFeedToTip("auto");
   pruneTipDomGroups();
 
   const pendingCards = [...feed.querySelectorAll(".card.enter-tip-pending")];
@@ -2667,7 +2704,10 @@ function renderFeedPage(opts = {}) {
 /** Drop painted cards but keep the retention cache (filter / order rebuild). */
 function clearFeedDom() {
   clearLightCone();
-  feed.querySelectorAll(".block-group").forEach((g) => g.remove());
+  feed.querySelectorAll(".block-group").forEach((g) => {
+    groupViewIo?.unobserve(g);
+    g.remove();
+  });
   groups.clear();
   groupOrder.length = 0;
   seenEventIds.clear();
@@ -2690,7 +2730,7 @@ async function paintFeedHitPages(opts = {}) {
   let pages = 0;
   while (feedHitOffset < feedHitBuffer.length) {
     if (gen != null && gen !== feedRebuildGen) return pages;
-    if (!paintAll && visibleFeedFillsPage()) break;
+    if (!paintAll && (visibleFeedFillsPage() || tipPaintBudgetExceeded())) break;
     const before = feedHitOffset;
     const n = renderFeedPage({ animate: false, skipApplyFilters: true });
     // All-seen gaps: renderFeedPage advances offset and returns 0 — keep going.
@@ -2736,6 +2776,7 @@ async function onFeedFiltersChanged() {
 
     resortFeedBySlot();
     applyFilters();
+    pruneTipDomGroups();
     // Leave short views for the user to wheel/scroll — no auto network spinner.
   } finally {
     if (gen === feedRebuildGen) feedRebuilding = false;
@@ -2838,26 +2879,54 @@ function buildCard(ev) {
 
 /* ── Feed assembly: block groups on the chain spine ───────────────────── */
 
-/**
- * Drop oldest mounted block-groups while the user is watching the tip so the
- * live DOM can't grow without bound. Events remain in retentionCache and can
- * remount via history scroll. No-op while paused (scrolled into history).
- */
-function pruneTipDomGroups() {
-  if (feedRebuilding) return;
-  if (typeof isPaused === "function" && isPaused()) return;
-  if (groupOrder.length <= TIP_DOM_GROUPS) return;
-  clearLightCone();
-  while (groupOrder.length > TIP_DOM_GROUPS) {
-    const old = groupOrder.pop();
-    if (!old) break;
-    old.querySelectorAll(".card[data-eid]").forEach((card) => {
-      const id = Number(card.dataset.eid);
-      if (Number.isFinite(id)) seenEventIds.delete(id);
-    });
-    if (old.dataset.block) groups.delete(old.dataset.block);
-    old.remove();
-  }
+/** Mark a block-group as viewed now (mount, intersection, or tip activity). */
+function touchGroupViewed(g, when = Date.now()) {
+  if (!g) return;
+  g.dataset.lastViewed = String(when);
+}
+
+function groupNearViewport(g) {
+  if (!g || !g.isConnected) return false;
+  const r = g.getBoundingClientRect();
+  const margin = 240;
+  return r.bottom > -margin && r.top < window.innerHeight + margin;
+}
+
+/** IntersectionObserver — refresh lastViewed while a group is on screen. */
+let groupViewIo = null;
+function ensureGroupViewObserver() {
+  if (groupViewIo || typeof IntersectionObserver === "undefined") return;
+  groupViewIo = new IntersectionObserver(
+    (entries) => {
+      const now = Date.now();
+      for (const e of entries) {
+        if (e.isIntersecting) touchGroupViewed(e.target, now);
+      }
+    },
+    { root: null, rootMargin: "200px 0px", threshold: 0 },
+  );
+}
+
+function observeGroupView(g) {
+  ensureGroupViewObserver();
+  groupViewIo?.observe(g);
+}
+
+/** Remove one mounted block-group and free its event ids for remount. */
+function dropBlockGroup(g) {
+  if (!g) return;
+  groupViewIo?.unobserve(g);
+  const idx = groupOrder.indexOf(g);
+  if (idx >= 0) groupOrder.splice(idx, 1);
+  g.querySelectorAll(".card[data-eid]").forEach((card) => {
+    const id = Number(card.dataset.eid);
+    if (Number.isFinite(id)) seenEventIds.delete(id);
+  });
+  if (g.dataset.block) groups.delete(g.dataset.block);
+  g.remove();
+}
+
+function refreshOldestEventId() {
   oldestEventId = null;
   for (const g of groupOrder) {
     g.querySelectorAll(".card[data-eid]").forEach((card) => {
@@ -2866,9 +2935,60 @@ function pruneTipDomGroups() {
       if (oldestEventId == null || id < oldestEventId) oldestEventId = id;
     });
   }
+}
+
+/**
+ * Bound the mounted feed:
+ *  - Always keep the newest TIP_DOM_MIN_GROUPS.
+ *  - Drop any older group that has not been viewed in VIEW_STALE_MS and is not
+ *    near the viewport (history the user is still looking at stays).
+ *  - Hard-cap at TIP_DOM_GROUPS from the oldest end.
+ * Events stay in retentionCache and remount on history scroll.
+ */
+function pruneTipDomGroups() {
+  if (feedRebuilding) return;
+  if (!groupOrder.length) return;
+
+  const now = Date.now();
+  // Refresh lastViewed for anything currently on screen (IO can lag).
+  for (const g of groupOrder) {
+    if (groupNearViewport(g)) touchGroupViewed(g, now);
+  }
+
+  let dropped = false;
+  // Stale groups beyond the tip floor — walk oldest→newest so history the user
+  // is reading (fresh lastViewed) is kept while forgotten tip/history falls off.
+  for (let i = groupOrder.length - 1; i >= TIP_DOM_MIN_GROUPS; i--) {
+    const g = groupOrder[i];
+    if (groupNearViewport(g)) continue;
+    const last = Number(g.dataset.lastViewed || 0);
+    if (now - last <= VIEW_STALE_MS) continue;
+    dropBlockGroup(g);
+    dropped = true;
+  }
+
+  while (groupOrder.length > TIP_DOM_GROUPS) {
+    dropBlockGroup(groupOrder[groupOrder.length - 1]);
+    dropped = true;
+  }
+
+  if (!dropped) return;
+  clearLightCone();
+  refreshOldestEventId();
   if (typeof syncFeedHitOffset === "function") syncFeedHitOffset();
   pinHistoryLoader();
   updateLoadedEventCount();
+  scheduleHierarchyPipes();
+}
+
+/** Periodic prune so an idle tip tab can't accumulate hours of DOM. */
+let pruneDomTimer = 0;
+function scheduleDomPruneLoop() {
+  if (pruneDomTimer) return;
+  pruneDomTimer = setInterval(() => {
+    if (document.hidden) return;
+    pruneTipDomGroups();
+  }, 30_000);
 }
 
 function newGroup(blockHash, ev) {
@@ -2877,18 +2997,18 @@ function newGroup(blockHash, ev) {
   if (blockHash) g.dataset.block = blockHash;
   g.dataset.slot = String(ev?.slot || 0);
   g.dataset.eid = String(ev?.id || 0);
+  touchGroupViewed(g);
   const evs = document.createElement("div");
   evs.className = "group-events";
   g.appendChild(evs);
   hierarchyPipeRo?.observe(evs);
+  observeGroupView(g);
   // Temporary placement; scheduleFeedResort() establishes final slot order.
   feed.prepend(g);
   groupOrder.unshift(g);
   if (blockHash) groups.set(blockHash, g);
   while (groupOrder.length > MAX_GROUPS) {
-    const old = groupOrder.pop();
-    if (old?.dataset.block) groups.delete(old.dataset.block);
-    old?.remove();
+    dropBlockGroup(groupOrder[groupOrder.length - 1]);
   }
   pinHistoryLoader();
   return g;
@@ -3033,6 +3153,7 @@ function routeEvent(ev) {
   if (ev.kind === "block") {
     let g = ev.block_hash ? groups.get(ev.block_hash) : null;
     if (!g) g = newGroup(ev.block_hash, ev);
+    else touchGroupViewed(g);
     // Don't mount a Block header when Blocks are filtered off.
     if (settings.filters.block && !g.querySelector(".card-block")) {
       withEnterMode(null, () => g.prepend(buildCard(ev)));
@@ -3066,6 +3187,7 @@ function routeEvent(ev) {
   if (ev.kind !== "transaction") ensureParentTransaction(ev);
   let g = ev.block_hash ? groups.get(ev.block_hash) : null;
   if (!g) g = newGroup(ev.block_hash, ev);
+  else touchGroupViewed(g);
   g.querySelector(".group-events").appendChild(buildCard(ev));
   scheduleFeedResort();
 }
@@ -3101,6 +3223,7 @@ function routeHistoricalBatch(events) {
       let g = ev.block_hash ? groups.get(ev.block_hash) : null;
       const created = !g;
       if (!g) g = newGroup(ev.block_hash, ev);
+      else touchGroupViewed(g);
       if (ev.block_hash) ensureBlockCard(ev.block_hash);
       if (ev.kind !== "block" && ev.kind !== "transaction") {
         ensureParentTransaction(ev);
@@ -3144,8 +3267,24 @@ function tipAnchorY() {
   return header ? header.getBoundingClientRect().bottom : 0;
 }
 
+/**
+ * Scroll Y that parks the feed tip just under the sticky header.
+ * Used after tip inserts so scroll-anchoring can't shove us into "paused".
+ */
+function tipScrollY() {
+  return Math.max(0, window.scrollY + feed.getBoundingClientRect().top - tipAnchorY());
+}
+
+function scrollFeedToTip(behavior = "auto") {
+  window.scrollTo({ top: tipScrollY(), behavior });
+}
+
 function isPaused() {
   if (settings.layout === "vertical") {
+    // Require real downward scroll. Tip inserts + scroll anchoring can move
+    // feedTop under the header while scrollY is still ~0, which used to freeze
+    // live updates into `pending` forever on mobile.
+    if (window.scrollY < 48) return false;
     const feedTop = feed.getBoundingClientRect().top;
     // Small slack so rubber-band / subpixel scroll doesn't flicker the pill.
     return feedTop < tipAnchorY() - 12;
@@ -3234,9 +3373,7 @@ function scheduleFlushPending() {
 
 $("newpill").onclick = () => {
   if (settings.layout === "vertical") {
-    // Scroll so the event list top sits just under the sticky header.
-    const y = window.scrollY + feed.getBoundingClientRect().top - tipAnchorY();
-    window.scrollTo({ top: Math.max(0, y), behavior: "smooth" });
+    scrollFeedToTip("smooth");
   } else {
     feed.scrollTo({ left: 0, behavior: "smooth" });
   }
@@ -3275,8 +3412,8 @@ function onScrollDirection() {
   const towardTip = pos < lastScrollPos - 2;
   lastScrollPos = pos;
   if (towardTip) scheduleFlushPending();
-  // Back at the tip after reading — drop the long tail we kept for scrollback.
-  if (!isPaused()) pruneTipDomGroups();
+  // Drop unviewed / over-cap groups whether at tip or reading history.
+  pruneTipDomGroups();
   if (!towardHistory) {
     if (!nearHistoryEnd()) {
       historyLoadArmed = true;
@@ -3355,8 +3492,14 @@ function nearHistoryEnd() {
   return scrollable - feed.scrollLeft < 64;
 }
 
+/** True when the tip paint budget is exhausted (group count, not scrollHeight). */
+function tipPaintBudgetExceeded() {
+  return groupOrder.length >= TIP_PAINT_MAX_GROUPS;
+}
+
 /** True when visible (filter-matching) cards fill at least one viewport. */
 function visibleFeedFillsPage() {
+  if (tipPaintBudgetExceeded()) return true;
   let n = 0;
   document.querySelectorAll("#feed .card").forEach((card) => {
     if (card.classList.contains("f-hide")) return;
@@ -3367,6 +3510,8 @@ function visibleFeedFillsPage() {
     n++;
   });
   if (!n) return false;
+  // Force layout so mobile WebKit has up-to-date scroll metrics mid-paint.
+  void document.documentElement.offsetHeight;
   if (settings.layout === "vertical") {
     return document.documentElement.scrollHeight >= window.innerHeight + 48;
   }
@@ -3623,9 +3768,15 @@ function maybeLoadHistory() {
   if (searchPriming || searchExtending || historyLoading || oldestEventId == null) return;
   // Nothing left in the 24h page buffer and disk history is exhausted.
   if (retentionHistoryDone && retentionReady && historyExhausted) return;
-  // Load when the filtered view is short, or the user scrolled near the end.
-  // (If 24h is still hydrating, loadHistory shows the spinner and waits.)
-  if (visibleFeedFillsPage() && !nearHistoryEnd()) return;
+  // Never auto-drain history just because the filtered view looks "short"
+  // (sparse filters + mobile scrollHeight flakes). Require an intentional
+  // approach to the history end, or a nearly empty tip that still needs a seed.
+  const atHistoryEnd = nearHistoryEnd() || historyLoaderUserPinned;
+  if (!atHistoryEnd) {
+    if (groupOrder.length >= TIP_DOM_MIN_GROUPS || tipPaintBudgetExceeded()) return;
+  } else if (visibleFeedFillsPage() && !nearHistoryEnd() && !historyLoaderUserPinned) {
+    return;
+  }
   loadHistory();
 }
 
@@ -3656,13 +3807,9 @@ function withPinnedFeedScroll(fn) {
 }
 
 /**
- * Load older events. Two modes:
- *  - Short filtered view: drain remaining in-memory 24h pages until the viewport
- *    fills (or the buffer is done). Sparse views already painted the full buffer
- *    on filter change, so this usually means disk.
- *  - Normal scroll-near-end: append exactly one more page (buffer or disk).
- * The scroll latch ensures a load cannot chain into the next page until the
- * user scrolls back through the newly loaded content.
+ * Load older events when the user approaches the history end.
+ * Appends one useful page (buffer or disk). Does not auto-drain the 24h window
+ * just because the viewport looks short — that caused mobile/sparse-filter dumps.
  */
 async function loadHistory() {
   if (searchPriming) return;
@@ -3682,29 +3829,40 @@ async function loadHistory() {
   historyLoading = true;
   ensureFeedHitBuffer();
   const beforeVisible = visibleMatchCount();
+  const userAtEnd = nearHistoryEnd() || historyLoaderUserPinned;
 
-  // Short view with buffer left: finish draining memory (yield between pages).
-  if (feedHitOffset < feedHitBuffer.length && !visibleFeedFillsPage()) {
-    await withPinnedFeedScroll(() =>
-      paintFeedHitPages({ all: false, gen: feedRebuildGen }),
-    );
-    resortFeedBySlot();
-    applyFilters();
-  }
-
-  // Viewport already full: append exactly one more buffer page.
-  if (feedHitOffset < feedHitBuffer.length && visibleFeedFillsPage()) {
-    await withPinnedFeedScroll(() => { renderFeedPage(); });
-    if (!nearHistoryEnd()) historyLoadArmed = true;
-    releaseHistoryLoaderForUser(false);
-    return;
-  }
-
-  // More buffer left but viewport still short (paint returned early) — re-arm.
+  // Tip seed only: if almost nothing is mounted, paint up to the tip budget.
+  // Otherwise require the user at the history end before appending more.
   if (feedHitOffset < feedHitBuffer.length) {
-    if (!visibleFeedFillsPage()) historyLoadArmed = true;
-    releaseHistoryLoaderForUser(false);
-    return;
+    if (!userAtEnd && groupOrder.length >= TIP_DOM_MIN_GROUPS) {
+      releaseHistoryLoaderForUser(false);
+      return;
+    }
+    if (!visibleFeedFillsPage() && groupOrder.length < TIP_PAINT_MAX_GROUPS) {
+      await withPinnedFeedScroll(() =>
+        paintFeedHitPages({ all: false, gen: feedRebuildGen }),
+      );
+      resortFeedBySlot();
+      applyFilters();
+      pruneTipDomGroups();
+      if (!userAtEnd) {
+        releaseHistoryLoaderForUser(false);
+        return;
+      }
+    }
+    // User at end with a full tip: append exactly one more buffer page.
+    if (feedHitOffset < feedHitBuffer.length && userAtEnd) {
+      await withPinnedFeedScroll(() => { renderFeedPage(); });
+      pruneTipDomGroups();
+      if (!nearHistoryEnd()) historyLoadArmed = true;
+      releaseHistoryLoaderForUser(false);
+      return;
+    }
+    if (feedHitOffset < feedHitBuffer.length) {
+      historyLoadArmed = true;
+      releaseHistoryLoaderForUser(false);
+      return;
+    }
   }
 
   // In-memory hit list drained. If 24h is still hydrating, wait — do not hit disk.
@@ -3715,9 +3873,8 @@ async function loadHistory() {
       return;
     }
     ensureFeedHitBuffer(true);
-    if (feedHitOffset < feedHitBuffer.length || !visibleFeedFillsPage()) {
+    if (feedHitOffset < feedHitBuffer.length) {
       historyLoadArmed = true;
-      // Stay pinned: user is still at the bottom waiting for the next page.
       historyLoading = false;
       if (historyLoaderUserPinned) setHistoryLoading(true);
       queueMicrotask(() => maybeLoadHistory());
@@ -3727,8 +3884,12 @@ async function loadHistory() {
     return;
   }
 
-  // Past the 24h filtered buffer — disk history.
+  // Past the 24h filtered buffer — disk history (user-initiated only).
   retentionHistoryDone = true;
+  if (!userAtEnd) {
+    releaseHistoryLoaderForUser(false);
+    return;
+  }
   if (historyExhausted) {
     releaseHistoryLoaderForUser(true);
     return;
@@ -3742,21 +3903,15 @@ async function loadHistory() {
   const ac = new AbortController();
   historyAbort = ac;
   try {
-    /**
-     * User asked for more: keep paging disk until filtered matches actually
-     * appear (or history is exhausted). Never return an empty "load more".
-     * - Short view: fill toward a full viewport of matches.
-     * - Full view: guarantee at least one new visible match this scroll.
-     */
-    const shortView = !visibleFeedFillsPage();
-    const targetVisible = shortView
-      ? Infinity // stop when visibleFeedFillsPage() or exhausted
-      : beforeVisible + 1;
+    // Seek until at least one new visible match lands (or a small page budget).
+    const targetVisible = beforeVisible + 1;
+    const maxPages = 40;
     let pages = 0;
     while (
       !historyExhausted
-      && pages < HISTORY_SEEK_MAX_PAGES
-      && (shortView ? !visibleFeedFillsPage() : visibleMatchCount() < targetVisible)
+      && pages < maxPages
+      && visibleMatchCount() < targetVisible
+      && groupOrder.length < TIP_DOM_GROUPS
     ) {
       const events = await withPinnedFeedScroll(() =>
         fetchHistoryPage(ac.signal, {
@@ -3766,15 +3921,12 @@ async function loadHistory() {
       );
       pages++;
       if (events == null) break;
-      // Found enough for this request?
-      if (!shortView && visibleMatchCount() >= targetVisible) break;
-      if (shortView && visibleFeedFillsPage()) break;
+      pruneTipDomGroups();
+      if (visibleMatchCount() >= targetVisible) break;
       await yieldToBrowser();
     }
-    if (shortView || !nearHistoryEnd()) {
-      historyLoadArmed = true;
-    }
-    // else: still in end zone after a full-view append — stay disarmed
+    pruneTipDomGroups();
+    if (!nearHistoryEnd()) historyLoadArmed = true;
   } catch (e) {
     if (e?.name !== "AbortError") { /* best-effort */ }
     historyLoadArmed = true;
@@ -4924,6 +5076,8 @@ $("trending-track")?.addEventListener("click", (e) => {
 
 buildToolbar();
 ensureHierarchyPipeObserver();
+ensureGroupViewObserver();
+scheduleDomPruneLoop();
 applyFilters();
 loadRegistryMeta();
 loadDrepMeta();

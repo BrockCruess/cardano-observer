@@ -800,6 +800,7 @@ header {
   margin-left: var(--child-indent);
   width: calc(100% - var(--child-indent));
   max-width: calc(100% - var(--child-indent));
+  min-width: 0;
 }
 
 /* ── Cards ─────────────────────────────────────────────────────────────── */
@@ -816,6 +817,7 @@ header {
   gap: 11px;
   align-items: flex-start;
   cursor: pointer;
+  min-width: 0;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   /* No default enter animation — resortFeedBySlot re-appends nodes and would
      retrigger it as a flash. Tip/history paths opt in via .enter-tip/.enter-hist. */
@@ -939,11 +941,22 @@ header {
   gap: 10px;
   flex-wrap: wrap;
   align-items: center;
+  min-width: 0;
+  max-width: 100%;
 }
 .ev-sub b { color: var(--text); font-weight: 700; }
 .ev-sub .sep { color: var(--muted); }
-.ev-sub .sub-i { display: inline; }
-.ev-sub .assets { display: inline-flex; margin: 0; vertical-align: middle; }
+.ev-sub .sub-i { display: inline; min-width: 0; max-width: 100%; }
+.ev-sub .assets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  max-width: 100%;
+  min-width: 0;
+  /* Prefer a full row so chips wrap within the card, not beside badges. */
+  flex: 1 1 100%;
+}
 
 /* Fractional digits: quieter so the integer leads the eye. */
 .frac {
@@ -1099,8 +1112,15 @@ header {
 }
 .dex-flow-line { margin-top: 4px; }
 
-/* asset chips */
-.assets { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+/* asset chips — always stay inside the card (wrap + ellipsis) */
+.assets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  max-width: 100%;
+  min-width: 0;
+}
 .asset {
   display: inline-flex;
   align-items: center;
@@ -1112,7 +1132,10 @@ header {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-2);
-  max-width: 230px;
+  box-sizing: border-box;
+  /* Cap length, but never wider than the card body. */
+  max-width: min(230px, 100%);
+  min-width: 0;
 }
 .asset img, .asset .ph {
   width: 18px; height: 18px;
@@ -1125,7 +1148,13 @@ header {
   color: var(--muted);
   object-fit: cover;
 }
-.asset .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asset .t {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .asset .q { color: var(--text); flex: none; }
 
 /* block card specifics */
@@ -1173,7 +1202,9 @@ body.compact .assets { margin-top: 3px; }
 
 #newpill {
   position: fixed;
-  top: 74px;
+  /* Vertical: sit under the sticky header (tip is upward). */
+  top: max(12px, env(safe-area-inset-top, 0px));
+  margin-top: 58px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 50;
@@ -1193,6 +1224,16 @@ body.compact .assets { margin-top: 3px; }
 }
 #newpill.show { display: inline-flex; animation: card-in 0.25s ease; }
 #newpill:hover { background: color-mix(in srgb, var(--c-block) 32%, #0d1420); }
+
+/* Horizontal: tip is to the left — pin the pill mid-left with a back arrow. */
+body.layout-horizontal #newpill {
+  top: 50%;
+  left: max(12px, env(safe-area-inset-left, 0px));
+  right: auto;
+  margin-top: 0;
+  transform: translateY(-50%);
+  writing-mode: horizontal-tb;
+}
 
 /* ── Modal ─────────────────────────────────────────────────────────────── */
 
@@ -1548,6 +1589,11 @@ body.search-priming #feed {
 /* ── Mobile ────────────────────────────────────────────────────────────── */
 
 @media (max-width: 720px) {
+  /* Keep the vertical "n new" pill clear of the sticky header / notches. */
+  body:not(.layout-horizontal) #newpill {
+    top: max(8px, env(safe-area-inset-top, 0px));
+    margin-top: 0;
+  }
   .trending { padding: 5px 12px; gap: 8px; }
   .hdr-inner { padding: 8px 12px; gap: 10px; }
   .stats { width: 100%; max-width: 100%; overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }

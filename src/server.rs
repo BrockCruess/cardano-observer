@@ -5,7 +5,7 @@ use crate::enrich::Enricher;
 use crate::state::AppState;
 use axum::{
     extract::{ws::WebSocket, ws::WebSocketUpgrade, Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::get,
     Router,
@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+use tower_http::compression::CompressionLayer;
 
 #[derive(Clone)]
 pub struct ServerCtx {
@@ -45,39 +46,114 @@ pub fn router(ctx: ServerCtx) -> Router {
         .route("/api/stats", get(api_stats))
         .route("/api/trending", get(api_trending))
         .route("/healthz", get(|| async { "ok" }))
+        .layer(CompressionLayer::new())
         .with_state(ctx)
 }
 
-async fn index() -> Response {
-    static_file(include_str!("../static/index.html"), "text/html; charset=utf-8")
+/// HTML shell — always revalidate (small; picks up deploys immediately).
+const CACHE_HTML: &str = "no-cache";
+/// JS / CSS / SVG — reusable for an hour, then revalidate via ETag.
+const CACHE_ASSET: &str = "public, max-age=3600, must-revalidate";
+/// Large rarely-changing image.
+const CACHE_IMAGE: &str = "public, max-age=86400, must-revalidate";
+
+async fn index(headers: HeaderMap) -> Response {
+    static_asset(
+        include_str!("../static/index.html").as_bytes(),
+        "text/html; charset=utf-8",
+        CACHE_HTML,
+        &headers,
+    )
 }
-async fn app_js() -> Response {
-    static_file(include_str!("../static/app.js"), "application/javascript; charset=utf-8")
+async fn app_js(headers: HeaderMap) -> Response {
+    static_asset(
+        include_str!("../static/app.js").as_bytes(),
+        "application/javascript; charset=utf-8",
+        CACHE_ASSET,
+        &headers,
+    )
 }
-async fn style_css() -> Response {
-    static_file(include_str!("../static/style.css"), "text/css; charset=utf-8")
+async fn style_css(headers: HeaderMap) -> Response {
+    static_asset(
+        include_str!("../static/style.css").as_bytes(),
+        "text/css; charset=utf-8",
+        CACHE_ASSET,
+        &headers,
+    )
 }
-async fn cardano_logo() -> Response {
-    static_file(include_str!("../static/cardano-logo.svg"), "image/svg+xml")
+async fn cardano_logo(headers: HeaderMap) -> Response {
+    static_asset(
+        include_str!("../static/cardano-logo.svg").as_bytes(),
+        "image/svg+xml",
+        CACHE_ASSET,
+        &headers,
+    )
 }
-async fn favicon() -> Response {
-    static_file(include_str!("../static/favicon.svg"), "image/svg+xml")
+async fn favicon(headers: HeaderMap) -> Response {
+    static_asset(
+        include_str!("../static/favicon.svg").as_bytes(),
+        "image/svg+xml",
+        CACHE_ASSET,
+        &headers,
+    )
 }
-async fn no_filter_bg() -> Response {
-    static_bytes(
+async fn no_filter_bg(headers: HeaderMap) -> Response {
+    static_asset(
         include_bytes!("../static/no-filter-bg.png"),
         "image/png",
+        CACHE_IMAGE,
+        &headers,
     )
 }
 
-fn static_file(body: &'static str, content_type: &'static str) -> Response {
-    ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], body)
-        .into_response()
+fn content_etag(bytes: &[u8]) -> String {
+    let hash = blake2b_simd::Params::new()
+        .hash_length(16)
+        .hash(bytes);
+    format!("\"{}\"", hex::encode(hash.as_bytes()))
 }
 
-fn static_bytes(body: &'static [u8], content_type: &'static str) -> Response {
-    ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], body)
-        .into_response()
+/// True when `If-None-Match` lists our etag (or `*`).
+fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    let Some(raw) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let want = etag.trim_matches('"');
+    raw.split(',').any(|tag| {
+        let t = tag.trim();
+        if t == "*" {
+            return true;
+        }
+        let t = t.strip_prefix("W/").unwrap_or(t).trim_matches('"');
+        t == want
+    })
+}
+
+fn static_asset(
+    body: &'static [u8],
+    content_type: &'static str,
+    cache_control: &'static str,
+    headers: &HeaderMap,
+) -> Response {
+    let etag = content_etag(body);
+    if if_none_match(headers, &etag) {
+        let mut map = HeaderMap::new();
+        map.insert(header::ETAG, HeaderValue::from_str(&etag).expect("etag"));
+        map.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(cache_control),
+        );
+        return (StatusCode::NOT_MODIFIED, map).into_response();
+    }
+
+    let mut map = HeaderMap::new();
+    map.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    map.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
+    map.insert(header::ETAG, HeaderValue::from_str(&etag).expect("etag"));
+    (map, body).into_response()
 }
 
 async fn ws_upgrade(State(ctx): State<ServerCtx>, ws: WebSocketUpgrade) -> Response {
