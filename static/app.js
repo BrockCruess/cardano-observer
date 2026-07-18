@@ -553,8 +553,11 @@ function coneReach(start, dir, maxHops = LC_MAX_HOPS) {
  * Open order / LP cards start as pulsing Pending. When a later dex_fill or
  * dex_cancel spends that order's tx (edge in txGraph / inputTxs), flip the
  * pill to Filled (green) or Cancelled (red) on the original card.
+ *
+ * Keyed by orderTx + venue: change UTxOs from an order tx can be spent by an
+ * unrelated DEX cancel/fill. A Splash cancel must not lock a Minswap order.
  */
-const dexOrderSettlement = new Map(); // orderTxHash -> { status, dex }
+const dexOrderSettlement = new Map(); // `${orderTx}\0${dex}` -> { status, dex }
 const pendingDexSettlements = [];     // fill/cancel events waiting on graph edges
 
 function parentTxsOf(txHash) {
@@ -564,12 +567,21 @@ function parentTxsOf(txHash) {
   return [];
 }
 
+function dexSettlementKey(orderTx, dex) {
+  return `${orderTx}\0${dex || ""}`;
+}
+
 function dexSettlementStatus(orderTx, dex) {
   if (!orderTx) return null;
-  const hit = dexOrderSettlement.get(orderTx);
-  if (!hit) return null;
-  if (dex && hit.dex && hit.dex !== dex) return null;
-  return hit.status;
+  const dexStr = dex ? String(dex) : "";
+  if (dexStr) {
+    const hit = dexOrderSettlement.get(dexSettlementKey(orderTx, dexStr));
+    return hit ? hit.status : null;
+  }
+  for (const [k, hit] of dexOrderSettlement) {
+    if (k === orderTx || k.startsWith(`${orderTx}\0`)) return hit.status;
+  }
+  return null;
 }
 
 function dexStatusPillHtml(status) {
@@ -593,12 +605,23 @@ function updateDexOrderCardPill(card, status) {
   card.dataset.settlement = status;
 }
 
+function parentHasDexOrder(orderTx, dex) {
+  for (const { ev } of retentionCache.values()) {
+    if (ev.tx_hash !== orderTx) continue;
+    if (ev.kind !== "dex_order" && ev.kind !== "dex_lp") continue;
+    if (dex && ev.data?.dex && ev.data.dex !== dex) continue;
+    return true;
+  }
+  return false;
+}
+
 function markDexOrderSettled(orderTx, status, settleEv) {
   if (!orderTx || (status !== "filled" && status !== "cancelled")) return;
   const dex = settleEv?.data?.dex ? String(settleEv.data.dex) : "";
-  const prev = dexOrderSettlement.get(orderTx);
-  if (prev && prev.status !== status) return; // keep first terminal status
-  dexOrderSettlement.set(orderTx, { status, dex: dex || prev?.dex || "" });
+  const mapKey = dexSettlementKey(orderTx, dex);
+  const prev = dexOrderSettlement.get(mapKey);
+  if (prev && prev.status !== status) return; // first terminal status per venue
+  dexOrderSettlement.set(mapKey, { status, dex });
 
   for (const { ev } of retentionCache.values()) {
     if (ev.tx_hash !== orderTx) continue;
@@ -625,7 +648,14 @@ function applyDexSettlement(settleEv) {
     return;
   }
   const status = settleEv.kind === "dex_cancel" ? "cancelled" : "filled";
-  for (const orderTx of parents) {
+  const dex = settleEv?.data?.dex ? String(settleEv.data.dex) : "";
+  // When a parent already has an order on this venue, only settle those —
+  // other inputs are usually change / batcher UTxOs from unrelated txs.
+  const venueParents = dex
+    ? parents.filter((p) => parentHasDexOrder(p, dex))
+    : [];
+  const targets = venueParents.length ? venueParents : parents;
+  for (const orderTx of targets) {
     markDexOrderSettled(orderTx, status, settleEv);
   }
 }
@@ -2516,6 +2546,8 @@ function insertTipEvents(events) {
   }, FEED_ENTER_MS + 400);
 
   const stayAtTip = !isPaused();
+  // Capture before insert — tipScrollY/stick checks use pre-insert geometry.
+  const stickScroll = stayAtTip && shouldStickScrollToTip();
 
   if (reduceMotion()) {
     withEnterMode(null, () => {
@@ -2527,7 +2559,7 @@ function insertTipEvents(events) {
       }
       resortFeedBySlot();
     });
-    if (stayAtTip && settings.layout === "vertical") scrollFeedToTip("auto");
+    if (stickScroll) scrollFeedToTip("auto");
     pruneTipDomGroups();
     releaseTipAnim();
     return;
@@ -2545,7 +2577,7 @@ function insertTipEvents(events) {
     resortFeedBySlot();
   });
 
-  if (stayAtTip && settings.layout === "vertical") scrollFeedToTip("auto");
+  if (stickScroll) scrollFeedToTip("auto");
   pruneTipDomGroups();
 
   const pendingCards = [...feed.querySelectorAll(".card.enter-tip-pending")];
@@ -3143,6 +3175,31 @@ function repairBlockGroup(g) {
   }
   const host = g.querySelector(".group-events");
   if (!host) return;
+  // Children whose Transaction card never mounted (or was lost) sort above every
+  // other tx and look like block-level orphans — remount the parent.
+  if (settings.filters.transaction) {
+    const missingParents = new Set();
+    for (const card of host.querySelectorAll(":scope > .card")) {
+      if (card.dataset.kind === "block" || card.dataset.kind === "transaction") continue;
+      const pid = card.dataset.parent;
+      if (!pid) continue;
+      if (!host.querySelector(`:scope > .card[data-eid="${pid}"]`)) {
+        missingParents.add(pid);
+      }
+    }
+    for (const pid of missingParents) {
+      const row = retentionCache.get(Number(pid));
+      const parent = row?.ev?.kind === "transaction" ? row.ev : null;
+      if (!parent) continue;
+      if (!seenEventIds.has(parent.id)) {
+        sessionEvents++;
+        noteEventId(parent);
+      }
+      withEnterMode(null, () => {
+        host.appendChild(buildCard(parent));
+      });
+    }
+  }
   const visibleEvent = [...host.querySelectorAll(":scope > .card")].some(
     (c) => !c.classList.contains("enter-tip-pending") && !c.classList.contains("f-hide"),
   );
@@ -3165,12 +3222,19 @@ function repairBlockGroup(g) {
 function routeEvent(ev) {
   if (!keepDexEvent(ev)) return;
   if (ev?.id != null && seenEventIds.has(ev.id)) {
-    // Block id was recorded but the header card never landed (group eviction /
-    // ensure raced). Remount so children aren't orphaned under a spine gap.
+    // Id was recorded but the card never landed (group eviction / ensure raced).
+    // Remount so children aren't orphaned under a spine gap.
     if (ev.kind === "block" && ev.block_hash) {
       const g = groups.get(ev.block_hash);
       if (g && !g.querySelector(".card-block")) {
         withEnterMode(null, () => g.prepend(buildCard(ev)));
+        scheduleFeedResort();
+      }
+    } else if (ev.kind === "transaction" && ev.block_hash && settings.filters.transaction) {
+      const g = groups.get(ev.block_hash);
+      const host = g?.querySelector(".group-events");
+      if (host && !host.querySelector(`.card[data-eid="${ev.id}"]`)) {
+        withEnterMode(null, () => host.appendChild(buildCard(ev)));
         scheduleFeedResort();
       }
     }
@@ -3306,6 +3370,17 @@ function tipScrollY() {
 
 function scrollFeedToTip(behavior = "auto") {
   window.scrollTo({ top: tipScrollY(), behavior });
+}
+
+/**
+ * Only re-park window scroll when the feed tip is already docked under the
+ * header. At document top (filters / chrome still above the list) live inserts
+ * must not call scrollFeedToTip — that yanks the viewport down to the events.
+ */
+function shouldStickScrollToTip() {
+  if (settings.layout !== "vertical") return false;
+  const feedTop = feed.getBoundingClientRect().top;
+  return feedTop <= tipAnchorY() + 24;
 }
 
 function isPaused() {
