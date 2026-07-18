@@ -524,20 +524,26 @@ function unindexTxGraph(ev) {
   gcTxNode(h);
 }
 
+// Max directed hops for light-cone highlighting. Unbounded BFS walks through
+// consolidators/batchers and lights unrelated dApp activity (e.g. Iagon↔Indigo).
+const LC_MAX_HOPS = 2;
+
 // BFS the spend graph in one direction ("ins" = past cone, "outs" = future).
-function coneReach(start, dir) {
+function coneReach(start, dir, maxHops = LC_MAX_HOPS) {
   const out = new Set();
-  const stack = [start];
+  const queue = [[start, 0]];
   const seen = new Set([start]);
   let guard = 0;
-  while (stack.length && guard++ < 8000) {
-    const node = txGraph.get(stack.pop());
+  while (queue.length && guard++ < 8000) {
+    const [h, depth] = queue.shift();
+    if (depth >= maxHops) continue;
+    const node = txGraph.get(h);
     if (!node) continue;
     for (const nx of node[dir]) {
       if (seen.has(nx)) continue;
       seen.add(nx);
       out.add(nx);
-      stack.push(nx);
+      queue.push([nx, depth + 1]);
     }
   }
   return out;

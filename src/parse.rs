@@ -110,11 +110,14 @@ pub fn parse_block(
 
     // ── Per-transaction events ───────────────────────────────────────────
     // DEX / dApp: two-pass over the whole block so place+fill (any tx order) → one Swap.
+    // Note spend-graph hubs after each tx so same-block claim chains can omit
+    // shared batcher edges from the next tx's inputTxs.
     let mut scan_txs: Vec<(&str, &Value)> = Vec::with_capacity(txs.len());
     for (tx_index, tx) in txs.iter().enumerate() {
         let Some(tx_hash) = tx.get("id").and_then(Value::as_str) else { continue };
         cached_txs.push((tx_hash.to_string(), tx.clone()));
-        parse_tx(&b, tx, tx_hash, tx_index, network, deleg, &mut events);
+        parse_tx(&b, tx, tx_hash, tx_index, network, deleg, dapp, &mut events);
+        dapp.note_spend_graph_hubs(tx_hash, tx);
         scan_txs.push((tx_hash, tx));
     }
     for (tx_hash, hit) in dex.scan_block(&scan_txs) {
@@ -134,6 +137,7 @@ fn parse_tx(
     tx_index: usize,
     network: Network,
     deleg: &DelegationTracker,
+    dapp: &DappRegistry,
     events: &mut Vec<ChainEvent>,
 ) {
     let empty = Vec::new();
@@ -160,23 +164,7 @@ fn parse_tx(
     let mut minted: Vec<(String, String, i128)> = Vec::new();
     collect_assets(tx.get("mint"), &mut minted);
 
-    // Distinct source tx-hashes of this tx's inputs — the edges of the spend
-    // graph used by the client for light-cone highlighting. Deduped (preserving
-    // order) and capped so a fan-in-heavy tx can't bloat the payload.
-    const MAX_INPUT_TXS: usize = 30;
-    let mut input_txs: Vec<&str> = Vec::new();
-    for i in inputs {
-        let Some(id) = i.get("transaction").and_then(|t| t.get("id")).and_then(Value::as_str)
-        else {
-            continue;
-        };
-        if id != tx_hash && !input_txs.contains(&id) {
-            input_txs.push(id);
-            if input_txs.len() >= MAX_INPUT_TXS {
-                break;
-            }
-        }
-    }
+    let input_txs = collect_input_txs(tx_hash, inputs, dapp, |_, _| None);
 
     let stakes = collect_tx_stakes(tx, network);
 
@@ -684,6 +672,55 @@ pub fn stake_from_address(addr: &str) -> Option<String> {
     bech32::encode::<Bech32>(hrp, &stake_bytes).ok()
 }
 
+/// Distinct source tx-hashes for light-cone edges. Skips shared dApp hub
+/// outpoints (Iagon rewards batcher, etc.). `parent_addr` resolves a spent
+/// outpoint to its output address when available (buffered rewrite path).
+pub fn collect_input_txs(
+    tx_hash: &str,
+    inputs: &[Value],
+    dapp: &DappRegistry,
+    mut parent_addr: impl FnMut(&str, u64) -> Option<String>,
+) -> Vec<String> {
+    const MAX_INPUT_TXS: usize = 30;
+    let mut input_txs: Vec<String> = Vec::new();
+    for i in inputs {
+        let Some(id) = i
+            .get("transaction")
+            .and_then(|t| t.get("id"))
+            .and_then(Value::as_str)
+            .or_else(|| i.get("txId").and_then(Value::as_str))
+        else {
+            continue;
+        };
+        let index = i
+            .get("index")
+            .and_then(Value::as_u64)
+            .or_else(|| i.get("outputIndex").and_then(Value::as_u64));
+        if let Some(index) = index {
+            let op = format!("{id}#{index}");
+            if dapp.is_spend_graph_hub(&op) {
+                continue;
+            }
+            if let Some(addr) = parent_addr(id, index) {
+                if dapp.is_spend_graph_hub_address(&addr) {
+                    continue;
+                }
+            } else if let Some(addr) = i.get("address").and_then(Value::as_str) {
+                if dapp.is_spend_graph_hub_address(addr) {
+                    continue;
+                }
+            }
+        }
+        if id != tx_hash && !input_txs.iter().any(|s| s == id) {
+            input_txs.push(id.to_string());
+            if input_txs.len() >= MAX_INPUT_TXS {
+                break;
+            }
+        }
+    }
+    input_txs
+}
+
 /// Best-effort **user** actor for a tx: largest key-payment output, preferring
 /// an embedded stake address over the payment address. Skips script outs
 /// (DEX pools, dApp contracts, order scripts) so we don't label the venue.
@@ -1031,5 +1068,147 @@ mod tests {
         assert_eq!(input_txs, vec!["txA", "txC"]);
         // Block event is emitted first so the publish loop can parent txs to it.
         assert_eq!(parsed.events.first().map(|e| e.kind.as_str()), Some("block"));
+    }
+
+    /// Unrelated Iagon claimers only share the rewards batcher UTxO — that hub
+    /// edge must not appear in inputTxs. Same-user repeats still link via change.
+    #[test]
+    fn iagon_batcher_hub_omitted_from_input_txs_user_change_kept() {
+        const BATCHER: &str = "addr1v8ckrqqrj4u34sxt45vdu8s8nqq3lm3lc8s7su5nyzaq9tcqy2n8j";
+        let user_a = "addr1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let user_b = "addr1qbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let claim_a = json!({
+            "id": "claimA",
+            "inputs": [{ "transaction": { "id": "seed" }, "index": 0 }],
+            "outputs": [
+                {
+                    "address": BATCHER,
+                    "value": {
+                        "ada": { "lovelace": 3_963_225_276u64 },
+                        "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114": { "494147": 100_000u64 }
+                    }
+                },
+                {
+                    "address": user_a,
+                    "value": { "ada": { "lovelace": 50_000_000u64 } }
+                }
+            ],
+            "fee": { "ada": { "lovelace": 170_000 } },
+        });
+
+        fn input_txs(parsed: &ParsedBlock, hash: &str) -> Vec<String> {
+            parsed
+                .events
+                .iter()
+                .find(|e| e.kind == "transaction" && e.tx_hash.as_deref() == Some(hash))
+                .expect("tx event")
+                .data["inputTxs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        }
+
+        // Path 1: different user spends only the batcher from claimA.
+        let dapp = DappRegistry::new();
+        let block_a = json!({
+            "id": "blockA", "slot": 100, "height": 42,
+            "transactions": [claim_a.clone()],
+        });
+        parse_block(
+            &block_a,
+            1_700_000_000,
+            Network::Mainnet,
+            &DexRegistry::new(),
+            &dapp,
+            &DelegationTracker::new(),
+        )
+        .unwrap();
+
+        let claim_b = json!({
+            "id": "claimB",
+            "inputs": [
+                { "transaction": { "id": "claimA" }, "index": 0 },
+                { "transaction": { "id": "userBwallet" }, "index": 0 },
+            ],
+            "outputs": [
+                {
+                    "address": BATCHER,
+                    "value": {
+                        "ada": { "lovelace": 3_963_225_276u64 },
+                        "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114": { "494147": 90_000u64 }
+                    }
+                },
+                {
+                    "address": user_b,
+                    "value": {
+                        "ada": { "lovelace": 2_000_000 },
+                        "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114": { "494147": 10_000u64 }
+                    }
+                }
+            ],
+            "fee": { "ada": { "lovelace": 170_000 } },
+        });
+        let parsed_b = parse_block(
+            &json!({
+                "id": "blockB", "slot": 101, "height": 43,
+                "transactions": [claim_b],
+            }),
+            1_700_000_001,
+            Network::Mainnet,
+            &DexRegistry::new(),
+            &dapp,
+            &DelegationTracker::new(),
+        )
+        .unwrap();
+        assert_eq!(input_txs(&parsed_b, "claimB"), vec!["userBwallet".to_string()]);
+
+        // Path 2: same user spends batcher + own change — change keeps the edge.
+        let dapp2 = DappRegistry::new();
+        parse_block(
+            &block_a,
+            1_700_000_000,
+            Network::Mainnet,
+            &DexRegistry::new(),
+            &dapp2,
+            &DelegationTracker::new(),
+        )
+        .unwrap();
+        let claim_a2 = json!({
+            "id": "claimA2",
+            "inputs": [
+                { "transaction": { "id": "claimA" }, "index": 0 },
+                { "transaction": { "id": "claimA" }, "index": 1 },
+            ],
+            "outputs": [
+                {
+                    "address": BATCHER,
+                    "value": {
+                        "ada": { "lovelace": 3_963_225_276u64 },
+                        "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114": { "494147": 80_000u64 }
+                    }
+                },
+                {
+                    "address": user_a,
+                    "value": { "ada": { "lovelace": 48_000_000u64 } }
+                }
+            ],
+            "fee": { "ada": { "lovelace": 170_000 } },
+        });
+        let parsed_a2 = parse_block(
+            &json!({
+                "id": "blockA2", "slot": 102, "height": 44,
+                "transactions": [claim_a2],
+            }),
+            1_700_000_002,
+            Network::Mainnet,
+            &DexRegistry::new(),
+            &dapp2,
+            &DelegationTracker::new(),
+        )
+        .unwrap();
+        assert_eq!(input_txs(&parsed_a2, "claimA2"), vec!["claimA".to_string()]);
     }
 }

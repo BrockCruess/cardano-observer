@@ -157,6 +157,8 @@ async fn main() -> anyhow::Result<()> {
         let dapp = Arc::new(dapp::DappRegistry::with_restored_txs(
             state.cached_tx_entries(),
         ));
+        // Drop stale shared-script edges from JSONL so light-cone matches hub rules.
+        state.rewrite_buffered_input_txs(&dapp);
         if config.network == config::Network::Mainnet {
             tokio::spawn(dex.clone().refresh_vyfi_loop());
             tokio::spawn(dex.clone().refresh_minswap_pools_loop());

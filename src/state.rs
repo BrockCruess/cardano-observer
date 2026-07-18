@@ -1,8 +1,10 @@
 //! Shared application state: event ring buffer, tx detail cache, broadcast
 //! channel to browsers, orphan/slot-battle tracking, and chain tip stats.
 
+use crate::dapp::DappRegistry;
 use crate::enrich::Enricher;
 use crate::model::{BlockRef, ChainEvent, TimeModel, Tip};
+use crate::parse;
 use crate::persist::Persister;
 use crate::trending::{KeywordMeta, TrendTerm, Trending};
 use serde_json::{json, Value};
@@ -255,6 +257,56 @@ impl AppState {
         let mut buf = self.events.lock().unwrap();
         for ev in buf.iter_mut() {
             enricher.stamp_event_dreps(ev);
+        }
+    }
+
+    /// Recompute `inputTxs` on buffered transaction events using cached tx
+    /// bodies + current spend-graph hub rules (Iagon batcher, …). Historical
+    /// JSONL edges predate hub filtering; without this, light-cone keeps the
+    /// old all-claimers-linked graph until each tx ages out of retention.
+    pub fn rewrite_buffered_input_txs(&self, dapp: &DappRegistry) {
+        let cache = self.txs.lock().unwrap();
+        let mut rewritten = 0u64;
+        let mut buf = self.events.lock().unwrap();
+        for ev in buf.iter_mut() {
+            if ev.kind != "transaction" {
+                continue;
+            }
+            let Some(hash) = ev.tx_hash.as_deref() else { continue };
+            let Some(entry) = cache.map.get(hash) else { continue };
+            let Some(tx) = entry.get("tx") else { continue };
+            let empty = Vec::new();
+            let inputs = tx.get("inputs").and_then(Value::as_array).unwrap_or(&empty);
+            let parent_addr = |src: &str, index: u64| -> Option<String> {
+                let parent = cache.map.get(src)?;
+                let ptx = parent.get("tx")?;
+                let outs = ptx.get("outputs")?.as_array()?;
+                outs.get(index as usize)?
+                    .get("address")
+                    .and_then(Value::as_str)
+                    .map(|s| s.to_string())
+            };
+            let next = parse::collect_input_txs(hash, inputs, dapp, parent_addr);
+            let prev = ev
+                .data
+                .get("inputTxs")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if next != prev {
+                if let Some(obj) = ev.data.as_object_mut() {
+                    obj.insert("inputTxs".into(), json!(next));
+                    rewritten += 1;
+                }
+            }
+        }
+        if rewritten > 0 {
+            tracing::info!("rewrote inputTxs on {rewritten} buffered transaction events (spend-graph hubs)");
         }
     }
 

@@ -13,6 +13,11 @@
 //! - Position Listing — market batcher receives IAG (with batcher token)
 //! - Position Sale — market batcher sends IAG to one wallet and ADA to another
 //! - Subscription — ADA payment to the subscription address
+//!
+//! Spend-graph hubs: the shared rewards/batcher address is rewritten on every
+//! earnings claim. Including those inputs in `inputTxs` would light-cone-link
+//! unrelated claimers. Only user-owned spends (change, claim→delegation, etc.)
+//! should create edges — see [`Scanner::is_spend_graph_hub`].
 
 use super::DappHit;
 use crate::dex::payment_credential;
@@ -184,6 +189,8 @@ impl TrackedSet {
 pub struct Scanner {
     roles: HashMap<String, Role>,
     tracked: Mutex<TrackedSet>,
+    /// Outpoints at the shared rewards/batcher address — omitted from light-cone edges.
+    graph_hubs: Mutex<HashSet<String>>,
 }
 
 impl Scanner {
@@ -206,6 +213,54 @@ impl Scanner {
         Self {
             roles,
             tracked: Mutex::new(TrackedSet::new()),
+            graph_hubs: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// True when this outpoint is the shared rewards/batcher UTxO.
+    ///
+    /// Node/delegation script UTxOs are per-position (carry a unique NFT) and
+    /// are *not* hubs — claim→delegation / withdrawal chains stay linked.
+    pub fn is_spend_graph_hub(&self, outpoint: &str) -> bool {
+        self.graph_hubs
+            .lock()
+            .map(|h| h.contains(outpoint))
+            .unwrap_or(false)
+    }
+
+    /// Address-based hub check (for rewriting historical `inputTxs` from cached
+    /// parent outputs when the live outpoint set was not yet warmed).
+    pub fn is_spend_graph_hub_address(&self, addr: &str) -> bool {
+        self.role_for_addr(addr) == Some(Role::Batcher)
+    }
+
+    /// Register / forget batcher hub outpoints for light-cone filtering.
+    /// Call once per tx in block order, before the next tx's `inputTxs` are built.
+    pub fn note_spend_graph_hubs(&self, tx_hash: &str, tx: &Value) {
+        let empty = Vec::new();
+        let inputs = tx.get("inputs").and_then(Value::as_array).unwrap_or(&empty);
+        let outputs = tx.get("outputs").and_then(Value::as_array).unwrap_or(&empty);
+        let Ok(mut hubs) = self.graph_hubs.lock() else {
+            return;
+        };
+        for input in inputs {
+            if let Some(op) = input_outpoint(input) {
+                hubs.remove(&op);
+            }
+        }
+        for (index, o) in outputs.iter().enumerate() {
+            let addr = o.get("address").and_then(Value::as_str).unwrap_or("");
+            if self.role_for_addr(addr) == Some(Role::Batcher) {
+                hubs.insert(format!("{tx_hash}#{index}"));
+            }
+        }
+        // Bound memory roughly with the script tracker.
+        while hubs.len() > TRACKER_CAP {
+            if let Some(old) = hubs.iter().next().cloned() {
+                hubs.remove(&old);
+            } else {
+                break;
+            }
         }
     }
 
@@ -248,6 +303,7 @@ impl Scanner {
         ordered.sort_by_key(|(slot, hash, _)| (*slot, *hash));
         let n = ordered.len();
         for (_, hash, tx) in ordered {
+            self.note_spend_graph_hubs(hash, tx);
             let _ = self.scan_tx_inner(hash, tx, false);
         }
         tracing::info!("iagon: warmed script UTxO tracker from {n} cached txs");
@@ -968,5 +1024,55 @@ mod tests {
         let hits = s.scan_block(&[("claim", &claim)]);
         assert_eq!(hits[0].1.data["eventType"], "earnings_claim");
         assert_eq!(hits[0].1.data["iag"], 168_652_222u64);
+    }
+
+    #[test]
+    fn batcher_outputs_are_spend_graph_hubs_node_are_not() {
+        let s = Scanner::new();
+        let tx = json!({
+            "outputs": [
+                {
+                    "address": BATCHER_ADDR,
+                    "value": {
+                        "ada": { "lovelace": 3_963_225_276u64 },
+                        "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114": { "494147": 100u64 }
+                    }
+                },
+                {
+                    "address": NODE_ADDR,
+                    "value": {
+                        "ada": { "lovelace": 2_000_000 },
+                        "ac35ee89c26b1e582771ed05af54b67fd7717bbaebd7f722fbf430d6": { "aabb": 1 },
+                        "5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114": { "494147": 50u64 }
+                    }
+                }
+            ]
+        });
+        s.note_spend_graph_hubs("h", &tx);
+        assert!(s.is_spend_graph_hub("h#0"));
+        assert!(!s.is_spend_graph_hub("h#1"));
+    }
+
+    #[test]
+    fn spending_batcher_clears_hub_outpoint() {
+        let s = Scanner::new();
+        let fund = json!({
+            "outputs": [{
+                "address": BATCHER_ADDR,
+                "value": { "ada": { "lovelace": 5_000_000u64 } }
+            }]
+        });
+        s.note_spend_graph_hubs("fund", &fund);
+        assert!(s.is_spend_graph_hub("fund#0"));
+        let spend = json!({
+            "inputs": [{ "transaction": { "id": "fund" }, "index": 0 }],
+            "outputs": [{
+                "address": BATCHER_ADDR,
+                "value": { "ada": { "lovelace": 4_000_000u64 } }
+            }]
+        });
+        s.note_spend_graph_hubs("spend", &spend);
+        assert!(!s.is_spend_graph_hub("fund#0"));
+        assert!(s.is_spend_graph_hub("spend#0"));
     }
 }

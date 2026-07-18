@@ -49,6 +49,22 @@ impl DappRegistry {
         hits.extend(self.fluidtokens.scan_block(txs));
         hits
     }
+
+    /// Shared-script outpoints that must not create light-cone spend edges
+    /// (e.g. Iagon rewards batcher rewritten on every claim).
+    pub fn is_spend_graph_hub(&self, outpoint: &str) -> bool {
+        self.iagon.is_spend_graph_hub(outpoint)
+    }
+
+    /// Address form of [`Self::is_spend_graph_hub`] for cached parent outputs.
+    pub fn is_spend_graph_hub_address(&self, addr: &str) -> bool {
+        self.iagon.is_spend_graph_hub_address(addr)
+    }
+
+    /// Update hub outpoints after a tx is parsed (block order).
+    pub fn note_spend_graph_hubs(&self, tx_hash: &str, tx: &Value) {
+        self.iagon.note_spend_graph_hubs(tx_hash, tx);
+    }
 }
 
 impl Default for DappRegistry {
