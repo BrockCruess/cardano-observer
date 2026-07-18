@@ -4,6 +4,7 @@
 //! their hits into `category: "dapp"` events; `data.dapp` names the app.
 
 mod iagon;
+mod indigo;
 
 use crate::model::ChainEvent;
 use serde_json::Value;
@@ -17,12 +18,14 @@ pub struct DappHit {
 /// Registry of dApp scanners consulted on every block.
 pub struct DappRegistry {
     iagon: iagon::Scanner,
+    indigo: indigo::Scanner,
 }
 
 impl DappRegistry {
     pub fn new() -> Self {
         Self {
             iagon: iagon::Scanner::new(),
+            indigo: indigo::Scanner::new(),
         }
     }
 
@@ -31,12 +34,15 @@ impl DappRegistry {
     pub fn with_restored_txs(entries: Vec<(String, Value)>) -> Self {
         let reg = Self::new();
         reg.iagon.warm_from_tx_entries(&entries);
+        reg.indigo.warm_from_tx_entries(&entries);
         reg
     }
 
     /// Run every registered dApp scanner over the block's transactions.
     pub fn scan_block(&self, txs: &[(&str, &Value)]) -> Vec<(String, DappHit)> {
-        self.iagon.scan_block(txs)
+        let mut hits = self.iagon.scan_block(txs);
+        hits.extend(self.indigo.scan_block(txs));
+        hits
     }
 }
 
