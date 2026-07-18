@@ -1613,10 +1613,15 @@ function cardBody(ev) {
       const nodeId = d.nodeId
         ? `node id <span class="hash" title="Node ID">${esc(d.nodeId)}</span>`
         : "";
+      // Indigo: one stability pool per iAsset — ticker is the pool id.
+      const iassetPool = d.iasset
+        ? `<span class="hash" title="Stability pool">${esc(d.iasset)} pool</span>`
+        : "";
       const ada = d.ada ? `<b>${fmtAda(d.ada)}</b>` : "";
       return sub([
         `<span class="badge contract">${esc(d.dapp || "dApp")}</span>`,
         nodeId,
+        iassetPool,
         iag,
         indy,
         fldt,
@@ -2528,9 +2533,28 @@ function releaseTipAnim() {
   insertTipEvents(next);
 }
 
+/** Tip cards that will actually show under the current filters/search. */
+function tipCardIsVisible(card) {
+  if (!card || !card.isConnected) return false;
+  if (card.classList.contains("f-hide")) return false;
+  if (card.closest(".block-group.f-hide")) return false;
+  // Category chips use a stylesheet rule (display:none), not .f-hide.
+  if (!settings.filters[card.dataset.category]) return false;
+  if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return false;
+  if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) return false;
+  if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) return false;
+  const q = $("search").value.trim().toLowerCase();
+  if (q && !(card.dataset.search || "").includes(q)) return false;
+  return true;
+}
+
 /**
  * Tip insert: 1) mount new cards invisible, 2) slide existing groups down,
  * 3) fade new cards in. History uses fade-only via insertHistEvents.
+ *
+ * Off-filter / off-search tip events still mount (for retention) but must not
+ * FLIP-slide or re-park scroll — that wobbles a sparse filtered list when
+ * unrelated live traffic arrives.
  */
 function insertTipEvents(events) {
   if (!events.length) return;
@@ -2560,7 +2584,15 @@ function insertTipEvents(events) {
       }
       resortFeedBySlot();
     });
-    if (stickScroll) scrollFeedToTip("auto");
+    // Hide off-filter cards before any scroll/layout stick.
+    applyFilters();
+    const showed = [...feed.querySelectorAll(".card.enter-tip-pending")].some(tipCardIsVisible);
+    for (const card of feed.querySelectorAll(".card.enter-tip-pending")) {
+      if (!tipCardIsVisible(card)) {
+        card.classList.remove("enter-tip-pending", "enter-tip", "enter-hist");
+      }
+    }
+    if (stickScroll && showed) scrollFeedToTip("auto");
     pruneTipDomGroups();
     releaseTipAnim();
     return;
@@ -2578,17 +2610,36 @@ function insertTipEvents(events) {
     resortFeedBySlot();
   });
 
+  // Apply filters synchronously so off-filter tip groups collapse before FLIP
+  // measures — otherwise visible groups slide down, then jump back up.
+  applyFilters();
+
+  const pendingCards = [...feed.querySelectorAll(".card.enter-tip-pending")];
+  const visiblePending = pendingCards.filter(tipCardIsVisible);
+  for (const card of pendingCards) {
+    if (!tipCardIsVisible(card)) {
+      card.classList.remove("enter-tip-pending", "enter-tip", "enter-hist");
+    }
+  }
+
+  if (!visiblePending.length) {
+    // Nothing new on the active filter — keep layout/scroll still.
+    pruneTipDomGroups();
+    scheduleHierarchyPipes();
+    releaseTipAnim();
+    return;
+  }
+
   if (stickScroll) scrollFeedToTip("auto");
   pruneTipDomGroups();
 
-  const pendingCards = [...feed.querySelectorAll(".card.enter-tip-pending")];
   // Invert before the browser paints the jumped layout.
   const movers = applyFlipInvert(first);
   // Flush so the inverted frame is committed (still with transition:none).
   void feed.offsetWidth;
 
   const afterSlide = () => {
-    fadeInTipCards(pendingCards);
+    fadeInTipCards(visiblePending);
     scheduleHierarchyPipes();
     // Free the lock after fade so the next batch measures settled layout.
     setTimeout(releaseTipAnim, FEED_ENTER_MS + 50);

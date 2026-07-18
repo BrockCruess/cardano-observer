@@ -524,28 +524,18 @@ fn classify(
             iasset: sp_deposit_amount(sp_flows),
             ..ValueSummary::default()
         };
-        if let Some(s) = sp_out {
-            sum.iasset_ticker.clone_from(&s.iasset_ticker);
-            sum.iasset_name_hex.clone_from(&s.iasset_name_hex);
-        }
-        if sum.iasset_ticker.is_none() {
-            sum.iasset_ticker.clone_from(&mint.iasset_ticker);
-            sum.iasset_name_hex.clone_from(&mint.iasset_name_hex);
-        }
+        fill_sp_iasset_meta(&mut sum, sp_out, mint, tx);
         pending.push((EventType::CreateSpAccount, sum));
     } else if mint.sp_account_delta < 0 {
-        pending.push((
-            EventType::CloseSpAccount,
-            ValueSummary {
-                iasset: spent_sp
-                    .sp_other_iasset
-                    .max(spent_sp.iasset)
-                    .max(mint.iasset),
-                iasset_ticker: mint.iasset_ticker.clone(),
-                iasset_name_hex: mint.iasset_name_hex.clone(),
-                ..ValueSummary::default()
-            },
-        ));
+        // Closing spends the shared pool UTxO + the account UTxO. Account
+        // positions usually hold no iAsset (it sits in the pool), so never use
+        // total spent SP iAsset — that is the full pool balance.
+        let mut sum = ValueSummary {
+            iasset: sp_close_amount(sp_flows, spent_sp, tx),
+            ..ValueSummary::default()
+        };
+        fill_sp_iasset_meta(&mut sum, sp_out, mint, tx);
+        pending.push((EventType::CloseSpAccount, sum));
     }
 
     if mint.staking_pos_delta > 0 {
@@ -646,10 +636,7 @@ fn classify(
                 iasset: net.unsigned_abs() as u64,
                 ..ValueSummary::default()
             };
-            if let Some(s) = sp_out {
-                sum.iasset_ticker.clone_from(&s.iasset_ticker);
-                sum.iasset_name_hex.clone_from(&s.iasset_name_hex);
-            }
+            fill_sp_iasset_meta(&mut sum, sp_out, mint, tx);
             pending.push((EventType::AdjustSpAccount, sum));
         }
     }
@@ -733,6 +720,79 @@ fn sp_deposit_amount(f: SpFlows) -> u64 {
     f.account_out
 }
 
+/// Withdrawal size when closing a stability-pool account.
+///
+/// Prefer the net decrease on the shared pool UTxO (account iAsset lives there).
+/// Fall back to spent non-pool SP iAsset, then iAsset paid to non-script outputs.
+fn sp_close_amount(f: SpFlows, spent: SpentAmounts, tx: &Value) -> u64 {
+    if f.pool_spent > 0 {
+        return f.pool_spent.saturating_sub(f.pool_out);
+    }
+    if spent.sp_other_iasset > 0 {
+        return spent.sp_other_iasset;
+    }
+    if f.other_spent > 0 {
+        return f.other_spent;
+    }
+    iasset_paid_to_user(tx)
+}
+
+/// iAsset on outputs that are not at the stability-pool script (user payout).
+fn iasset_paid_to_user(tx: &Value) -> u64 {
+    let empty = Vec::new();
+    let outputs = tx.get("outputs").and_then(Value::as_array).unwrap_or(&empty);
+    let mut total = 0u64;
+    for o in outputs {
+        let addr = o.get("address").and_then(Value::as_str).unwrap_or("");
+        if payment_credential(addr).as_deref() == Some(STABILITY_POOL_HASH)
+            || addr == STABILITY_POOL_HASH
+        {
+            continue;
+        }
+        let sum = summarize_value(o.get("value"));
+        total = total.saturating_add(sum.iasset);
+    }
+    total
+}
+
+/// Resolve which iAsset pool an SP event belongs to (iUSD / iBTC / …).
+///
+/// Indigo has one stability pool per iAsset; there is no separate pool-id NFT
+/// (`SP_ACCOUNT` / `STABILITY_POOL` names are fixed). The ticker *is* the pool id.
+fn fill_sp_iasset_meta(
+    sum: &mut ValueSummary,
+    sp_out: Option<&ValueSummary>,
+    mint: &ValueSummary,
+    tx: &Value,
+) {
+    if let Some(s) = sp_out {
+        if sum.iasset_ticker.is_none() {
+            sum.iasset_ticker.clone_from(&s.iasset_ticker);
+            sum.iasset_name_hex.clone_from(&s.iasset_name_hex);
+        }
+    }
+    if sum.iasset_ticker.is_none() {
+        sum.iasset_ticker.clone_from(&mint.iasset_ticker);
+        sum.iasset_name_hex.clone_from(&mint.iasset_name_hex);
+    }
+    if sum.iasset_ticker.is_none() {
+        fill_iasset_meta(sum, tx);
+    }
+    if sum.iasset_ticker.is_none() {
+        // Scan output values (close burns only SP_ACCOUNT; iAsset sits on the pool).
+        let empty = Vec::new();
+        let outputs = tx.get("outputs").and_then(Value::as_array).unwrap_or(&empty);
+        for o in outputs {
+            let s = summarize_value(o.get("value"));
+            if s.iasset_ticker.is_some() {
+                sum.iasset_ticker = s.iasset_ticker;
+                sum.iasset_name_hex = s.iasset_name_hex;
+                break;
+            }
+        }
+    }
+}
+
 fn signed_iasset_mint(tx: &Value) -> i128 {
     let Some(v) = tx.get("mint").and_then(|m| m.get(IASSET_POLICY)) else {
         return 0;
@@ -801,10 +861,13 @@ fn hit_for(et: EventType, sum: &ValueSummary, actor: Option<String>) -> DappHit 
         );
     }
 
+    // Always surface which SP / iAsset this event belongs to when known
+    // (one pool per iAsset; the ticker is the pool identifier).
+    if let Some(ticker) = &sum.iasset_ticker {
+        obj.insert("iasset".into(), json!(ticker));
+    }
+
     if sum.iasset > 0 {
-        if let Some(ticker) = &sum.iasset_ticker {
-            obj.insert("iasset".into(), json!(ticker));
-        }
         if let Some(name_hex) = &sum.iasset_name_hex {
             let ticker = sum.iasset_ticker.clone().unwrap_or_else(|| "iAsset".into());
             obj.insert(
@@ -1101,6 +1164,56 @@ mod tests {
         let hits = s.scan_block(&[("blind", &tx)]);
         assert_eq!(types(&hits), vec!["create_sp_account"]);
         assert!(hits[0].1.data.get("assets").is_none());
+    }
+
+    #[test]
+    fn sp_close_uses_pool_net_and_iasset_ticker() {
+        // Mirrors 764988fa…: burn SP_ACCOUNT while rewriting the iBTC pool.
+        // Must report withdrawn net (not full pool) and label the iBTC pool.
+        let s = Scanner::new();
+        let sp = STABILITY_POOL_HASH;
+        let fund_pool = json!({
+            "outputs": [{
+                "address": sp,
+                "value": {
+                    "ada": { "lovelace": 600_000_000_000u64 },
+                    SP_TOKEN_POLICY: { "53544142494c4954595f504f4f4c": 1 },
+                    IASSET_POLICY: { "69425443": 3_757_309u64 }
+                }
+            }]
+        });
+        let _ = s.scan_block(&[("fund_ibtc", &fund_pool)]);
+
+        let close = json!({
+            "mint": {
+                SP_ACCOUNT_POLICY: { SP_ACCOUNT_NAME: -1 }
+            },
+            "inputs": [
+                { "transaction": { "id": "fund_ibtc" }, "index": 0 },
+                { "transaction": { "id": "acct" }, "index": 0 }
+            ],
+            "outputs": [
+                {
+                    "address": sp,
+                    "value": {
+                        "ada": { "lovelace": 600_000_000_000u64 },
+                        SP_TOKEN_POLICY: { "53544142494c4954595f504f4f4c": 1 },
+                        IASSET_POLICY: { "69425443": 3_754_106u64 }
+                    }
+                },
+                {
+                    "address": "addr1q8yaqrgnhgqvz6gnw42y5szh2vtmf2m64pr0e64e5tu9pd6xadtk57euser000000000000000000000000000000000000000qwerty",
+                    "value": {
+                        "ada": { "lovelace": 2_316_616u64 },
+                        IASSET_POLICY: { "69425443": 3_203u64 }
+                    }
+                }
+            ]
+        });
+        let hits = s.scan_block(&[("close", &close)]);
+        assert_eq!(types(&hits), vec!["close_sp_account"]);
+        assert_eq!(hits[0].1.data["iasset"], "iBTC");
+        assert_eq!(hits[0].1.data["assets"]["items"][0]["qty"], "3203");
     }
 
     #[test]

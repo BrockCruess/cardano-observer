@@ -53,13 +53,15 @@ impl EventType {
 
     fn title(self) -> &'static str {
         match self {
-            Self::CreatePool => "Create Pool - Surf",
-            Self::ClosePool => "Close Pool - Surf",
-            Self::Supply => "Supply - Surf",
-            Self::Withdraw => "Withdraw - Surf",
-            Self::Borrow => "Borrow - Surf",
+            Self::CreatePool => "Create Lending Pool - Surf",
+            Self::ClosePool => "Close Lending Pool - Surf",
+            // LPs supply the pool’s lendable asset (mint fTokens); not stake pools.
+            Self::Supply => "Supply Liquidity - Surf",
+            Self::Withdraw => "Withdraw Liquidity - Surf",
+            // Surf docs: borrow opens a loan / “Borrow Position”.
+            Self::Borrow => "Open Loan - Surf",
             // Vault-auth burn covers full repay and liquidation.
-            Self::Repay => "Repay - Surf",
+            Self::Repay => "Repay Loan - Surf",
         }
     }
 }
@@ -527,6 +529,12 @@ fn hit_for(et: EventType, tx: &Value, pool_net: &PoolNet) -> DappHit {
                 let (ada, assets) = pool_net.positive_side();
                 attach_amounts(obj, ada, &assets);
             }
+            // Collateral returned to the user when the vault is closed.
+            let collateral = returned_collateral_out(tx);
+            if !collateral.is_empty() {
+                let ptrs: Vec<&(String, String, i128)> = collateral.iter().collect();
+                obj.insert("collateral".into(), crate::parse::asset_list(&ptrs));
+            }
         }
         EventType::CreatePool | EventType::ClosePool => {}
     }
@@ -556,11 +564,28 @@ fn attach_amounts(
 
 /// Native assets on newly created vault outputs (excludes auth / pool NFTs).
 fn vault_collateral_out(tx: &Value) -> Vec<(String, String, i128)> {
+    collect_non_pool_native(tx, |o| value_has_named_asset(o.get("value"), VAULT_AT), false)
+}
+
+/// Collateral returned on repay / liquidate (vault burned; assets leave to user).
+fn returned_collateral_out(tx: &Value) -> Vec<(String, String, i128)> {
+    // Skip 1-qty fee / ref NFTs that often ride repay txs.
+    collect_non_pool_native(tx, |_| true, true)
+}
+
+fn collect_non_pool_native(
+    tx: &Value,
+    output_ok: impl Fn(&Value) -> bool,
+    skip_unit_qty: bool,
+) -> Vec<(String, String, i128)> {
     let empty = Vec::new();
     let outputs = tx.get("outputs").and_then(Value::as_array).unwrap_or(&empty);
     let mut out = Vec::new();
     for o in outputs {
-        if !value_has_named_asset(o.get("value"), VAULT_AT) {
+        if value_has_named_asset(o.get("value"), POOL_NFT) {
+            continue;
+        }
+        if !output_ok(o) {
             continue;
         }
         let Some(obj) = o.get("value").and_then(Value::as_object) else {
@@ -576,12 +601,14 @@ fn vault_collateral_out(tx: &Value) -> Vec<(String, String, i128)> {
                     continue;
                 }
                 let q = i128::from(qty.as_i64().unwrap_or(0).unsigned_abs() as i64);
-                if q > 0 {
-                    out.push((policy.clone(), name.clone(), q));
+                if q == 0 || (skip_unit_qty && q == 1) {
+                    continue;
                 }
+                out.push((policy.clone(), name.clone(), q));
             }
         }
     }
+    out.sort_by(|a, b| b.2.cmp(&a.2));
     out.truncate(8);
     out
 }
@@ -655,6 +682,7 @@ mod tests {
         assert_eq!(types(&hits), vec!["borrow"]);
         // Net borrowed = 10k ADA, not the remaining 90k pool balance.
         assert_eq!(hits[0].1.data["ada"], 10_000_000_000u64);
+        assert_eq!(hits[0].1.title, "Open Loan - Surf");
         assert!(hits[0].1.data.get("collateral").is_some());
     }
 
@@ -755,17 +783,28 @@ mod tests {
         let tx = json!({
             "inputs": [{ "transaction": { "id": "prior" }, "index": 0 }],
             "mint": { POL_A: { VAULT_AT: -1 } },
-            "outputs": [{
-                "address": "addr1xpool",
-                "value": {
-                    "ada": { "lovelace": 82_000_000_000u64 },
-                    POL_B: { POOL_NFT: 1 }
+            "outputs": [
+                {
+                    "address": "addr1xpool",
+                    "value": {
+                        "ada": { "lovelace": 82_000_000_000u64 },
+                        POL_B: { POOL_NFT: 1 }
+                    }
+                },
+                {
+                    "address": "addr1quser",
+                    "value": {
+                        "ada": { "lovelace": 3_000_000u64 },
+                        POL_C: { "464c4f57": 6_399_979_844u64 }
+                    }
                 }
-            }]
+            ]
         });
         let hits = s.scan_block(&[("r", &tx)]);
         assert_eq!(types(&hits), vec!["repay"]);
         assert_eq!(hits[0].1.data["ada"], 2_000_000_000u64);
+        assert_eq!(hits[0].1.title, "Repay Loan - Surf");
+        assert!(hits[0].1.data.get("collateral").is_some());
     }
 
     #[test]

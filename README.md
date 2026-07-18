@@ -60,7 +60,8 @@ forks, orphaned blocks and slot battles.
     loans (repay, liquidate, recast, collateral changes), dutch auctions,
     Aquarium sponsored-fee tanks, $FLDT staking, and legacy P2P lending.
   - [Surf](https://docs.surflending.org/) — open-source pooled lending
-    (supply / withdraw, borrow / repay, pool create / close). Validators are
+    (supply / withdraw liquidity, open / repay loan, lending-pool create /
+    close). Validators are
     parameterized per market; detection keys off fixed asset names
     (`POOL_NFT`, `VAULT_AT`) from the [Flow Lending contracts](https://github.com/flow-lending/flow-lending-smart-contracts).
     Amounts are **net pool deltas** from a tracked prior pool UTxO (never the
