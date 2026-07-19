@@ -121,9 +121,16 @@ pub fn parse_block(
         scan_txs.push((tx_hash, tx));
     }
     for (tx_hash, hit) in dex.scan_block(&scan_txs) {
+        // DEX/dApp cards are user actions — never publish without who did it.
+        if !data_has_actor(&hit.data) {
+            continue;
+        }
         events.push(crate::dex::hit_to_event(hit, slot, height, &hash, &tx_hash, timestamp));
     }
     for (tx_hash, hit) in dapp.scan_block(&scan_txs) {
+        if !data_has_actor(&hit.data) {
+            continue;
+        }
         events.push(crate::dapp::hit_to_event(hit, slot, height, &hash, &tx_hash, timestamp));
     }
 
@@ -827,6 +834,23 @@ pub fn attach_actor(data: &mut serde_json::Map<String, Value>, actor: Option<&st
     }
 }
 
+/// True when event `data` names who performed the action (stake preferred).
+pub fn data_has_actor(data: &Value) -> bool {
+    let Some(obj) = data.as_object() else {
+        return false;
+    };
+    for key in ["stake", "address", "handle"] {
+        if obj
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 const MAX_TX_STAKES: usize = 24;
 
 /// Unique stake addresses involved in a tx (order preserved): outputs, any
@@ -998,6 +1022,15 @@ mod tests {
         assert_eq!(stakes, vec![stake.clone(), other]);
         // Same stake from output + cert is deduped; order is first-seen.
         assert_eq!(stakes[0], stake);
+    }
+
+    #[test]
+    fn data_has_actor_requires_nonempty_field() {
+        assert!(!data_has_actor(&json!({})));
+        assert!(!data_has_actor(&json!({ "stake": "" })));
+        assert!(data_has_actor(&json!({ "stake": "stake1u…" })));
+        assert!(data_has_actor(&json!({ "address": "addr1v…" })));
+        assert!(data_has_actor(&json!({ "handle": "ada" })));
     }
 
     #[test]

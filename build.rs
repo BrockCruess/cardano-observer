@@ -23,6 +23,7 @@ fn main() {
             "indigo.png",
             "fluidtokens.png",
             "liqwid.png",
+            "optim.svg",
             "strike.png",
             "surf.png",
             "wayup.svg",

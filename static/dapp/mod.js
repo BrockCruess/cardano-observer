@@ -15,6 +15,7 @@ export const DAPP_APPS = [
   "Indigo Protocol",
   "FluidTokens",
   "Liqwid",
+  "Optim Finance",
   "Strike",
   "Surf",
   "Wayup",
@@ -24,7 +25,7 @@ export const DAPP_APPS = [
  * Brand marks. `badge` logos are circular plates — we paint `plate` on the
  * icon frame so the brand color fills the rounded square behind the
  * unchanged logo artwork. `?v=` busts long-lived browser image caches.
- * @type {Record<string, { src: string, badge?: boolean, plate?: string }>}
+ * @type {Record<string, { src: string, badge?: boolean, plate?: string, inset?: boolean }>}
  */
 const DAPP_LOGOS = {
   Iagon: { src: "/dapp/logos/iagon.png?v=2" },
@@ -39,9 +40,17 @@ const DAPP_LOGOS = {
     plate: "#ffffff",
   },
   Liqwid: {
-    src: "/dapp/logos/liqwid.png?v=1",
+    src: "/dapp/logos/liqwid.png?v=2",
     badge: true,
     plate: "#0389d2",
+    // Artwork is edge-to-edge; inset matches other badge marks' built-in padding.
+    inset: true,
+  },
+  "Optim Finance": {
+    src: "/dapp/logos/optim.svg?v=2",
+    badge: true,
+    plate: "#15102E",
+    inset: true,
   },
   Strike: {
     src: "/dapp/logos/strike.png?v=2",
@@ -64,7 +73,13 @@ const DAPP_LOGOS = {
 export function dappIconHtml(dappName) {
   const logo = DAPP_LOGOS[String(dappName || "")];
   if (!logo) return null;
-  const cls = logo.badge ? "ev-logo ev-logo-badge" : "ev-logo";
+  const cls = [
+    "ev-logo",
+    logo.badge ? "ev-logo-badge" : "",
+    logo.inset ? "ev-logo-inset" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   const name = escAttr(String(dappName));
   return {
     html:

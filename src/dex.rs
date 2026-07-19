@@ -585,6 +585,11 @@ impl DexRegistry {
         self.try_resolve_want(info);
         if let Some(tx) = fill_tx {
             self.enrich_want_from_fill_tx(info, tx);
+            // Place tx sometimes has no key-payment change (script wallets /
+            // batchers). Recover the user from the fill/settlement tx.
+            if info.actor.is_none() {
+                info.actor = crate::parse::actor_from_tx(tx);
+            }
         }
     }
 
@@ -773,7 +778,8 @@ impl DexRegistry {
             None
         };
         attach_want(&mut data, &want, true);
-        crate::parse::attach_actor(&mut data, crate::parse::actor_from_tx(tx).as_deref());
+        let actor = crate::parse::actor_from_tx(tx)?;
+        crate::parse::attach_actor(&mut data, Some(actor.as_str()));
         Some(DexHit {
             kind: "dex_fill",
             title: "Swap - Dano Finance".into(),

@@ -170,6 +170,10 @@ async fn dapp_logo(Path(name): Path<String>, headers: HeaderMap) -> Response {
             include_bytes!("../static/dapp/logos/liqwid.png"),
             "image/png",
         ),
+        "optim.svg" => (
+            include_bytes!("../static/dapp/logos/optim.svg"),
+            "image/svg+xml",
+        ),
         "strike.png" => (
             include_bytes!("../static/dapp/logos/strike.png"),
             "image/png",

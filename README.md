@@ -64,6 +64,10 @@ forks, orphaned blocks and slot battles.
     [v2 GraphQL API](https://v2.api.liqwid.finance/graphql)
     (`receiptAsset.currencySymbol`); borrow / repay / liquidation left for a
     later pass.
+  - [Optim Finance](https://optim-finance.gitbook.io/optim-finance) — OADA
+    mint, stake / unstake (sOADA), and OADA lock / unlock (OPTIMiz). Policies
+    from the [OADA / sOADA docs](https://optim-finance.gitbook.io/optim-finance/oada/oada-and-soada);
+    bonds, stake auctions, and lending left for a later pass.
   - [Surf](https://docs.surflending.org/) — open-source pooled lending
     (supply / withdraw liquidity, open / repay loan, lending-pool create /
     close). Validators are
@@ -120,12 +124,13 @@ forks, orphaned blocks and slot battles.
   (e.g.   `?filters=minswap&blocks&iagon` → Minswap DEX only, Blocks, Iagon
   dApp only; `?filters=indigo` → Indigo Protocol;
   `?filters=fluidtokens` → FluidTokens; `?filters=liqwid` → Liqwid;
-  `?filters=strike` → Strike; `?filters=surf` → Surf; `?filters=wayup` → Wayup).
-  Names match the on-screen chips: category multi-word labels work via any word
-  (`forks` / `battles`); one-word DEX/dApp names match in full (`vyfinance`,
-  `sundaeswap`, `geniusyield`, `fluidtokens`, `liqwid`, `strike`, `surf`,
-  `wayup`); multi-word names use the first word (`dano` for Dano Finance,
-  `indigo` for Indigo Protocol).
+  `?filters=optim` → Optim Finance; `?filters=strike` → Strike;
+  `?filters=surf` → Surf; `?filters=wayup` → Wayup). Names match the on-screen
+  chips: category multi-word labels work via any word (`forks` / `battles`);
+  one-word DEX/dApp names match in full (`vyfinance`, `sundaeswap`,
+  `geniusyield`, `fluidtokens`, `liqwid`, `strike`, `surf`, `wayup`);
+  multi-word names use the first word (`dano` for Dano Finance, `indigo` for
+  Indigo Protocol, `optim` for Optim Finance).
 - **Reading-friendly.** Scroll down and the feed pauses; a "new events" pill
   counts what you're missing and snaps you back to the tip when clicked.
 - **Light on the host.** Builds to a single static binary (~4 MB) with no
@@ -275,9 +280,9 @@ Handle API    ◀── stake → preferred $handle (optional)
 - `static/dex/` - DEX UI pack (`mod.js` venue list + brand icons; `logos/`
   marks shown in event cards), served at `/dex/mod.js`
 - `src/dapp/` - optional dApp detectors (`mod.rs` dispatcher; `iagon.rs`,
-  `indigo.rs`, `fluidtokens.rs`, `liqwid.rs`, `strike.rs`, `surf.rs`,
-  `wayup.rs`). All scanner wiring stays in `mod.rs`. If this folder is removed,
-  the binary still builds with a no-op registry (`src/dapp_stub.rs`).
+  `indigo.rs`, `fluidtokens.rs`, `liqwid.rs`, `optim.rs`, `strike.rs`,
+  `surf.rs`, `wayup.rs`). All scanner wiring stays in `mod.rs`. If this folder
+  is removed, the binary still builds with a no-op registry (`src/dapp_stub.rs`).
 - `static/dapp/` - optional dApp UI pack (`mod.js` filter names + card HTML +
   brand icons; `logos/` marks shown in event cards). `app.js` dynamic-imports
   `mod.js` when present and runs without the pack when absent

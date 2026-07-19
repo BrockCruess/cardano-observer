@@ -9,7 +9,9 @@
 //! identified by those published qToken policies (empty asset name).
 
 use super::DappHit;
-use crate::parse::{address_has_script_payment, attach_actor, stake_from_address};
+use crate::parse::{
+    actor_from_tx, address_has_script_payment, attach_actor, stake_from_address,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -324,12 +326,17 @@ fn scan_tx(tx: &Value) -> Vec<DappHit> {
             EventType::Withdraw
         };
         let qty = delta.unsigned_abs() as u64;
-        hits.push(hit_for(et, m, qty, tx));
+        if let Some(hit) = hit_for(et, m, qty, tx) {
+            hits.push(hit);
+        }
     }
     hits
 }
 
-fn hit_for(et: EventType, market: &Market, q_qty: u64, tx: &Value) -> DappHit {
+fn hit_for(et: EventType, market: &Market, q_qty: u64, tx: &Value) -> Option<DappHit> {
+    // Never emit without a user (qToken may sit on a script; fall back to change).
+    let actor = actor_for(et, market, tx).or_else(|| actor_from_tx(tx))?;
+
     let mut data = serde_json::Map::new();
     data.insert("dapp".into(), json!(DAPP));
     data.insert("eventType".into(), json!(et.as_str()));
@@ -361,14 +368,13 @@ fn hit_for(et: EventType, market: &Market, q_qty: u64, tx: &Value) -> DappHit {
         );
     }
 
-    let actor = actor_for(et, market, tx);
-    attach_actor(&mut data, actor.as_deref());
+    attach_actor(&mut data, Some(actor.as_str()));
 
-    DappHit {
+    Some(DappHit {
         kind: "dapp_activity",
         title: et.title(market),
         data: Value::Object(data),
-    }
+    })
 }
 
 fn qty_i128(v: &Value) -> i128 {
