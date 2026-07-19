@@ -5242,6 +5242,7 @@ async function openTx(ev) {
     if (!r.ok) {
       mBody.innerHTML =
         `<div class="m-empty">Full transaction details are unavailable right now.</div>${renderEventDetail(ev)}${explorers(hash)}`;
+      await hydrateVoteRationales(ev, null);
       return;
     }
     mBody.innerHTML = detail.tx
@@ -5249,6 +5250,7 @@ async function openTx(ev) {
       : renderBlockfrostTx(hash, detail.blockfrost, ev);
     enrichAssets(mBody);
     enrichHandles(mBody);
+    await hydrateVoteRationales(ev, detail.tx || null);
   } catch {
     mBody.innerHTML =
       `<div class="m-empty">Transaction details are unavailable.</div>${renderEventDetail(ev)}${explorers(hash)}`;
@@ -5315,11 +5317,148 @@ function renderOgmiosTx(hash, tx, block, ev) {
     ${jsonSection("Withdrawals", tx.withdrawals)}
     ${jsonSection("Governance proposals", tx.proposals)}
     ${jsonSection("Votes", tx.votes)}
+    ${voteRationaleMountHtml(ev, tx)}
     ${jsonSection("Metadata", tx.metadata?.labels)}
     ${jsonSection("Required signers", tx.requiredExtraSignatories)}
     <div class="m-section"><details class="raw"><summary>Raw transaction JSON</summary>
       <pre class="json">${esc(JSON.stringify(tx, null, 2))}</pre></details></div>
     ${explorers(hash)}`;
+}
+
+/** Unique CIP-100/136 anchor URLs attached to this vote / tx. */
+function voteAnchorUrls(ev, tx) {
+  const urls = [];
+  const push = (u) => {
+    const s = typeof u === "string" ? u.trim() : "";
+    if (s && !urls.includes(s)) urls.push(s);
+  };
+  if (ev?.kind === "gov_vote") push(ev.data?.anchorUrl);
+  for (const v of tx?.votes || []) push(v?.metadata?.url);
+  // Also surface from the event when the modal was opened on a vote card
+  // even if Ogmios omitted metadata on the cached tx shape.
+  push(ev?.data?.anchorUrl);
+  return urls;
+}
+
+function voteRationaleMountHtml(ev, tx) {
+  if (!voteAnchorUrls(ev, tx).length) return "";
+  return `<div class="m-section" id="m-vote-rationale">
+    <h3>Vote rationale</h3>
+    <div class="rationale-host"><div class="m-empty" style="padding:12px 0">Loading rationale…</div></div>
+  </div>`;
+}
+
+async function hydrateVoteRationales(ev, tx) {
+  const urls = voteAnchorUrls(ev, tx);
+  if (!urls.length) return;
+  let host = mBody.querySelector("#m-vote-rationale .rationale-host");
+  // Tx-fetch failure path still has the event's anchorUrl — mount the section.
+  if (!host) {
+    const wrap = document.createElement("div");
+    wrap.className = "m-section";
+    wrap.id = "m-vote-rationale";
+    wrap.innerHTML =
+      `<h3>Vote rationale</h3><div class="rationale-host"><div class="m-empty" style="padding:12px 0">Loading rationale…</div></div>`;
+    mBody.insertBefore(wrap, mBody.firstChild);
+    host = wrap.querySelector(".rationale-host");
+  }
+  if (!host) return;
+
+  const parts = await Promise.all(
+    urls.map(async (url) => {
+      try {
+        const r = await fetch(`/api/vote-rationale?url=${encodeURIComponent(url)}`);
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          return rationaleMissHtml(url);
+        }
+        return renderVoteRationale(data);
+      } catch {
+        return rationaleMissHtml(url);
+      }
+    }),
+  );
+  host.innerHTML = parts.join("") || `<div class="m-empty" style="padding:12px 0">No rationale available.</div>`;
+}
+
+function rationaleMissHtml(url) {
+  return `<div class="rationale-card">
+    <div class="rationale-meta">Rationale could not be loaded.
+      <a class="hash" href="${esc(url)}" target="_blank" rel="noopener">${esc(short(url, 28, 12))}</a>
+    </div>
+  </div>`;
+}
+
+function renderVoteRationale(d) {
+  const fields = [
+    ["Summary", d.summary],
+    ["Comment", d.comment],
+    ["Rationale", d.rationaleStatement],
+    ["Precedent", d.precedentDiscussion],
+    ["Counterarguments", d.counterargumentDiscussion],
+    ["Conclusion", d.conclusion],
+  ].filter(([, v]) => typeof v === "string" && v.trim());
+
+  const authors = Array.isArray(d.authors) && d.authors.length
+    ? `<div class="rationale-meta">By ${d.authors.map((a) => esc(a)).join(", ")}</div>`
+    : "";
+  const refs = Array.isArray(d.references) && d.references.length
+    ? `<div class="rationale-refs">${d.references.map((r) => {
+        const label = r.label || r.uri || "link";
+        const href = r.uri || "#";
+        return `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(label)}</a>`;
+      }).join("")}</div>`
+    : "";
+  const source = d.url
+    ? `<div class="rationale-meta"><a class="hash" href="${esc(d.resolvedUrl || d.url)}" target="_blank" rel="noopener" title="${esc(d.url)}">${esc(short(d.url, 36, 14))}</a></div>`
+    : "";
+
+  if (!fields.length) {
+    return `<div class="rationale-card">${authors}${source}
+      <div class="rationale-meta">Anchor has no comment / rationale text.</div>${refs}</div>`;
+  }
+
+  const body = fields
+    .map(([label, text]) => {
+      const showLabel = fields.length > 1 || label !== "Comment";
+      return `<div class="rationale-block">${
+        showLabel ? `<div class="rationale-label">${esc(label)}</div>` : ""
+      }<div class="rationale-text">${formatRationaleText(text)}</div></div>`;
+    })
+    .join("");
+
+  return `<div class="rationale-card">${authors}${body}${refs}${source}</div>`;
+}
+
+/** Escape, light markdown links, and paragraph breaks for CIP-100 body text. */
+function formatRationaleText(raw) {
+  const src = String(raw || "").replace(/\r\n/g, "\n").trim();
+  if (!src) return "";
+  return src
+    .split(/\n{2,}/)
+    .map((para) => {
+      let t = esc(para);
+      // Reference-style defs: [pdf-link]: https://…
+      t = t.replace(
+        /^\[([^\]]+)\]:\s*(https?:\/\/\S+)\s*$/gm,
+        '<span class="rationale-meta"><a href="$2" target="_blank" rel="noopener">$1</a></span>',
+      );
+      // Inline [label](https://…)
+      t = t.replace(
+        /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener">$1</a>',
+      );
+      // Bare URLs (skip ones already inside href=")
+      t = t.replace(
+        /(^|[\s>(])(https?:\/\/[^\s<]+)/g,
+        (m, pre, url) => {
+          if (pre === "=" || pre.endsWith("=\"")) return m;
+          return `${pre}<a href="${url}" target="_blank" rel="noopener">${url}</a>`;
+        },
+      );
+      return `<p>${t.replace(/\n/g, "<br>")}</p>`;
+    })
+    .join("");
 }
 
 function renderBlockfrostTx(hash, bf, ev) {
@@ -5352,6 +5491,7 @@ function renderBlockfrostTx(hash, bf, ev) {
       <div class="io-col"><h4>Inputs</h4>${io(utxos.inputs, "in")}</div>
       <div class="io-col"><h4>Outputs</h4>${io(utxos.outputs, "out")}</div>
     </div>
+    ${voteRationaleMountHtml(ev, null)}
     <div class="m-section"><details class="raw"><summary>Raw JSON</summary>
       <pre class="json">${esc(JSON.stringify(bf, null, 2))}</pre></details></div>
     ${explorers(hash)}`;

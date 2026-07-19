@@ -459,6 +459,99 @@ fn resolve_anchor_url(url: &str) -> Option<String> {
     None
 }
 
+/// Fetch a vote's pinned CIP-100 / CIP-136 JSON and return display fields.
+///
+/// Used by the tx-detail modal. Network / parse failures return `None` so the
+/// UI can show a soft miss rather than an error page.
+pub async fn fetch_vote_rationale(http: &reqwest::Client, url: &str) -> Option<Value> {
+    let resolved = resolve_anchor_url(url)?;
+    let resp = tokio::time::timeout(Duration::from_secs(12), http.get(&resolved).send())
+        .await
+        .ok()?
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    // Cap body so a huge IPFS blob can't blow up the modal request.
+    let bytes = tokio::time::timeout(Duration::from_secs(12), resp.bytes())
+        .await
+        .ok()?
+        .ok()?;
+    if bytes.len() > 512 * 1024 {
+        return None;
+    }
+    let doc: Value = serde_json::from_slice(&bytes).ok()?;
+    Some(extract_vote_rationale(&doc, url, &resolved))
+}
+
+fn extract_vote_rationale(doc: &Value, url: &str, resolved: &str) -> Value {
+    let body = doc.get("body").unwrap_or(doc);
+    let mut out = serde_json::Map::new();
+    out.insert("url".into(), json!(url));
+    out.insert("resolvedUrl".into(), json!(resolved));
+
+    for key in [
+        "comment",
+        "summary",
+        "rationaleStatement",
+        "precedentDiscussion",
+        "counterargumentDiscussion",
+        "conclusion",
+    ] {
+        if let Some(s) = jsonld_str(body.get(key)) {
+            out.insert(key.into(), json!(s));
+        }
+    }
+
+    if let Some(authors) = doc.get("authors").and_then(Value::as_array) {
+        let names: Vec<String> = authors
+            .iter()
+            .filter_map(|a| jsonld_str(a.get("name")))
+            .collect();
+        if !names.is_empty() {
+            out.insert("authors".into(), json!(names));
+        }
+    }
+
+    if let Some(refs) = body.get("references").and_then(Value::as_array) {
+        let items: Vec<Value> = refs
+            .iter()
+            .filter_map(|r| {
+                let label = jsonld_str(r.get("label")).unwrap_or_default();
+                let uri = jsonld_str(r.get("uri"))?;
+                let ty = r
+                    .get("@type")
+                    .or_else(|| r.get("type"))
+                    .and_then(|t| jsonld_str(Some(t)));
+                Some(json!({
+                    "label": if label.is_empty() { Value::Null } else { json!(label) },
+                    "uri": uri,
+                    "type": ty,
+                }))
+            })
+            .collect();
+        if !items.is_empty() {
+            out.insert("references".into(), json!(items));
+        }
+    }
+
+    if let Some(iv) = body.get("internalVote") {
+        out.insert("internalVote".into(), iv.clone());
+    }
+
+    Value::Object(out)
+}
+
+/// Unwrap plain strings and JSON-LD `{ "@value": "…" }` nodes.
+fn jsonld_str(v: Option<&Value>) -> Option<String> {
+    let v = v?;
+    let s = v
+        .as_str()
+        .or_else(|| v.get("@value").and_then(Value::as_str))?
+        .trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 /// Ask Ogmios for metadata anchors of the given proposals.
 async fn fetch_ogmios_anchors(
     ogmios_url: &str,
@@ -545,4 +638,33 @@ fn save_cache(path: &Path, map: &HashMap<String, GovActionEntry>) -> Result<()> 
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_cip100_comment_and_cip136_fields() {
+        let doc = json!({
+            "authors": [{ "name": "Ada" }],
+            "body": {
+                "comment": "plain comment",
+                "summary": { "@value": "short summary" },
+                "rationaleStatement": "longer **text**",
+                "references": [{
+                    "@type": "Other",
+                    "label": "PDF",
+                    "uri": "https://example.com/a.pdf"
+                }]
+            }
+        });
+        let out = extract_vote_rationale(&doc, "ipfs://QmTest", "https://ipfs.io/ipfs/QmTest");
+        assert_eq!(out["comment"], "plain comment");
+        assert_eq!(out["summary"], "short summary");
+        assert_eq!(out["rationaleStatement"], "longer **text**");
+        assert_eq!(out["authors"][0], "Ada");
+        assert_eq!(out["references"][0]["uri"], "https://example.com/a.pdf");
+        assert_eq!(out["url"], "ipfs://QmTest");
+    }
 }

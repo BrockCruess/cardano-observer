@@ -1392,6 +1392,48 @@ body.layout-horizontal #newpill {
 .copyable { cursor: copy; }
 .copyable:hover { color: var(--text); text-decoration: underline dotted; }
 
+/* CIP-100 / CIP-136 vote rationale (tx modal). */
+.rationale-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.rationale-card:last-child { margin-bottom: 0; }
+.rationale-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--muted);
+  margin: 0 0 4px;
+}
+.rationale-block + .rationale-block { margin-top: 12px; }
+.rationale-text {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.rationale-text p { margin: 0 0 0.7em; }
+.rationale-text p:last-child { margin-bottom: 0; }
+.rationale-text a { color: var(--c-governance); text-decoration: underline; text-underline-offset: 2px; }
+.rationale-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.rationale-meta a.hash { color: var(--text-2); }
+.rationale-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 10px;
+  font-size: 12.5px;
+}
+.rationale-refs a { color: var(--c-governance); }
+
 pre.json {
   background: var(--surface);
   border: 1px solid var(--border);

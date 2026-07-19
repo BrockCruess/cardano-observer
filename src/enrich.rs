@@ -505,6 +505,11 @@ impl Enricher {
         meta
     }
 
+    /// CIP-100 / CIP-136 vote rationale from a pinned metadata anchor URL.
+    pub async fn vote_rationale(&self, url: &str) -> Option<Value> {
+        gov_actions::fetch_vote_rationale(&self.http, url).await
+    }
+
     /// CIP-108 governance action title for `{tx_hash}` + cert index.
     pub async fn gov_action(&self, tx_hash: &str, index: u64) -> Value {
         let tx = tx_hash.trim().to_lowercase();

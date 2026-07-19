@@ -47,6 +47,7 @@ pub fn router(ctx: ServerCtx) -> Router {
         .route("/api/handle/{addr}", get(api_handle))
         .route("/api/gov-action/{tx}/{index}", get(api_gov_action))
         .route("/api/gov-actions", get(api_gov_actions))
+        .route("/api/vote-rationale", get(api_vote_rationale))
         .route("/api/stats", get(api_stats))
         .route("/api/trending", get(api_trending))
         .route("/healthz", get(|| async { "ok" }))
@@ -443,6 +444,34 @@ async fn api_gov_action(
 /// Full in-memory gov-action title map for browser-side labels.
 async fn api_gov_actions(State(ctx): State<ServerCtx>) -> Response {
     Json(ctx.enricher.gov_actions_json()).into_response()
+}
+
+#[derive(Deserialize)]
+struct VoteRationaleQuery {
+    url: String,
+}
+
+/// Proxy + normalize a vote's CIP-100/136 rationale JSON (avoids browser CORS).
+async fn api_vote_rationale(
+    State(ctx): State<ServerCtx>,
+    Query(q): Query<VoteRationaleQuery>,
+) -> Response {
+    let url = q.url.trim();
+    if url.is_empty() || url.len() > 2048 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "bad url" })),
+        )
+            .into_response();
+    }
+    match ctx.enricher.vote_rationale(url).await {
+        Some(v) => Json(v).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "rationale unavailable", "url": url })),
+        )
+            .into_response(),
+    }
 }
 
 async fn api_stats(State(ctx): State<ServerCtx>) -> Response {
