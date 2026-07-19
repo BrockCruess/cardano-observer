@@ -11,8 +11,8 @@
 //! - Mint / Burn iAsset
 //! - Deposit / Withdraw collateral
 //! - Liquidate CDP / Redeem against CDP
-//! - Stability pool: create / adjust / close account
-//! - INDY staking: open / adjust / close
+//! - Stability pool: create / deposit / withdraw / close account
+//! - INDY staking: open / deposit / withdraw / close
 //! - ROB: open / cancel / redeem
 //! - Stableswap order
 //! - Interest payment
@@ -73,7 +73,8 @@ enum EventType {
     LiquidateCdp,
     RedeemCdp,
     CreateSpAccount,
-    AdjustSpAccount,
+    DepositSpAccount,
+    WithdrawSpAccount,
     CloseSpAccount,
     OpenStaking,
     DepositStaking,
@@ -99,7 +100,8 @@ impl EventType {
             Self::LiquidateCdp => "liquidate_cdp",
             Self::RedeemCdp => "redeem_cdp",
             Self::CreateSpAccount => "create_sp_account",
-            Self::AdjustSpAccount => "adjust_sp_account",
+            Self::DepositSpAccount => "deposit_sp_account",
+            Self::WithdrawSpAccount => "withdraw_sp_account",
             Self::CloseSpAccount => "close_sp_account",
             Self::OpenStaking => "open_staking",
             Self::DepositStaking => "deposit_staking",
@@ -124,9 +126,10 @@ impl EventType {
             Self::WithdrawCollateral => "Withdraw Collateral - Indigo",
             Self::LiquidateCdp => "Liquidation - Indigo",
             Self::RedeemCdp => "Redemption - Indigo",
-            Self::CreateSpAccount => "Stability Pool Deposit - Indigo",
-            Self::AdjustSpAccount => "Stability Pool Adjust - Indigo",
-            Self::CloseSpAccount => "Stability Pool Withdrawal - Indigo",
+            Self::CreateSpAccount | Self::DepositSpAccount => "Stability Pool Deposit - Indigo",
+            Self::WithdrawSpAccount | Self::CloseSpAccount => {
+                "Stability Pool Withdrawal - Indigo"
+            }
             Self::OpenStaking => "Stake INDY - Indigo",
             Self::DepositStaking => "Deposit INDY Stake - Indigo",
             Self::WithdrawStaking => "Withdraw INDY Stake - Indigo",
@@ -623,6 +626,7 @@ fn classify(
     }
 
     if mint.sp_account_delta == 0 && touches_sp && !liquidated {
+        // Existing account top-up / partial exit (same titles as create / close).
         // Prefer net change on the pool state UTxO (SP_TOKEN), not every SP output.
         let net = if sp_flows.pool_spent > 0 || sp_flows.pool_out > 0 {
             sp_flows.pool_out as i128 - sp_flows.pool_spent as i128
@@ -640,7 +644,12 @@ fn classify(
                 ..ValueSummary::default()
             };
             fill_sp_iasset_meta(&mut sum, sp_out, mint, tx);
-            pending.push((EventType::AdjustSpAccount, sum));
+            let et = if net > 0 {
+                EventType::DepositSpAccount
+            } else {
+                EventType::WithdrawSpAccount
+            };
+            pending.push((et, sum));
         }
     }
 
@@ -1111,7 +1120,7 @@ mod tests {
                 }
             }]
         });
-        // Seed tracker with prior pool state (may emit an unrelated adjust event).
+        // Seed tracker with prior pool state (may emit an unrelated SP event).
         let _ = s.scan_block(&[("fund_pool", &fund_pool)]);
 
         let deposit = json!({

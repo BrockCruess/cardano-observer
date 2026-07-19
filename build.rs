@@ -22,6 +22,7 @@ fn main() {
             "iagon.png",
             "indigo.png",
             "fluidtokens.png",
+            "liqwid.png",
             "strike.png",
             "surf.png",
             "wayup.svg",

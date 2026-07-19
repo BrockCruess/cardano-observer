@@ -14,6 +14,7 @@ export const DAPP_APPS = [
   "Iagon",
   "Indigo Protocol",
   "FluidTokens",
+  "Liqwid",
   "Strike",
   "Surf",
   "Wayup",
@@ -36,6 +37,11 @@ const DAPP_LOGOS = {
     src: "/dapp/logos/fluidtokens.png?v=2",
     badge: true,
     plate: "#ffffff",
+  },
+  Liqwid: {
+    src: "/dapp/logos/liqwid.png?v=1",
+    badge: true,
+    plate: "#0389d2",
   },
   Strike: {
     src: "/dapp/logos/strike.png?v=2",
@@ -109,6 +115,14 @@ export function renderDappActivityHtml(d, ui) {
   const iassetPool = d.iasset
     ? `<span class="hash" title="Stability pool">${esc(d.iasset)} pool</span>`
     : "";
+  // Liqwid: market id + qToken receipt amount when no underlying chips.
+  const market = d.market
+    ? `<span class="hash" title="Market">${esc(d.market)} market</span>`
+    : "";
+  const qtok =
+    !chips && d.qToken != null
+      ? `<b>${fmtTokenQty(d.qToken, d.decimals ?? 6)}</b> ${esc(d.qTicker || `q${d.market || ""}`)}`
+      : "";
   const ada = d.ada
     ? principalLabel
       ? `<b>${fmtAda(d.ada)}</b> ${principalLabel}`
@@ -119,9 +133,11 @@ export function renderDappActivityHtml(d, ui) {
       `<span class="badge contract">${esc(d.dapp || "dApp")}</span>`,
       nodeId,
       iassetPool,
+      market,
       iag,
       indy,
       fldt,
+      qtok,
       ada,
       actorSpan(d),
     ]) +

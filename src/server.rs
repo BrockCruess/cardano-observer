@@ -166,6 +166,10 @@ async fn dapp_logo(Path(name): Path<String>, headers: HeaderMap) -> Response {
             include_bytes!("../static/dapp/logos/fluidtokens.png"),
             "image/png",
         ),
+        "liqwid.png" => (
+            include_bytes!("../static/dapp/logos/liqwid.png"),
+            "image/png",
+        ),
         "strike.png" => (
             include_bytes!("../static/dapp/logos/strike.png"),
             "image/png",

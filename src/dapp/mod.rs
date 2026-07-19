@@ -9,6 +9,7 @@
 mod fluidtokens;
 mod iagon;
 mod indigo;
+mod liqwid;
 mod strike;
 mod surf;
 mod wayup;
@@ -27,6 +28,7 @@ pub struct DappRegistry {
     iagon: iagon::Scanner,
     indigo: indigo::Scanner,
     fluidtokens: fluidtokens::Scanner,
+    liqwid: liqwid::Scanner,
     strike: strike::Scanner,
     surf: surf::Scanner,
     wayup: wayup::Scanner,
@@ -38,6 +40,7 @@ impl DappRegistry {
             iagon: iagon::Scanner::new(),
             indigo: indigo::Scanner::new(),
             fluidtokens: fluidtokens::Scanner::new(),
+            liqwid: liqwid::Scanner::new(),
             strike: strike::Scanner::new(),
             surf: surf::Scanner::new(),
             wayup: wayup::Scanner::new(),
@@ -51,6 +54,7 @@ impl DappRegistry {
         reg.iagon.warm_from_tx_entries(&entries);
         reg.indigo.warm_from_tx_entries(&entries);
         reg.fluidtokens.warm_from_tx_entries(&entries);
+        reg.liqwid.warm_from_tx_entries(&entries);
         reg.strike.warm_from_tx_entries(&entries);
         reg.surf.warm_from_tx_entries(&entries);
         reg.wayup.warm_from_tx_entries(&entries);
@@ -62,6 +66,7 @@ impl DappRegistry {
         let mut hits = self.iagon.scan_block(txs);
         hits.extend(self.indigo.scan_block(txs));
         hits.extend(self.fluidtokens.scan_block(txs));
+        hits.extend(self.liqwid.scan_block(txs));
         hits.extend(self.strike.scan_block(txs));
         hits.extend(self.surf.scan_block(txs));
         hits.extend(self.wayup.scan_block(txs));
