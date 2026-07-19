@@ -126,7 +126,7 @@ impl EventType {
             Self::RedeemCdp => "Redemption - Indigo",
             Self::CreateSpAccount => "Stability Pool Deposit - Indigo",
             Self::AdjustSpAccount => "Stability Pool Adjust - Indigo",
-            Self::CloseSpAccount => "Stability Pool Close - Indigo",
+            Self::CloseSpAccount => "Stability Pool Withdrawal - Indigo",
             Self::OpenStaking => "Stake INDY - Indigo",
             Self::DepositStaking => "Deposit INDY Stake - Indigo",
             Self::WithdrawStaking => "Withdraw INDY Stake - Indigo",
