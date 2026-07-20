@@ -145,8 +145,8 @@ fn emit_tx(
     let demo_tokens: [(&str, &str, &str); 6] = [
         ("f66d78b4a3cb3d37afa0ec36461e51ecbde00f26c8f0a68f94b69880", "69555344", "iUSD"),
         ("29d222ce763455e3d7a09a665ce554f00ac89d2e99a1a83d267170c6", "4d494e", "MIN"),
-        ("8fef2d34078659493ce161a6c7fba4b56afefa8535296a5743f69587", "41414441", "AADA"),
-        ("1d7f33bd23d85e1a25d87d86fac4f199c3197a2f7afeb662a0f34e1e", "776f726c646d6f62696c65746f6b656e", "WMT"),
+        ("f13ac4d66b3ee19a6aa0f2a22298737bd907cc95121662fc971b5275", "535452494b45", "STRIKE"),
+        ("5d16cc1a177b5d9ba9cfa9793b07e60f1fb70fea1f8aef064415d114", "494147", "IAG"),
         ("a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481c235", "484f534b59", "HOSKY"),
         ("533bb94a8850ee3ccbe483106489399112b74c905342cb1792a797a0", "494e4459", "INDY"),
     ];

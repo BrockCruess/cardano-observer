@@ -363,8 +363,67 @@ const settings = {
 };
 
 /** Keys that are never filter tokens (search / misc URL controls). */
-const URL_SEARCH_KEYS = new Set(["q", "search", "filter"]);
-const URL_MISC_KEYS = new Set(["min", "minada", "min_ada", "layout", "compact"]);
+/**
+ * Split `location.search` into a search phrase and a list of filter names.
+ *
+ * Tokens are `&`-separated. `search=` and `filters=` each open a section that
+ * runs until the next `key=value` token, so a bare token means "another search
+ * word" or "another filter name" depending on which section it lands in. That
+ * removes the old ambiguity where `?usdcx&filters=finance&dapp` couldn't tell
+ * whether `dapp` was a word to search for or a chip to enable.
+ *
+ *   ?search=usdcx&pool                         → search "usdcx pool"
+ *   ?filters=minswap&blocks                    → Minswap + Blocks
+ *   ?search=usdcx&pool&filters=finance&dapp    → both
+ *   ?filters=finance&search=usdcx              → order-independent
+ *   ?usdcx                                     → shorthand, search only
+ *
+ * `&` inside a search section stands in for a space, so search words can't
+ * contain `=`; anything with one closes the section.
+ */
+function parseUrlQuery(raw = location.search) {
+  const decode = (t) => {
+    try {
+      return decodeURIComponent(t.replace(/\+/g, " "));
+    } catch {
+      return t;
+    }
+  };
+  const words = [];
+  const filters = [];
+  const loose = [];
+  let section = null;
+
+  for (const part of raw.replace(/^\?/, "").split("&")) {
+    if (!part) continue;
+    const eq = part.indexOf("=");
+    if (eq === -1) {
+      const tok = decode(part);
+      if (section === "search") words.push(tok);
+      else if (section === "filters") filters.push(tok);
+      else loose.push(tok);
+      continue;
+    }
+    const key = decode(part.slice(0, eq)).toLowerCase();
+    const val = decode(part.slice(eq + 1)).trim();
+    if (key === "search") {
+      section = "search";
+      if (val) words.push(val);
+    } else if (key === "filters") {
+      section = "filters";
+      if (val) filters.push(val);
+    } else {
+      // Any other `key=value` (min, layout, …) closes the open section.
+      section = null;
+    }
+  }
+
+  // Shorthand `?usdcx`: only when nothing else claimed the query, so a bare
+  // token can never be mistaken for a filter name.
+  if (!words.length && !filters.length && loose.length) words.push(loose[0]);
+
+  return { search: words.filter(Boolean).join(" "), filters };
+}
 
 function normFilterKey(s) {
   return String(s || "").toLowerCase().replace(/[\s_\-./]+/g, "");
@@ -437,29 +496,15 @@ function matchFilterCategories(raw) {
 }
 
 /**
- * URL filter presets from the on-screen chip / submenu names:
+ * Chip / submenu presets from the `filters=` section — see [`parseUrlQuery`]:
  *   ?filters=minswap&blocks&iagon
  *   ?filters=forks&dano          → Forks & Battles + Dano Finance
  *   ?filters=vyfinance           → VyFinance (full one-word name)
  *
- * DEX/dApp: one-word names match in full; multi-word use the first word only.
+ * Venue/app names: one-word names match in full; multi-word use the first word.
  */
 function parseUrlFilterPreset() {
-  const params = new URLSearchParams(location.search);
-  if (!params.has("filters")) return null;
-
-  const tokens = [];
-  for (const v of params.getAll("filters")) {
-    const s = String(v || "").trim();
-    if (s) tokens.push(s);
-  }
-  // Further options as bare flags: ?filters=minswap&blocks&iagon
-  for (const [k, v] of params.entries()) {
-    if (!k || k === "filters") continue;
-    const lk = k.toLowerCase();
-    if (URL_SEARCH_KEYS.has(lk) || URL_MISC_KEYS.has(lk)) continue;
-    if (v === "" || v == null) tokens.push(k);
-  }
+  const tokens = parseUrlQuery().filters;
   if (!tokens.length) return null;
 
   const categories = new Set();
@@ -1166,23 +1211,9 @@ function paintCatCounts() {
   }
 }
 
-/** Pre-fill search from the URL: `?minswap`, `?q=minswap`, or `?search=BROCK`. */
+/** Pre-fill the search box from the URL — see [`parseUrlQuery`]. */
 function searchFromUrl() {
-  const params = new URLSearchParams(location.search);
-  for (const key of ["q", "search", "filter"]) {
-    if (!params.has(key)) continue;
-    const v = params.get(key);
-    if (v != null && String(v).trim() !== "") return String(v).trim();
-  }
-  // Bare `?term` search — not when `?filters=` is driving chip presets.
-  if (params.has("filters")) return "";
-  for (const [k, v] of params.entries()) {
-    if (!k) continue;
-    const lk = k.toLowerCase();
-    if (URL_SEARCH_KEYS.has(lk) || URL_MISC_KEYS.has(lk) || lk === "filters") continue;
-    if (v === "" || v == null) return k;
-  }
-  return "";
+  return parseUrlQuery().search;
 }
 
 /**
@@ -1517,7 +1548,7 @@ function assetChipsHtml(assets, badge) {
   return `<div class="assets">${badgeHtml}${chips}${more}</div>`;
 }
 
-/** Plain `₳ 123` / `16,490 COCK` - no chip chrome on DEX cards. */
+/** Plain `₳ 123` / `16,490 USDCx` - no chip chrome on DEX cards. */
 function dexAmtAda(lovelace, min) {
   if (lovelace == null || lovelace === "") return "";
   return `<b>${min ? "≥ " : ""}${fmtAda(lovelace)}</b>`;

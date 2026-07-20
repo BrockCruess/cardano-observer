@@ -14,7 +14,7 @@
 //!    that token; several tokens → token↔token swap.
 //!    When an inline datum is present (Minswap / WingRiders / Sundae / VyFi /
 //!    CSWAP / Genius Yield) we also read the minimum-receive amount so the UI
-//!    can show both sides, e.g. `₳ 73 → ≥16,490 COCK`. Same-block place+fill
+//!    can show both sides, e.g. `₳ 73 → ≥16,490 USDCx`. Same-block place+fill
 //!    collapses to Swap. Liquidity contracts (and any UTxO carrying LP-like
 //!    assets) emit a separate `dex_lp` event: deposit (ADA+tokens in) or
 //!    redeem (LP shares in).
@@ -492,7 +492,7 @@ impl DexRegistry {
         let ada = output_lovelace(output);
 
         // Minswap V2 encodes deposit/withdraw in the order datum step - those
-        // UTxOs often look like a one-token "sell" (e.g. ADA+NIGHT deposit).
+        // UTxOs often look like a one-token "sell" (e.g. ADA+USDCx deposit).
         let minswap_lp = (dex == minswap::NAME)
             .then(|| minswap::lp_side(output, tx))
             .flatten();

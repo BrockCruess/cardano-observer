@@ -6,7 +6,7 @@
 //! action/context fields. A Minswap "Order Fill" therefore contributes the
 //! traded token (if any), not "Order Fill" or "Minswap".
 //!
-//! Display casing is preserved (e.g. `MIN`, `SNEK`); counting is case-insensitive.
+//! Display casing is preserved (e.g. `USDCx`); counting is case-insensitive.
 
 use crate::model::ChainEvent;
 use serde_json::Value;
