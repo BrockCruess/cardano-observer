@@ -204,7 +204,7 @@ impl AppState {
             e.stamp_event_assets(&mut event);
             e.stamp_event_dreps(&mut event);
             e.stamp_event_gov_actions(&mut event);
-            e.stamp_event_scam(&mut event);
+            self.stamp_event_scam_with_tx(&e, &mut event);
             if !e.keep_dex_event(&event) {
                 return None;
             }
@@ -254,13 +254,112 @@ impl AppState {
         }
     }
 
-    /// Flag buffered token-transfer events that move a known scam fingerprint.
+    /// Flag buffered token-transfer events that move a known scam fingerprint
+    /// across payment credentials (not same-pkh internal reshuffles).
     pub fn stamp_buffered_scam(&self) {
         let Some(enricher) = self.meta_ref() else { return };
+        let hashes: Vec<String> = {
+            let buf = self.events.lock().unwrap();
+            buf.iter()
+                .filter(|e| e.kind == "token_transfer")
+                .filter_map(|e| e.tx_hash.clone())
+                .collect()
+        };
+        let mut txs: HashMap<String, Value> = HashMap::new();
+        for h in &hashes {
+            if let Some(entry) = self.get_tx(h) {
+                if let Some(tx) = entry.get("tx").cloned() {
+                    // Pull parent bodies so input payment creds can be resolved.
+                    let empty = Vec::new();
+                    for i in tx.get("inputs").and_then(Value::as_array).unwrap_or(&empty) {
+                        let Some(src) = i
+                            .get("transaction")
+                            .and_then(|t| t.get("id"))
+                            .and_then(Value::as_str)
+                        else {
+                            continue;
+                        };
+                        if txs.contains_key(src) {
+                            continue;
+                        }
+                        if let Some(pentry) = self.get_tx(src) {
+                            if let Some(ptx) = pentry.get("tx").cloned() {
+                                txs.insert(src.to_string(), ptx);
+                            }
+                        }
+                    }
+                    txs.insert(h.clone(), tx);
+                }
+            }
+        }
         let mut buf = self.events.lock().unwrap();
         for ev in buf.iter_mut() {
-            enricher.stamp_event_scam(ev);
+            self.stamp_event_scam_with_maps(&enricher, ev, &txs);
         }
+    }
+
+    fn stamp_event_scam_with_tx(&self, enricher: &Enricher, event: &mut ChainEvent) {
+        let tx = event
+            .tx_hash
+            .as_deref()
+            .and_then(|h| self.get_tx(h))
+            .and_then(|entry| entry.get("tx").cloned());
+        let mut parents: HashMap<String, Value> = HashMap::new();
+        if let Some(ref tx) = tx {
+            let empty = Vec::new();
+            for i in tx.get("inputs").and_then(Value::as_array).unwrap_or(&empty) {
+                let Some(src) = i
+                    .get("transaction")
+                    .and_then(|t| t.get("id"))
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                if parents.contains_key(src) {
+                    continue;
+                }
+                if let Some(entry) = self.get_tx(src) {
+                    if let Some(ptx) = entry.get("tx").cloned() {
+                        parents.insert(src.to_string(), ptx);
+                    }
+                }
+            }
+        }
+        let mut txs = HashMap::new();
+        if let (Some(h), Some(tx)) = (event.tx_hash.clone(), tx) {
+            txs.insert(h, tx);
+        }
+        for (k, v) in parents {
+            txs.insert(k, v);
+        }
+        self.stamp_event_scam_with_maps(enricher, event, &txs);
+    }
+
+    fn stamp_event_scam_with_maps(
+        &self,
+        enricher: &Enricher,
+        event: &mut ChainEvent,
+        txs: &HashMap<String, Value>,
+    ) {
+        let tx = event
+            .tx_hash
+            .as_deref()
+            .and_then(|h| txs.get(h));
+        enricher.stamp_event_scam(event, |policy, name_hex| {
+            let Some(tx) = tx else {
+                // No body ⇒ can't prove a hand-change; don't false-flag consolidations.
+                return false;
+            };
+            parse::asset_changes_hands(tx, policy, name_hex, |src, idx| {
+                let parent = txs.get(src)?;
+                let outs = parent.get("outputs")?.as_array()?;
+                let o = outs.get(idx as usize)?;
+                Some((
+                    o.get("address")?.as_str()?.to_string(),
+                    o.get("value")?.clone(),
+                ))
+            })
+        });
     }
 
     /// Apply cached DRep givenNames onto every buffered event (boot).

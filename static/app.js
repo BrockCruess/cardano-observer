@@ -28,6 +28,17 @@ try {
   // Venues list above still works without the logo pack.
 }
 
+/** Server-side `model::FINANCE_APPS` — dApps filed under Finance, not dApp. */
+let FINANCE_DAPP_NAMES = new Set([
+  "Dano Finance",
+  "FluidTokens",
+  "Indigo Protocol",
+  "Liqwid",
+  "Optim Finance",
+  "Strike",
+  "Surf",
+]);
+
 /* ── Optional dApp UI pack (`static/dapp/mod.js`) ──────────────────────── */
 /** Names for per-dApp filters; empty when the dApp pack is absent. */
 let DAPP_APPS = [];
@@ -44,9 +55,25 @@ try {
   if (typeof dappMod.dappIconHtml === "function") {
     dappIconHtml = dappMod.dappIconHtml;
   }
+  if (Array.isArray(dappMod.FINANCE_APPS) && dappMod.FINANCE_APPS.length) {
+    FINANCE_DAPP_NAMES = new Set(dappMod.FINANCE_APPS);
+  }
 } catch {
   // Core UI runs without `static/dapp/` (or when the server was built without it).
 }
+
+/* ── Finance filter list ───────────────────────────────────────────────── */
+/**
+ * DEX venues and finance dApps share one category and one filter list, so a
+ * protocol that both trades and lends (Dano Finance) is a single chip rather
+ * than one under DEX and another under dApp. `FINANCE_DAPPS` mirrors
+ * `model::FINANCE_APPS` on the server.
+ */
+let FINANCE_DAPPS = DAPP_APPS.filter((a) => FINANCE_DAPP_NAMES.has(a));
+/** Merged, de-duplicated: `data.dex` and `data.dapp` values in one list. */
+let FINANCE_APPS = [...new Set([...DEX_VENUES, ...FINANCE_DAPPS])];
+// Everything left over (Iagon, Wayup) keeps its own dApp chip.
+DAPP_APPS = DAPP_APPS.filter((a) => !FINANCE_DAPP_NAMES.has(a));
 
 /* ── Category & icon registry ─────────────────────────────────────────── */
 
@@ -81,7 +108,7 @@ const CATS = [
   { id: "block",       label: "Blocks" },
   { id: "token",       label: "Tokens" },
   { id: "transaction", label: "Transactions" },
-  { id: "dex",         label: "DEX" },
+  { id: "finance",     label: "Finance" },
   { id: "dapp",        label: "dApp" },
   { id: "mint",        label: "Mint / Burn" },
   { id: "governance",  label: "Governance" },
@@ -140,7 +167,7 @@ const iconFor = (kind, category, side, vote) => {
     if (v === "abstain") return ICONS.gov_vote_abstain;
     return ICONS.gov_vote;
   }
-  return ICONS[kind] || ICONS[{ token: "token_transfer", staking: "delegation", governance: "gov_proposal", metadata: "tx_metadata", alert: "slot_battle", dex: "dex", dapp: "dapp", pool: "pool", mint: "mint" }[category]] || ICONS.transaction;
+  return ICONS[kind] || ICONS[{ token: "token_transfer", staking: "delegation", governance: "gov_proposal", metadata: "tx_metadata", alert: "slot_battle", finance: "dex", dapp: "dapp", pool: "pool", mint: "mint" }[category]] || ICONS.transaction;
 };
 
 /* ── Tiny helpers ─────────────────────────────────────────────────────── */
@@ -156,7 +183,7 @@ const titleCaseWords = (s) =>
 function formatEventTitle(ev) {
   if (!ev) return "";
   if (ev.kind === "vote_delegation") return "DRep Delegation";
-  if (ev.category === "dapp") return String(ev.title || "");
+  if (ev.data?.dapp) return String(ev.title || "");
   return titleCaseWords(ev.title);
 }
 const short = (h, a = 8, b = 6) => {
@@ -306,10 +333,13 @@ const store = {
 const settings = {
   // Merge over defaults so categories added in later versions start visible
   filters: { ...Object.fromEntries(CATS.map((c) => [c.id, true])), ...store.get("co_filters_v1", {}) },
-  // Per-venue DEX toggles (true = include). Unknown venues stay visible.
-  dexVenues: {
-    ...Object.fromEntries(DEX_VENUES.map((d) => [d, true])),
+  // Per-venue/app Finance toggles (true = include). Unknown stay visible.
+  // Seeded from the pre-merge keys so existing preferences survive the rename.
+  financeApps: {
+    ...Object.fromEntries(FINANCE_APPS.map((d) => [d, true])),
     ...store.get("co_dex_venues_v1", {}),
+    ...store.get("co_dapp_apps_v1", {}),
+    ...store.get("co_finance_apps_v1", {}),
   },
   // Per-dApp toggles (true = include). Unknown dApps stay visible.
   dappApps: {
@@ -388,8 +418,8 @@ function matchUiFilterNames(raw, candidates, labelOf, idOf, mode) {
   });
 }
 
-function matchDexVenues(raw) {
-  return matchUiFilterNames(raw, DEX_VENUES, (v) => v, null, "brand");
+function matchFinanceApps(raw) {
+  return matchUiFilterNames(raw, FINANCE_APPS, (v) => v, null, "brand");
 }
 
 function matchDappApps(raw) {
@@ -433,14 +463,14 @@ function parseUrlFilterPreset() {
   if (!tokens.length) return null;
 
   const categories = new Set();
-  const dexVenues = new Set();
+  const financeApps = new Set();
   const dappApps = new Set();
 
   for (const tok of tokens) {
-    const venues = matchDexVenues(tok);
+    const venues = matchFinanceApps(tok);
     if (venues.length) {
-      for (const v of venues) dexVenues.add(v);
-      categories.add("dex");
+      for (const v of venues) financeApps.add(v);
+      categories.add("finance");
       continue;
     }
     const dapps = matchDappApps(tok);
@@ -452,24 +482,24 @@ function parseUrlFilterPreset() {
     for (const id of matchFilterCategories(tok)) categories.add(id);
   }
 
-  if (!categories.size && !dexVenues.size && !dappApps.size) return null;
-  return { categories, dexVenues, dappApps };
+  if (!categories.size && !financeApps.size && !dappApps.size) return null;
+  return { categories, financeApps, dappApps };
 }
 
 /** Apply `?filters=` over localStorage defaults (shareable deep-links win). */
 function applyUrlFilterPreset() {
   const parsed = parseUrlFilterPreset();
   if (!parsed) return false;
-  const { categories, dexVenues, dappApps } = parsed;
+  const { categories, financeApps, dappApps } = parsed;
 
   for (const c of CATS) {
     settings.filters[c.id] = categories.has(c.id);
   }
 
-  if (dexVenues.size) {
-    for (const v of DEX_VENUES) settings.dexVenues[v] = dexVenues.has(v);
-  } else if (categories.has("dex")) {
-    for (const v of DEX_VENUES) settings.dexVenues[v] = true;
+  if (financeApps.size) {
+    for (const v of FINANCE_APPS) settings.financeApps[v] = financeApps.has(v);
+  } else if (categories.has("finance")) {
+    for (const v of FINANCE_APPS) settings.financeApps[v] = true;
   }
 
   if (dappApps.size) {
@@ -488,9 +518,14 @@ function applyUrlFilterPreset() {
 
 applyUrlFilterPreset();
 
-function dexVenueEnabled(venue) {
-  if (!venue) return true;
-  return settings.dexVenues[venue] !== false;
+function financeAppEnabled(name) {
+  if (!name) return true;
+  return settings.financeApps[name] !== false;
+}
+
+/** Finance cards carry `data.dex` or `data.dapp`; the chip list merges both. */
+function financeNameOf(card) {
+  return card.dataset.finance || "";
 }
 
 function dappAppEnabled(app) {
@@ -907,7 +942,7 @@ function applyFilters() {
     g.querySelectorAll(".card").forEach((card) => {
       let hide = false;
       if (q && !(card.dataset.search || "").includes(q)) hide = true;
-      if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) hide = true;
+      if (card.dataset.category === "finance" && !financeAppEnabled(financeNameOf(card))) hide = true;
       if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) hide = true;
       if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) hide = true;
       baseHide.set(card, hide);
@@ -961,7 +996,7 @@ function applyFilters() {
       const anyEvent = [...host.querySelectorAll(":scope > .card")].some((c) => {
         if (c.classList.contains("f-hide")) return false;
         if (!settings.filters[c.dataset.category]) return false;
-        if (c.dataset.category === "dex" && !dexVenueEnabled(c.dataset.dex)) return false;
+        if (c.dataset.category === "finance" && !financeAppEnabled(financeNameOf(c))) return false;
         if (c.dataset.category === "dapp" && !dappAppEnabled(c.dataset.dapp)) return false;
         if (c.dataset.category === "governance" && !govTypeEnabled(c.dataset.govType)) {
           return false;
@@ -1005,7 +1040,7 @@ function applyFilters() {
   }
   store.set("co_filters_v1", settings.filters);
   store.set("co_minada_v1", settings.minAda);
-  store.set("co_dex_venues_v1", settings.dexVenues);
+  store.set("co_finance_apps_v1", settings.financeApps);
   store.set("co_dapp_apps_v1", settings.dappApps);
   store.set("co_gov_types_v1", settings.govTypes);
   updateLoadedEventCount();
@@ -1045,7 +1080,7 @@ function countVisibleEvents() {
   let oldest = Infinity;
   document.querySelectorAll("#feed .block-group:not(.f-hide) .card:not(.f-hide)").forEach((card) => {
     if (!settings.filters[card.dataset.category]) return;
-    if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return;
+    if (card.dataset.category === "finance" && !financeAppEnabled(financeNameOf(card))) return;
     if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) return;
     if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) return;
     n++;
@@ -1279,7 +1314,7 @@ function buildSplitFilterChip(chips, {
 /** Turn every category / venue / subtype filter back on; clear min-ADA and search. */
 function resetFilters() {
   for (const c of CATS) settings.filters[c.id] = true;
-  for (const v of DEX_VENUES) settings.dexVenues[v] = true;
+  for (const v of FINANCE_APPS) settings.financeApps[v] = true;
   for (const a of DAPP_APPS) settings.dappApps[a] = true;
   for (const g of GOV_TYPES) settings.govTypes[g.id] = true;
   settings.minAda = 0;
@@ -1311,15 +1346,15 @@ function resetFilters() {
 function buildToolbar() {
   const chips = $("chips");
   for (const c of CATS) {
-    if (c.id === "dex") {
+    if (c.id === "finance") {
       buildSplitFilterChip(chips, {
-        catId: "dex",
-        label: "DEX",
+        catId: "finance",
+        label: "Finance",
         iconKind: "dex",
-        settingsKey: "dexVenues",
-        options: DEX_VENUES,
-        isEnabled: dexVenueEnabled,
-        menuAria: "Filter by DEX venue",
+        settingsKey: "financeApps",
+        options: FINANCE_APPS,
+        isEnabled: financeAppEnabled,
+        menuAria: "Filter by DEX or finance app",
       });
       continue;
     }
@@ -1467,7 +1502,11 @@ function assetChipsHtml(assets, badge) {
       const unit = a.unit || "";
       const decimals = tokenDecimals(a);
       const label = tokenLabel(a);
-      return `<span class="asset" data-unit="${esc(unit)}" title="${esc(a.policy)}.${esc(a.nameHex)}">
+      const scamCls = a.scam ? " scam" : "";
+      const title = a.scam
+        ? `Known scam token · ${a.policy || ""}.${a.nameHex || ""}`
+        : `${a.policy || ""}.${a.nameHex || ""}`;
+      return `<span class="asset${scamCls}" data-unit="${esc(unit)}" title="${esc(title)}">
         <span class="ph">◆</span><span class="t">${esc(label)}</span><span class="q" data-qty="${esc(a.qty)}">${fmtTokenQty(a.qty, decimals)}</span></span>`;
     })
     .join("");
@@ -1695,17 +1734,13 @@ function cardBody(ev) {
       const govKey = d.proposalTx != null
         ? `${String(d.proposalTx).toLowerCase()}#${d.proposalIndex ?? 0}`
         : "";
-      const onProp = d.proposalTitle
-        ? `on <span class="gov-title" data-gov="${esc(govKey)}" title="${esc(d.proposalTx || "")}#${esc(String(d.proposalIndex ?? 0))}">${esc(d.proposalTitle)}</span>`
+      const vote = `<span class="badge ${cls}">${esc(v.toUpperCase())}</span>`;
+      const prop = d.proposalTitle
+        ? `<span class="gov-title" data-gov="${esc(govKey)}" title="${esc(d.proposalTx || "")}#${esc(String(d.proposalIndex ?? 0))}">${esc(d.proposalTitle)}</span>`
         : d.proposalTx
-          ? `on <span class="hash" data-gov="${esc(govKey)}" title="${esc(d.proposalTx)}#${esc(String(d.proposalIndex ?? 0))}">${esc(short(d.proposalTx, 8, 4))}#${esc(String(d.proposalIndex ?? 0))}</span>`
+          ? `<span class="hash" data-gov="${esc(govKey)}" title="${esc(d.proposalTx)}#${esc(String(d.proposalIndex ?? 0))}">${esc(short(d.proposalTx, 8, 4))}#${esc(String(d.proposalIndex ?? 0))}</span>`
           : "";
-      return sub([
-        `<span class="badge ${cls}">${esc(v.toUpperCase())}</span>`,
-        d.role ? esc(roleLabel(d.role)) : "",
-        d.voter ? drepSpan(d.voter, d.voterName) : "",
-        onProp,
-      ]);
+      return delegationFlow(govVoteVoterSpan(d), vote, prop);
     }
     case "drep_registration":
     case "drep_update":
@@ -1778,7 +1813,12 @@ function marginPct(m) {
 
 function poolIdsFromData(d) {
   if (!d || typeof d !== "object") return [];
-  return [d.issuerPool, d.pool, d.fromPool].filter((id) => typeof id === "string" && id);
+  const voter = typeof d.voter === "string" && d.voter.startsWith("pool1") ? d.voter : null;
+  return [d.issuerPool, d.pool, d.fromPool, voter].filter((id) => typeof id === "string" && id);
+}
+
+function isLookupPoolId(id) {
+  return typeof id === "string" && id.startsWith("pool1") && id.length >= 50 && id.length <= 120;
 }
 
 function isLookupDrepId(id) {
@@ -1939,6 +1979,30 @@ function addressSpan(addr, head = 14, tail = 8) {
     return `<span class="ada-handle copyable" data-handle="${esc(s)}" data-copy="${esc(s)}" title="click to copy"><span class="ada-handle-dollar">$</span>${esc(known)}</span>`;
   }
   return `<span class="hash copyable" data-handle="${esc(s)}" data-copy="${esc(s)}" title="click to copy">${esc(short(s, head, tail))}</span>`;
+}
+
+/** Prefer cached pool ticker/name; enrichPools fills misses via /api/pool. */
+function poolSpan(id) {
+  if (!id) return "";
+  const meta = poolMeta.get(id);
+  const ticker = meta?.ticker;
+  const name = meta?.name;
+  if (ticker || name) {
+    const title = [name && name !== ticker ? name : null, id].filter(Boolean).join(" · ");
+    return `<span class="pool-ticker pool-id" data-pool="${esc(id)}" title="${esc(title)}">${esc(ticker || name)}</span>`;
+  }
+  return `<span class="pool-id hash" data-pool="${esc(id)}" title="${esc(id)}">${esc(short(id, 10, 4))}</span>`;
+}
+
+/** DRep / SPO / CC voter on governance vote cards. */
+function govVoteVoterSpan(d) {
+  if (!d?.voter) return "";
+  const voter = String(d.voter);
+  if (d.role === "stakePoolOperator" || isLookupPoolId(voter)) return poolSpan(voter);
+  if (d.role === "delegateRepresentative" || isLookupDrepId(voter) || d.voterName) {
+    return drepSpan(voter, d.voterName);
+  }
+  return `<span class="hash" title="${esc(voter)}">${esc(short(voter, 10, 4))}</span>`;
 }
 
 /** Prefer stamped/cached givenName; enrichDreps fills misses via /api/drep. */
@@ -2215,7 +2279,8 @@ function eventPassesFeedFilters(ev, opts = {}) {
   ) {
     return false;
   }
-  if (ev.category === "dex" && !dexVenueEnabled(ev.data?.dex)) return false;
+  if (ev.category === "finance"
+    && !financeAppEnabled(String(ev.data?.dex || ev.data?.dapp || ""))) return false;
   if (ev.category === "dapp" && !dappAppEnabled(ev.data?.dapp)) return false;
   if (ev.category === "governance") {
     const gt = govTypeKey(ev);
@@ -2242,7 +2307,7 @@ function feedFilterKey() {
   return JSON.stringify({
     f: settings.filters,
     g: settings.govTypes,
-    d: settings.dexVenues,
+    d: settings.financeApps,
     a: settings.dappApps,
     m: settings.minAda,
   });
@@ -2689,7 +2754,7 @@ function tipCardIsVisible(card) {
   if (card.closest(".block-group.f-hide")) return false;
   // Category chips use a stylesheet rule (display:none), not .f-hide.
   if (!settings.filters[card.dataset.category]) return false;
-  if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return false;
+  if (card.dataset.category === "finance" && !financeAppEnabled(financeNameOf(card))) return false;
   if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) return false;
   if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) return false;
   const q = $("search").value.trim().toLowerCase();
@@ -3112,8 +3177,13 @@ function buildCard(ev) {
   if (ev.slot != null) card.dataset.slot = String(ev.slot);
   if (ev.tx_hash) card.dataset.tx = ev.tx_hash;
   if (ev.data && ev.data.ada != null) card.dataset.ada = ev.data.ada;
-  if (ev.category === "dex" && ev.data?.dex) card.dataset.dex = String(ev.data.dex);
-  if (ev.category === "dapp" && ev.data?.dapp) card.dataset.dapp = String(ev.data.dapp);
+  // `data-dex` also drives order→settlement pill matching, so keep it whenever
+  // the event names a venue, not just for the filter.
+  if (ev.data?.dex) card.dataset.dex = String(ev.data.dex);
+  if (ev.data?.dapp) card.dataset.dapp = String(ev.data.dapp);
+  if (ev.category === "finance") {
+    card.dataset.finance = String(ev.data?.dex || ev.data?.dapp || "");
+  }
   if (ev.category === "governance") {
     const gt = govTypeKey(ev);
     if (gt) card.dataset.govType = gt;
@@ -3128,8 +3198,8 @@ function buildCard(ev) {
   let iconStyle = "";
   const scam = ev.kind === "token_transfer" && !!ev.data?.scam;
   const branded =
-    (ev.category === "dapp" && dappIconHtml && dappIconHtml(ev.data?.dapp))
-    || (ev.category === "dex" && dexIconHtml && dexIconHtml(ev.data?.dex))
+    (ev.data?.dapp && dappIconHtml && dappIconHtml(ev.data.dapp))
+    || (ev.data?.dex && dexIconHtml && dexIconHtml(ev.data.dex))
     || null;
   if (branded) {
     iconHtml = branded.html;
@@ -3977,7 +4047,7 @@ function visibleFeedFillsPage() {
   document.querySelectorAll("#feed .card").forEach((card) => {
     if (card.classList.contains("f-hide")) return;
     if (!settings.filters[card.dataset.category]) return;
-    if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return;
+    if (card.dataset.category === "finance" && !financeAppEnabled(financeNameOf(card))) return;
     if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) return;
     if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) return;
     n++;
@@ -4003,7 +4073,7 @@ function visibleMatchCount() {
   let n = 0;
   document.querySelectorAll("#feed .card:not(.f-hide)").forEach((card) => {
     if (!settings.filters[card.dataset.category]) return;
-    if (card.dataset.category === "dex" && !dexVenueEnabled(card.dataset.dex)) return;
+    if (card.dataset.category === "finance" && !financeAppEnabled(financeNameOf(card))) return;
     if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) return;
     if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) return;
     n++;

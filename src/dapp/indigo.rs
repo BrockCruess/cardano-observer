@@ -19,7 +19,7 @@
 //! - Governance (poll / vote touch)
 
 use super::DappHit;
-use crate::dex::payment_credential;
+use crate::parse::payment_credential;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;

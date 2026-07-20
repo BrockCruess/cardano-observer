@@ -4,7 +4,7 @@
 use crate::config::{Config, Network};
 use crate::dapp::DappRegistry;
 use crate::deleg::{self, DelegationTracker};
-use crate::dex::DexRegistry;
+use crate::dapp::dex::DexRegistry;
 use crate::enrich::Enricher;
 use crate::model::{BlockRef, EraSummary, ChainEvent, TimeModel, Tip};
 use crate::parse;

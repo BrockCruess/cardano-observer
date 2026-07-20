@@ -16,6 +16,7 @@ export const DAPP_APPS = [
   "FluidTokens",
   "Liqwid",
   "Optim Finance",
+  "Dano Finance",
   "Strike",
   "Surf",
   "Wayup",
@@ -51,6 +52,11 @@ const DAPP_LOGOS = {
     badge: true,
     plate: "#15102E",
     inset: true,
+  },
+  "Dano Finance": {
+    src: "/dapp/logos/dano.png?v=2",
+    badge: true,
+    plate: "#0a0a0a",
   },
   Strike: {
     src: "/dapp/logos/strike.png?v=2",
@@ -144,7 +150,9 @@ export function renderDappActivityHtml(d, ui) {
     : "";
   return (
     sub([
-      `<span class="badge contract">${esc(d.dapp || "dApp")}</span>`,
+      // No app-name pill: every detector title already ends in the app name
+      // ("Open Loan - Surf"), and DEX cards in the same Finance category show
+      // no venue pill either. Keep titles self-identifying.
       nodeId,
       iassetPool,
       market,
@@ -159,3 +167,20 @@ export function renderDappActivityHtml(d, ui) {
     collateral
   );
 }
+
+/**
+ * Apps the UI files under the **Finance** category alongside the DEX venues,
+ * so a protocol that both trades and lends shows one filter chip instead of
+ * two. Mirrors `model::FINANCE_APPS` on the server — keep the two in sync.
+ * Anything here but not in `DAPP_APPS` is ignored; the rest (Iagon, Wayup)
+ * keeps the separate dApp chip.
+ */
+export const FINANCE_APPS = [
+  "Dano Finance",
+  "FluidTokens",
+  "Indigo Protocol",
+  "Liqwid",
+  "Optim Finance",
+  "Strike",
+  "Surf",
+];

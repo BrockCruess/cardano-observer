@@ -14,7 +14,7 @@ pub struct ChainEvent {
     /// Machine-readable event kind, e.g. "transaction", "gov_vote"
     pub kind: String,
     /// Color/filter family: block | transaction | token | mint | staking |
-    /// pool | governance | metadata | dex | dapp | alert
+    /// pool | governance | metadata | finance | dapp | alert
     pub category: String,
     pub slot: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,5 +102,110 @@ impl TimeModel {
             // A slot beyond the last known era boundary still belongs to the
             // final era in practice (the safe zone just hasn't been extended)
             .or_else(|| self.eras.last())
+    }
+}
+
+/// dApps filed under `finance` alongside the DEX venues, so a protocol that is
+/// both (Dano Finance trades *and* lends) has one filter chip rather than two.
+/// Names match each scanner's `DAPP` const and `DAPP_APPS` in
+/// `static/dapp/mod.js`. Everything else - Iagon (storage), Wayup (NFT
+/// marketplace) - stays under `dapp`.
+pub const FINANCE_APPS: &[&str] = &[
+    "Dano Finance",
+    "FluidTokens",
+    "Indigo Protocol",
+    "Liqwid",
+    "Optim Finance",
+    "Strike",
+    "Surf",
+];
+
+/// Category for a dApp hit, by app name.
+pub fn category_for_dapp(dapp: &str) -> &'static str {
+    if FINANCE_APPS.contains(&dapp) {
+        "finance"
+    } else {
+        "dapp"
+    }
+}
+
+/// Map the pre-merge categories of events already on disk onto the current
+/// scheme: every `dex` event is now `finance`, and so is a `dapp` event from a
+/// finance app. Without this, restored history would carry categories the UI no
+/// longer has filters for and would silently vanish from the feed.
+pub fn normalize_legacy_category(ev: &mut ChainEvent) {
+    match ev.category.as_str() {
+        "dex" => ev.category = "finance".into(),
+        "dapp" => {
+            let dapp = ev.data.get("dapp").and_then(Value::as_str).unwrap_or("");
+            ev.category = category_for_dapp(dapp).into();
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ev(category: &str, dapp: Option<&str>) -> ChainEvent {
+        ChainEvent {
+            id: 1,
+            parent_id: None,
+            kind: "dapp_activity".into(),
+            category: category.into(),
+            slot: 0,
+            height: None,
+            block_hash: None,
+            tx_hash: None,
+            timestamp: 0,
+            title: String::new(),
+            summary: String::new(),
+            data: match dapp {
+                Some(d) => json!({ "dapp": d }),
+                None => json!({}),
+            },
+        }
+    }
+
+    #[test]
+    fn finance_apps_share_the_dex_category() {
+        assert_eq!(category_for_dapp("Dano Finance"), "finance");
+        assert_eq!(category_for_dapp("Liqwid"), "finance");
+        assert_eq!(category_for_dapp("Surf"), "finance");
+    }
+
+    #[test]
+    fn non_finance_apps_keep_their_own_category() {
+        assert_eq!(category_for_dapp("Iagon"), "dapp");
+        assert_eq!(category_for_dapp("Wayup"), "dapp");
+        assert_eq!(category_for_dapp(""), "dapp");
+    }
+
+    /// History written before the merge must land in a category the UI still
+    /// filters on, or those events silently disappear from the feed.
+    #[test]
+    fn legacy_categories_are_remapped_on_load() {
+        let mut e = ev("dex", None);
+        normalize_legacy_category(&mut e);
+        assert_eq!(e.category, "finance");
+
+        let mut e = ev("dapp", Some("Liqwid"));
+        normalize_legacy_category(&mut e);
+        assert_eq!(e.category, "finance");
+
+        let mut e = ev("dapp", Some("Iagon"));
+        normalize_legacy_category(&mut e);
+        assert_eq!(e.category, "dapp");
+    }
+
+    #[test]
+    fn unrelated_categories_are_untouched() {
+        for cat in ["transaction", "governance", "token", "finance"] {
+            let mut e = ev(cat, None);
+            normalize_legacy_category(&mut e);
+            assert_eq!(e.category, cat);
+        }
     }
 }

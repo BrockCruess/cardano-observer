@@ -1,8 +1,9 @@
 //! Detect the optional dApp pack at build time.
 //!
-//! When `src/dapp/mod.rs` is present, scanners are compiled and the UI module
-//! at `static/dapp/mod.js` is embedded. When the folder is removed, the binary
-//! still builds with an empty registry and the frontend skips the UI pack.
+//! When `src/dapp/mod.rs` is present, the dApp *and* DEX scanners are compiled
+//! and the UI module at `static/dapp/mod.js` is embedded. When the folder is
+//! removed, the binary still builds against `src/dapp_stub.rs` (empty dApp and
+//! DEX registries) and the frontend skips the UI pack.
 
 use std::path::Path;
 
@@ -24,6 +25,7 @@ fn main() {
             "fluidtokens.png",
             "liqwid.png",
             "optim.svg",
+            "dano.png",
             "strike.png",
             "surf.png",
             "wayup.svg",

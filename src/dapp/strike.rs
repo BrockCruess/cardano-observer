@@ -13,7 +13,7 @@
 //! under validator authority `e5efa8e8…` / `98d1fbc3…`.
 
 use super::DappHit;
-use crate::dex::payment_credential;
+use crate::parse::payment_credential;
 use crate::parse::{address_has_script_payment, asset_list, attach_actor, stake_from_address};
 use bech32::{Bech32, Hrp};
 use serde_json::{json, Value};

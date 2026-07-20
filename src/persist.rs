@@ -94,9 +94,10 @@ impl Persister {
             if line.trim().is_empty() {
                 continue;
             }
-            let Ok(ev) = serde_json::from_str::<ChainEvent>(&line) else {
+            let Ok(mut ev) = serde_json::from_str::<ChainEvent>(&line) else {
                 continue;
             };
+            crate::model::normalize_legacy_category(&mut ev);
             if ev.id >= before_id {
                 continue;
             }
@@ -148,9 +149,10 @@ impl Persister {
             if line.trim().is_empty() {
                 continue;
             }
-            let Ok(ev) = serde_json::from_str::<ChainEvent>(&line) else {
+            let Ok(mut ev) = serde_json::from_str::<ChainEvent>(&line) else {
                 continue;
             };
+            crate::model::normalize_legacy_category(&mut ev);
             if ev.kind == "block" {
                 if let (Some(hash), Some(height)) = (ev.block_hash.clone(), ev.height) {
                     blocks.push(BlockRef {
@@ -221,9 +223,10 @@ impl Persister {
             if line.trim().is_empty() {
                 continue;
             }
-            let Ok(ev) = serde_json::from_str::<ChainEvent>(&line) else {
+            let Ok(mut ev) = serde_json::from_str::<ChainEvent>(&line) else {
                 continue;
             };
+            crate::model::normalize_legacy_category(&mut ev);
             if ev.timestamp >= cutoff {
                 f(&ev);
             }

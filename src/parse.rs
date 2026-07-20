@@ -7,11 +7,12 @@
 use crate::config::Network;
 use crate::dapp::DappRegistry;
 use crate::deleg::DelegationTracker;
-use crate::dex::DexRegistry;
+use crate::dapp::dex::DexRegistry;
 use crate::model::ChainEvent;
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::{Bech32, Hrp};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 /// Everything extracted from one block.
 pub struct ParsedBlock {
@@ -125,7 +126,7 @@ pub fn parse_block(
         if !data_has_actor(&hit.data) {
             continue;
         }
-        events.push(crate::dex::hit_to_event(hit, slot, height, &hash, &tx_hash, timestamp));
+        events.push(crate::dapp::dex::hit_to_event(hit, slot, height, &hash, &tx_hash, timestamp));
     }
     for (tx_hash, hit) in dapp.scan_block(&scan_txs) {
         if !data_has_actor(&hit.data) {
@@ -586,6 +587,127 @@ pub fn asset_list(assets: &[&(String, String, i128)]) -> Value {
     json!({ "items": items, "more": assets.len().saturating_sub(MAX) })
 }
 
+/// True when `value` carries a positive qty of `policy`/`name_hex`.
+pub fn value_holds_asset(value: Option<&Value>, policy: &str, name_hex: &str) -> bool {
+    let Some(obj) = value.and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(assets) = obj.get(policy).and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(qty) = assets.get(name_hex) else {
+        return false;
+    };
+    qty.as_i64()
+        .map(|q| q > 0)
+        .or_else(|| qty.as_u64().map(|q| q > 0))
+        .or_else(|| qty.as_f64().map(|q| q > 0.0))
+        .unwrap_or(false)
+}
+
+/// Payment credentials (28-byte hex) on outputs that currently hold `policy`/`name_hex`.
+fn output_creds_holding_asset(tx: &Value, policy: &str, name_hex: &str) -> HashSet<String> {
+    let empty = Vec::new();
+    let mut out = HashSet::new();
+    for o in tx.get("outputs").and_then(Value::as_array).unwrap_or(&empty) {
+        if !value_holds_asset(o.get("value"), policy, name_hex) {
+            continue;
+        }
+        let Some(addr) = o.get("address").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(cred) = payment_credential(addr) {
+            out.insert(cred);
+        }
+    }
+    out
+}
+
+/// All key-payment credentials appearing on any tx output (excludes script payments).
+fn output_key_payment_creds(tx: &Value) -> HashSet<String> {
+    let empty = Vec::new();
+    let mut out = HashSet::new();
+    for o in tx.get("outputs").and_then(Value::as_array).unwrap_or(&empty) {
+        let Some(addr) = o.get("address").and_then(Value::as_str) else {
+            continue;
+        };
+        if address_has_script_payment(addr) {
+            continue;
+        }
+        if let Some(cred) = payment_credential(addr) {
+            out.insert(cred);
+        }
+    }
+    out
+}
+
+/// True when `policy`/`name_hex` changes payment-credential ownership in this tx
+/// (key→key across different pkhs, or key→script). Same-pkh consolidations /
+/// change reshuffles return false.
+///
+/// `resolve_spent(tx_hash, index)` should return `(address, value)` of the spent
+/// output when known (from the tx cache). When no inputs resolve, falls back to
+/// an output-only heuristic: single key-payment wallet txs are treated as
+/// internal; multi-wallet txs flag as a hand-change.
+pub fn asset_changes_hands(
+    tx: &Value,
+    policy: &str,
+    name_hex: &str,
+    mut resolve_spent: impl FnMut(&str, u64) -> Option<(String, Value)>,
+) -> bool {
+    let out_creds = output_creds_holding_asset(tx, policy, name_hex);
+    if out_creds.is_empty() {
+        return false;
+    }
+
+    let empty = Vec::new();
+    let mut in_creds = HashSet::new();
+    let mut resolved_any = false;
+    for i in tx.get("inputs").and_then(Value::as_array).unwrap_or(&empty) {
+        let Some(src) = i
+            .get("transaction")
+            .and_then(|t| t.get("id"))
+            .and_then(Value::as_str)
+            .or_else(|| i.get("txId").and_then(Value::as_str))
+        else {
+            continue;
+        };
+        let Some(index) = i
+            .get("index")
+            .and_then(Value::as_u64)
+            .or_else(|| i.get("outputIndex").and_then(Value::as_u64))
+        else {
+            continue;
+        };
+        let Some((addr, value)) = resolve_spent(src, index) else {
+            continue;
+        };
+        resolved_any = true;
+        if !value_holds_asset(Some(&value), policy, name_hex) {
+            continue;
+        }
+        if let Some(cred) = payment_credential(&addr) {
+            in_creds.insert(cred);
+        }
+    }
+
+    if resolved_any {
+        // New payment credential receives the asset → it changed hands.
+        return out_creds.iter().any(|c| !in_creds.contains(c));
+    }
+
+    // No resolved inputs (typical for fresh Ogmios txs whose parents aren't
+    // cached yet). Single key-payment wallet ⇒ treat as internal reshuffle.
+    let key_creds = output_key_payment_creds(tx);
+    if key_creds.len() <= 1 {
+        // Asset only on that one key (or only on scripts with ≤1 key change).
+        return out_creds.iter().any(|c| !key_creds.contains(c));
+    }
+    // Multiple key wallets in the tx: asset on any of them is a hand-change
+    // unless every receiving cred is somehow empty (already handled).
+    true
+}
+
 /// Decode an asset-name hex string to UTF-8 when printable, stripping a
 /// CIP-67 label prefix (e.g. CIP-68 000de140…) when present.
 pub fn decode_asset_name(name_hex: &str) -> Option<String> {
@@ -640,6 +762,20 @@ pub fn stake_address(cred_hex: &str, from: Option<&str>, network: Network) -> St
 }
 
 /// CIP-19: address types 1/3/5/7 have a script payment credential.
+/// Extract the payment credential (28-byte hex) from a bech32 Shelley
+/// address, if its payment part is a script or key hash.
+pub fn payment_credential(addr: &str) -> Option<String> {
+    if !addr.starts_with("addr1") && !addr.starts_with("addr_test1") {
+        return None;
+    }
+    let checked = CheckedHrpstring::new::<Bech32>(addr).ok()?;
+    let bytes: Vec<u8> = checked.byte_iter().collect();
+    if bytes.len() < 29 {
+        return None;
+    }
+    Some(hex::encode(&bytes[1..29]))
+}
+
 pub fn address_has_script_payment(addr: &str) -> bool {
     let Some(header) = address_header(addr) else {
         return false;
@@ -731,12 +867,16 @@ pub fn collect_input_txs(
 /// Best-effort **user** actor for a tx: largest key-payment output, preferring
 /// an embedded stake address over the payment address. Skips script outs
 /// (DEX pools, dApp contracts, order scripts) so we don't label the venue.
+/// Only reachable from the optional dApp/DEX pack (`src/dapp/`).
+#[cfg_attr(not(has_dapp), allow(dead_code))]
 pub fn actor_from_tx(tx: &Value) -> Option<String> {
     actor_from_outputs(tx.get("outputs").and_then(Value::as_array)?, None)
 }
 
 /// Prefer the key-payment output whose asset qty is closest to `target`
 /// (e.g. IAG earnings equal to the claimed amount — not a large change UTxO).
+/// Only reachable from the optional dApp/DEX pack (`src/dapp/`).
+#[cfg_attr(not(has_dapp), allow(dead_code))]
 pub fn actor_receiving_asset(
     tx: &Value,
     policy: &str,
@@ -764,11 +904,15 @@ pub fn actor_receiving_asset(
 }
 
 /// Prefer the key-payment output receiving the most ADA (e.g. position seller).
+/// Only reachable from the optional dApp/DEX pack (`src/dapp/`).
+#[cfg_attr(not(has_dapp), allow(dead_code))]
 pub fn actor_receiving_ada(tx: &Value, min_lovelace: u64) -> Option<String> {
     let outputs = tx.get("outputs").and_then(Value::as_array)?;
     actor_from_outputs(outputs, Some(min_lovelace))
 }
 
+/// Only reachable from the optional dApp/DEX pack (`src/dapp/`).
+#[cfg_attr(not(has_dapp), allow(dead_code))]
 fn actor_from_outputs<'a>(
     outputs: &'a [Value],
     min_lovelace: Option<u64>,
@@ -805,10 +949,14 @@ fn actor_from_outputs<'a>(
     best.map(|(_, _, addr)| prefer_stake(addr))
 }
 
+/// Only reachable from the optional dApp/DEX pack (`src/dapp/`).
+#[cfg_attr(not(has_dapp), allow(dead_code))]
 fn prefer_stake(addr: &str) -> String {
     stake_from_address(addr).unwrap_or_else(|| addr.to_string())
 }
 
+/// Only reachable from the optional dApp/DEX pack (`src/dapp/`).
+#[cfg_attr(not(has_dapp), allow(dead_code))]
 fn asset_qty(value: Option<&Value>, policy: &str, name_hex: &str) -> u128 {
     value
         .and_then(|v| v.get(policy))
@@ -823,6 +971,8 @@ fn asset_qty(value: Option<&Value>, policy: &str, name_hex: &str) -> u128 {
 }
 
 /// Attach actor onto event data: `stake` when we have a stake address, else `address`.
+/// Only reachable from the optional dApp/DEX pack (`src/dapp/`).
+#[cfg_attr(not(has_dapp), allow(dead_code))]
 pub fn attach_actor(data: &mut serde_json::Map<String, Value>, actor: Option<&str>) {
     let Some(a) = actor.map(str::trim).filter(|s| !s.is_empty()) else {
         return;
@@ -967,7 +1117,7 @@ mod tests {
     use super::*;
     use crate::dapp::DappRegistry;
     use crate::deleg::DelegationTracker;
-    use crate::dex::DexRegistry;
+    use crate::dapp::dex::DexRegistry;
 
     fn encode_base_addr(payment_hex: &str, stake_hex: &str) -> String {
         let payment = hex::decode(payment_hex).unwrap();
@@ -1243,5 +1393,148 @@ mod tests {
         )
         .unwrap();
         assert_eq!(input_txs(&parsed_a2, "claimA2"), vec!["claimA".to_string()]);
+    }
+
+    #[test]
+    fn asset_changes_hands_same_pkh_consolidation_is_internal() {
+        let stake = "87098a3cfda9c3a1dec5657ce7bd4cf0757f0474d2cdf4032db71360";
+        let alice = encode_base_addr(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            stake,
+        );
+        let policy = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let name = "5343414d"; // SCAM
+        let parent = json!({
+            "outputs": [{
+                "address": alice,
+                "value": {
+                    "ada": { "lovelace": 5_000_000u64 },
+                    (policy): { (name): 1 }
+                }
+            }]
+        });
+        let tx = json!({
+            "inputs": [{ "transaction": { "id": "parent" }, "index": 0 }],
+            "outputs": [
+                {
+                    "address": alice,
+                    "value": {
+                        "ada": { "lovelace": 2_000_000u64 },
+                        (policy): { (name): 1 }
+                    }
+                },
+                { "address": alice, "value": { "ada": { "lovelace": 2_000_000u64 } } },
+            ]
+        });
+        let parents = std::collections::HashMap::from([("parent".to_string(), parent)]);
+        let changes = asset_changes_hands(&tx, policy, name, |src, idx| {
+            let p = parents.get(src)?;
+            let o = p.get("outputs")?.as_array()?.get(idx as usize)?;
+            Some((
+                o.get("address")?.as_str()?.to_string(),
+                o.get("value")?.clone(),
+            ))
+        });
+        assert!(!changes, "same pkh reshape must not count as a hand-change");
+    }
+
+    #[test]
+    fn asset_changes_hands_alice_to_bob_is_external() {
+        let stake = "87098a3cfda9c3a1dec5657ce7bd4cf0757f0474d2cdf4032db71360";
+        let alice = encode_base_addr(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            stake,
+        );
+        let bob = encode_base_addr(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            stake,
+        );
+        let policy = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let name = "5343414d";
+        let parent = json!({
+            "outputs": [{
+                "address": alice,
+                "value": {
+                    "ada": { "lovelace": 5_000_000u64 },
+                    (policy): { (name): 1 }
+                }
+            }]
+        });
+        let tx = json!({
+            "inputs": [{ "transaction": { "id": "parent" }, "index": 0 }],
+            "outputs": [
+                {
+                    "address": bob,
+                    "value": {
+                        "ada": { "lovelace": 2_000_000u64 },
+                        (policy): { (name): 1 }
+                    }
+                },
+                { "address": alice, "value": { "ada": { "lovelace": 2_000_000u64 } } },
+            ]
+        });
+        let parents = std::collections::HashMap::from([("parent".to_string(), parent)]);
+        let changes = asset_changes_hands(&tx, policy, name, |src, idx| {
+            let p = parents.get(src)?;
+            let o = p.get("outputs")?.as_array()?.get(idx as usize)?;
+            Some((
+                o.get("address")?.as_str()?.to_string(),
+                o.get("value")?.clone(),
+            ))
+        });
+        assert!(changes, "alice→bob must count as a hand-change");
+    }
+
+    #[test]
+    fn asset_changes_hands_fallback_single_wallet_without_inputs() {
+        let stake = "87098a3cfda9c3a1dec5657ce7bd4cf0757f0474d2cdf4032db71360";
+        let alice = encode_base_addr(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            stake,
+        );
+        let policy = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let name = "5343414d";
+        let tx = json!({
+            "inputs": [{ "transaction": { "id": "missing" }, "index": 0 }],
+            "outputs": [{
+                "address": alice,
+                "value": {
+                    "ada": { "lovelace": 2_000_000u64 },
+                    (policy): { (name): 1 }
+                }
+            }]
+        });
+        let changes = asset_changes_hands(&tx, policy, name, |_, _| None);
+        assert!(!changes, "unresolved inputs + single key wallet ⇒ internal");
+    }
+
+    #[test]
+    fn asset_changes_hands_fallback_two_wallets_without_inputs() {
+        let stake = "87098a3cfda9c3a1dec5657ce7bd4cf0757f0474d2cdf4032db71360";
+        let alice = encode_base_addr(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            stake,
+        );
+        let bob = encode_base_addr(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            stake,
+        );
+        let policy = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let name = "5343414d";
+        let tx = json!({
+            "inputs": [{ "transaction": { "id": "missing" }, "index": 0 }],
+            "outputs": [
+                {
+                    "address": bob,
+                    "value": {
+                        "ada": { "lovelace": 2_000_000u64 },
+                        (policy): { (name): 1 }
+                    }
+                },
+                { "address": alice, "value": { "ada": { "lovelace": 2_000_000u64 } } },
+            ]
+        });
+        let changes = asset_changes_hands(&tx, policy, name, |_, _| None);
+        assert!(changes, "unresolved inputs + two key wallets ⇒ hand-change");
     }
 }

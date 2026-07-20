@@ -6,7 +6,6 @@ mod dapp;
 mod dapp;
 mod demo;
 mod deleg;
-mod dex;
 mod dreps;
 mod enrich;
 mod gov_actions;
@@ -160,15 +159,15 @@ async fn main() -> anyhow::Result<()> {
     if config.demo {
         tokio::spawn(demo::run(state.clone()));
     } else {
-        let dex = Arc::new(dex::DexRegistry::new());
-        let dapp = Arc::new(dapp::DappRegistry::with_restored_txs(
-            state.cached_tx_entries(),
-        ));
+        // One snapshot feeds both registries: the DEX order tracker and the
+        // dApp scanners are equally restart-sensitive.
+        let cached_txs = state.cached_tx_entries();
+        let dex = Arc::new(dapp::dex::DexRegistry::with_restored_txs(&cached_txs));
+        let dapp = Arc::new(dapp::DappRegistry::with_restored_txs(cached_txs));
         // Drop stale shared-script edges from JSONL so light-cone matches hub rules.
         state.rewrite_buffered_input_txs(&dapp);
         if config.network == config::Network::Mainnet {
-            tokio::spawn(dex.clone().refresh_vyfi_loop());
-            tokio::spawn(dex.clone().refresh_minswap_pools_loop());
+            tokio::spawn(dapp::dex::refresh_dex_caches(dex.clone()));
         }
         tokio::spawn(ogmios::run(
             config.clone(),

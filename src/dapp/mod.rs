@@ -1,19 +1,35 @@
 //! Shared dApp event detection.
 //!
-//! Per-dApp scanners live in sibling modules. This module only aggregates
-//! their hits into `category: "dapp"` events; `data.dapp` names the app.
+//! Per-dApp scanners live in sibling modules, one file per app; the DEX
+//! venues live here too (`minswap`, `sundaeswap`, … , `dano`) with their
+//! shared engine in [`dex`]. This module only aggregates
+//! their hits into events whose `data.dapp` names the app. Finance apps are
+//! filed under `category: "finance"` with the DEX venues (see
+//! `model::FINANCE_APPS`); the rest under `category: "dapp"`.
 //! Keep filter names in `static/dapp/mod.js` (`DAPP_APPS`) in sync with the
 //! scanners registered here. The whole `src/dapp/` tree is optional at build
 //! time (see `build.rs` / `src/dapp_stub.rs`).
 
+pub mod dex;
+
+mod chadswap;
+mod cswap;
+mod dano;
 mod fluidtokens;
+mod geniusyield;
 mod iagon;
 mod indigo;
 mod liqwid;
+mod minswap;
+mod muesliswap;
 mod optim;
+mod splash;
 mod strike;
+mod sundaeswap;
 mod surf;
+mod vyfinance;
 mod wayup;
+mod wingriders;
 
 use crate::model::ChainEvent;
 use serde_json::Value;
@@ -26,6 +42,7 @@ pub struct DappHit {
 
 /// Registry of dApp scanners consulted on every block.
 pub struct DappRegistry {
+    dano: dano::Scanner,
     iagon: iagon::Scanner,
     indigo: indigo::Scanner,
     fluidtokens: fluidtokens::Scanner,
@@ -39,6 +56,7 @@ pub struct DappRegistry {
 impl DappRegistry {
     pub fn new() -> Self {
         Self {
+            dano: dano::Scanner::new(),
             iagon: iagon::Scanner::new(),
             indigo: indigo::Scanner::new(),
             fluidtokens: fluidtokens::Scanner::new(),
@@ -54,6 +72,7 @@ impl DappRegistry {
     /// from restored `{ tx, block }` cache entries (no events emitted).
     pub fn with_restored_txs(entries: Vec<(String, Value)>) -> Self {
         let reg = Self::new();
+        reg.dano.warm_from_tx_entries(&entries);
         reg.iagon.warm_from_tx_entries(&entries);
         reg.indigo.warm_from_tx_entries(&entries);
         reg.fluidtokens.warm_from_tx_entries(&entries);
@@ -67,7 +86,8 @@ impl DappRegistry {
 
     /// Run every registered dApp scanner over the block's transactions.
     pub fn scan_block(&self, txs: &[(&str, &Value)]) -> Vec<(String, DappHit)> {
-        let mut hits = self.iagon.scan_block(txs);
+        let mut hits = self.dano.scan_block(txs);
+        hits.extend(self.iagon.scan_block(txs));
         hits.extend(self.indigo.scan_block(txs));
         hits.extend(self.fluidtokens.scan_block(txs));
         hits.extend(self.liqwid.scan_block(txs));
@@ -123,7 +143,10 @@ pub fn hit_to_event(
         id: 0,
         parent_id: None,
         kind: hit.kind.into(),
-        category: "dapp".into(),
+        category: crate::model::category_for_dapp(
+            hit.data.get("dapp").and_then(Value::as_str).unwrap_or(""),
+        )
+        .into(),
         slot,
         height: Some(height),
         block_hash: Some(block_hash.to_string()),

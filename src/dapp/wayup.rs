@@ -10,7 +10,7 @@
 //! Aggregated checkouts of foreign listings still carry Wayup metadata.
 
 use super::DappHit;
-use crate::dex::payment_credential;
+use crate::parse::payment_credential;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;

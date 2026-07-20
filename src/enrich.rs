@@ -255,8 +255,18 @@ impl Enricher {
         stamp_json_assets(&mut event.data, &self.registry);
     }
 
-    /// Mark token-transfer events that move a known scam fingerprint.
-    pub fn stamp_event_scam(&self, event: &mut crate::model::ChainEvent) {
+    /// Mark token-transfer events that move a known scam fingerprint **across
+    /// payment credentials** (not same-pkh consolidations / change reshuffles).
+    ///
+    /// `changes_hands(policy, name_hex)` should return true when that asset
+    /// left one payment key (or script) for another in this tx.
+    /// Listed fingerprints that actually change hands get `scam: true` on the
+    /// asset item; the event also gets `data.scam` when any item qualifies.
+    pub fn stamp_event_scam(
+        &self,
+        event: &mut crate::model::ChainEvent,
+        mut changes_hands: impl FnMut(&str, &str) -> bool,
+    ) {
         if event.kind != "token_transfer" {
             return;
         }
@@ -264,19 +274,35 @@ impl Enricher {
             return;
         };
         let Some(items) = obj
-            .get("assets")
-            .and_then(|a| a.get("items"))
-            .and_then(Value::as_array)
+            .get_mut("assets")
+            .and_then(|a| a.get_mut("items"))
+            .and_then(Value::as_array_mut)
         else {
             obj.remove("scam");
             return;
         };
-        let hit = items.iter().any(|a| {
-            a.get("fingerprint")
+        let mut any = false;
+        for a in items.iter_mut() {
+            let Some(item) = a.as_object_mut() else {
+                continue;
+            };
+            let is_scam = item
+                .get("fingerprint")
                 .and_then(Value::as_str)
                 .is_some_and(|fp| self.scam_tokens.contains(fp))
-        });
-        if hit {
+                && item
+                    .get("policy")
+                    .and_then(Value::as_str)
+                    .zip(item.get("nameHex").and_then(Value::as_str))
+                    .is_some_and(|(policy, name_hex)| changes_hands(policy, name_hex));
+            if is_scam {
+                item.insert("scam".into(), json!(true));
+                any = true;
+            } else {
+                item.remove("scam");
+            }
+        }
+        if any {
             obj.insert("scam".into(), json!(true));
         } else {
             obj.remove("scam");

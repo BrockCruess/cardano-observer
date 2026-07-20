@@ -1,7 +1,11 @@
 /**
  * DEX UI helpers.
  *
- * Keep `DEX_VENUES` in sync with scanners in `src/dex.rs`.
+ * Venues here and the finance apps from `/dapp/mod.js` share the single
+ * **Finance** category and filter chip in the UI.
+ *
+ * Keep `DEX_VENUES` in sync with the DEX modules in `src/dapp/`
+ * (one file per venue; shared engine in `src/dapp/dex.rs`).
  * Logos in `/dex/logos/` — Cardano.org app icons + official site marks.
  * `badge: true` paints `plate` on the icon frame behind the unchanged artwork.
  */

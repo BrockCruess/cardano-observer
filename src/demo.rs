@@ -326,7 +326,7 @@ fn emit_tx(
         }
         publish_child(
             "dex_order",
-            "dex",
+            "finance",
             match side {
                 "buy" => format!("Buy Order - {dex}"),
                 "sell" => format!("Sell Order - {dex}"),
@@ -399,7 +399,7 @@ fn emit_tx(
         };
         publish_child(
             "dex_lp",
-            "dex",
+            "finance",
             title,
             json!({
                 "dex": dex, "side": side, "ada": ada, "assets": assets,
@@ -414,7 +414,7 @@ fn emit_tx(
         let want_qty = rng.gen_range(1_000..5_000_000i64);
         publish_child(
             "dex_cancel",
-            "dex",
+            "finance",
             format!("Buy Cancelled - {dex}"),
             json!({
                 "dex": dex,
