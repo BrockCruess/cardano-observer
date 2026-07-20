@@ -13,6 +13,7 @@
 //! `/api/drep` lookups.
 
 use anyhow::{anyhow, Context, Result};
+use bech32::{Bech32, Hrp};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -21,6 +22,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
+
+/// CIP-129 header: DRep (key-type 2) + key-hash credential (2).
+const CIP129_DREP_KEY: u8 = 0x22;
+/// CIP-129 header: DRep (key-type 2) + script-hash credential (3).
+const CIP129_DREP_SCRIPT: u8 = 0x23;
 
 const CACHE_FILE: &str = "dreps.json";
 const PAGE: usize = 100;
@@ -114,16 +120,31 @@ impl DrepCache {
     }
 
     pub fn get(&self, drep_id: &str) -> Option<DrepEntry> {
-        self.by_id.lock().unwrap().get(drep_id).cloned()
+        let map = self.by_id.lock().unwrap();
+        // CIP-105 legacy and CIP-129 forms share a credential hash but differ
+        // as bech32 strings — try every alias so either key hits.
+        for id in drep_id_aliases(drep_id) {
+            if let Some(e) = map.get(&id) {
+                return Some(e.clone());
+            }
+        }
+        None
     }
 
     /// Compact dump for the browser (id → name).
+    ///
+    /// Emits both CIP-129 and legacy CIP-105 bech32 keys so the UI can resolve
+    /// whichever form is on the event card.
     pub fn to_names_json(&self) -> Value {
         let map = self.by_id.lock().unwrap();
         let mut out = serde_json::Map::new();
         for (id, e) in map.iter() {
-            if let Some(name) = e.name.as_ref().filter(|s| !s.is_empty()) {
-                out.insert(id.clone(), json!({ "name": name }));
+            let Some(name) = e.name.as_ref().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            for alt in drep_id_aliases(id) {
+                out.entry(alt)
+                    .or_insert_with(|| json!({ "name": name }));
             }
         }
         Value::Object(out)
@@ -300,6 +321,99 @@ fn save_cache(path: &Path, map: &HashMap<String, DrepEntry>) -> Result<()> {
 pub fn is_lookup_drep_id(id: &str) -> bool {
     let id = id.trim();
     (id.starts_with("drep1") || id.starts_with("drep_script1")) && id.len() >= 50 && id.len() <= 120
+}
+
+/// Map Blockfrost / Ogmios spellings of the special DReps onto the UI labels
+/// used by [`crate::parse::drep_display`] (`Always Abstain` / `Always No Confidence`).
+pub fn normalize_drep_id(id: &str) -> String {
+    match id.trim() {
+        "drep_always_abstain"
+        | "always_abstain"
+        | "alwaysAbstain"
+        | "abstain"
+        | "Always Abstain" => "Always Abstain".into(),
+        "drep_always_no_confidence"
+        | "always_no_confidence"
+        | "alwaysNoConfidence"
+        | "noConfidence"
+        | "Always No Confidence" => "Always No Confidence".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Equality after special-label normalization (and CIP-105 ↔ CIP-129 aliases).
+pub fn drep_ids_equal(a: &str, b: &str) -> bool {
+    let a = normalize_drep_id(a);
+    let b = normalize_drep_id(b);
+    if a == b {
+        return true;
+    }
+    let aliases_a = drep_id_aliases(&a);
+    aliases_a.iter().any(|x| drep_id_aliases(&b).iter().any(|y| x == y))
+}
+
+/// CIP-129 bech32 for a 28-byte credential hash (`from` = verificationKey / script…).
+pub fn drep_bech32_cip129(cred_hex: &str, from: Option<&str>) -> Option<String> {
+    let bytes = hex::decode(cred_hex).ok()?;
+    if bytes.len() != 28 {
+        return None;
+    }
+    let header = match from {
+        Some("scriptHash") | Some("script") => CIP129_DREP_SCRIPT,
+        _ => CIP129_DREP_KEY,
+    };
+    let mut payload = Vec::with_capacity(29);
+    payload.push(header);
+    payload.extend_from_slice(&bytes);
+    encode_drep_payload(&payload)
+}
+
+/// All bech32 spellings of the same DRep credential (self + CIP-105 ↔ CIP-129).
+pub fn drep_id_aliases(id: &str) -> Vec<String> {
+    let id = id.trim();
+    let mut out = vec![id.to_string()];
+    let Some(raw) = decode_drep_payload(id) else {
+        return out;
+    };
+    let push = |out: &mut Vec<String>, s: String| {
+        if !out.iter().any(|x| x == &s) {
+            out.push(s);
+        }
+    };
+    match raw.len() {
+        28 => {
+            // Legacy CIP-105 → CIP-129 (try both key and script headers).
+            for header in [CIP129_DREP_KEY, CIP129_DREP_SCRIPT] {
+                let mut payload = Vec::with_capacity(29);
+                payload.push(header);
+                payload.extend_from_slice(&raw);
+                if let Some(b) = encode_drep_payload(&payload) {
+                    push(&mut out, b);
+                }
+            }
+        }
+        29 if raw[0] == CIP129_DREP_KEY || raw[0] == CIP129_DREP_SCRIPT => {
+            // CIP-129 → legacy CIP-105 (hash only).
+            if let Some(b) = encode_drep_payload(&raw[1..]) {
+                push(&mut out, b);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn decode_drep_payload(id: &str) -> Option<Vec<u8>> {
+    let (hrp, data) = bech32::decode(id).ok()?;
+    match hrp.as_str() {
+        "drep" | "drep_script" => Some(data),
+        _ => None,
+    }
+}
+
+fn encode_drep_payload(payload: &[u8]) -> Option<String> {
+    let hrp = Hrp::parse("drep").ok()?;
+    bech32::encode::<Bech32>(hrp, payload).ok()
 }
 
 fn text_field(v: &Value) -> Option<String> {
@@ -1035,6 +1149,71 @@ mod tests {
         let n = cache.refresh(&http, &server.uri(), None).await.unwrap();
         assert_eq!(n, 3);
         assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn cip129_and_legacy_drep_ids_alias() {
+        // Synthetic 28-byte credential — no mainnet DRep ids in fixtures.
+        let cred_hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c";
+        let cip129 = drep_bech32_cip129(cred_hex, Some("verificationKey")).unwrap();
+        let legacy = encode_drep_payload(&hex::decode(cred_hex).unwrap()).unwrap();
+        let aliases = drep_id_aliases(&cip129);
+        assert!(aliases.contains(&cip129));
+        assert!(aliases.contains(&legacy));
+        let back = drep_id_aliases(&legacy);
+        assert!(back.iter().any(|a| a == &cip129));
+    }
+
+    #[test]
+    fn normalizes_blockfrost_special_dreps() {
+        assert_eq!(normalize_drep_id("drep_always_abstain"), "Always Abstain");
+        assert_eq!(normalize_drep_id("Always Abstain"), "Always Abstain");
+        assert_eq!(
+            normalize_drep_id("drep_always_no_confidence"),
+            "Always No Confidence"
+        );
+        assert!(drep_ids_equal(
+            "drep_always_abstain",
+            "Always Abstain"
+        ));
+        assert!(!drep_ids_equal(
+            "drep_always_abstain",
+            "Always No Confidence"
+        ));
+    }
+
+    #[test]
+    fn cache_get_resolves_legacy_via_cip129_key() {
+        let cred_hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c";
+        let cip129 = drep_bech32_cip129(cred_hex, Some("verificationKey")).unwrap();
+        let legacy = encode_drep_payload(&hex::decode(cred_hex).unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DrepCache::load(Some(dir.path()));
+        cache.remember(
+            &cip129,
+            DrepEntry {
+                name: Some("Test DRep".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cache.get(&legacy).and_then(|e| e.name),
+            Some("Test DRep".into())
+        );
+        let dump = cache.to_names_json();
+        assert_eq!(dump[&legacy]["name"], "Test DRep");
+        assert_eq!(dump[&cip129]["name"], "Test DRep");
+    }
+
+    #[test]
+    fn drep_bech32_cip129_uses_header() {
+        let hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c";
+        let b32 = drep_bech32_cip129(hex, Some("verificationKey")).unwrap();
+        assert!(b32.starts_with("drep1"));
+        let raw = decode_drep_payload(&b32).unwrap();
+        assert_eq!(raw.len(), 29);
+        assert_eq!(raw[0], CIP129_DREP_KEY);
+        assert_eq!(&raw[1..], &hex::decode(hex).unwrap());
     }
 }
 

@@ -145,6 +145,8 @@ impl AppState {
             .into_iter()
             .filter(|e| e.timestamp >= cutoff)
             .collect();
+        // Drop no-op redelegations restored from disk (from == to).
+        crate::deleg::drop_noop_redelegations(&mut kept);
         // Keep ring in chain order. Disk order alone is wrong if events were
         // ever appended out of slot order (e.g. a one-off historical inject).
         kept.sort_by(|a, b| a.slot.cmp(&b.slot).then_with(|| a.id.cmp(&b.id)));
@@ -202,6 +204,7 @@ impl AppState {
             e.stamp_event_assets(&mut event);
             e.stamp_event_dreps(&mut event);
             e.stamp_event_gov_actions(&mut event);
+            e.stamp_event_scam(&mut event);
             if !e.keep_dex_event(&event) {
                 return None;
             }
@@ -248,6 +251,15 @@ impl AppState {
         let dropped = before - buf.len();
         if dropped > 0 {
             tracing::info!("dropped {dropped} DEX events with tokens outside CIP-26");
+        }
+    }
+
+    /// Flag buffered token-transfer events that move a known scam fingerprint.
+    pub fn stamp_buffered_scam(&self) {
+        let Some(enricher) = self.meta_ref() else { return };
+        let mut buf = self.events.lock().unwrap();
+        for ev in buf.iter_mut() {
+            enricher.stamp_event_scam(ev);
         }
     }
 

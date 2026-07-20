@@ -836,19 +836,22 @@ fn hit_for(et: EventType, sum: &ValueSummary, actor: Option<String>) -> DappHit 
     });
     let obj = data.as_object_mut().unwrap();
 
-    if sum.ada > 0
-        && matches!(
-            et,
+    // CDP ADA is vault collateral (UI wants `collateral` + badge). Plain `ada`
+    // is only for non-loan flows (ROB deposit, interest).
+    if sum.ada > 0 {
+        match et {
             EventType::OpenCdp
-                | EventType::CloseCdp
-                | EventType::DepositCollateral
-                | EventType::WithdrawCollateral
-                | EventType::LiquidateCdp
-                | EventType::OpenRob
-                | EventType::PayInterest
-        )
-    {
-        obj.insert("ada".into(), json!(sum.ada));
+            | EventType::CloseCdp
+            | EventType::DepositCollateral
+            | EventType::WithdrawCollateral
+            | EventType::LiquidateCdp => {
+                obj.insert("collateral".into(), ada_as_asset_list(sum.ada));
+            }
+            EventType::OpenRob | EventType::PayInterest => {
+                obj.insert("ada".into(), json!(sum.ada));
+            }
+            _ => {}
+        }
     }
 
     if sum.indy > 0
@@ -915,6 +918,22 @@ fn hit_for(et: EventType, sum: &ValueSummary, actor: Option<String>) -> DappHit 
         title: et.title().to_string(),
         data,
     }
+}
+
+/// ADA collateral chip list (matches Surf's `data.collateral` shape for the UI badge).
+fn ada_as_asset_list(lovelace: u64) -> Value {
+    json!({
+        "items": [{
+            "unit": "lovelace",
+            "policy": "",
+            "nameHex": "",
+            "name": "ADA",
+            "ticker": "ADA",
+            "qty": lovelace.to_string(),
+            "decimals": 6,
+        }],
+        "more": 0
+    })
 }
 
 fn summarize_value(value: Option<&Value>) -> ValueSummary {
@@ -1044,6 +1063,12 @@ mod tests {
         assert!(types(&hits).contains(&"open_cdp"), "{:?}", types(&hits));
         assert_eq!(hits[0].1.data["dapp"], "Indigo Protocol");
         assert_eq!(hits[0].1.data["iasset"], "iUSD");
+        assert!(hits[0].1.data.get("ada").is_none(), "ADA should be under collateral");
+        assert_eq!(
+            hits[0].1.data["collateral"]["items"][0]["qty"],
+            "50000000"
+        );
+        assert_eq!(hits[0].1.data["collateral"]["items"][0]["ticker"], "ADA");
     }
 
     #[test]

@@ -915,6 +915,7 @@ header {
   background: color-mix(in srgb, var(--evc) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--evc) 28%, transparent);
   margin-top: 2px;
+  position: relative;
 }
 .ev-icon svg { width: 18px; height: 18px; }
 /* dApp / DEX venue marks in event cards (not .brand-logo — that's the header). */
@@ -922,6 +923,32 @@ header {
   background: color-mix(in srgb, var(--evc) 10%, transparent);
   border-color: color-mix(in srgb, var(--evc) 22%, transparent);
   overflow: hidden;
+}
+.ev-icon.has-scam {
+  overflow: visible;
+}
+.scam-flag {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  font-size: 13px;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 2;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--c-alert) 90%, transparent));
+  animation: scam-flag-pulse 1.35s ease-in-out infinite;
+}
+@keyframes scam-flag-pulse {
+  0%, 100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 2px color-mix(in srgb, var(--c-alert) 70%, transparent));
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.18);
+    filter: drop-shadow(0 0 8px color-mix(in srgb, var(--c-alert) 100%, transparent));
+    opacity: 0.92;
+  }
 }
 .ev-icon .ev-logo {
   width: 20px;
@@ -1142,6 +1169,16 @@ header {
 .badge.abstain { --bc: var(--vote-abstain); }
 .badge.plus { --bc: var(--c-staking); }
 .badge.minus { --bc: var(--c-alert); }
+.badge.scam {
+  --bc: var(--c-alert);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--c-alert) 45%, transparent);
+  animation: scam-pill-pulse 1.6s ease-out infinite;
+}
+@keyframes scam-pill-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c-alert) 55%, transparent); }
+  70% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
 .badge.pending {
   --bc: #d4a017;
   box-shadow: 0 0 0 0 color-mix(in srgb, #d4a017 45%, transparent);

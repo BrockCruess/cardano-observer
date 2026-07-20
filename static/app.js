@@ -151,6 +151,14 @@ const esc = (s) =>
 /** Capitalize the first letter of each word; leave already-capital letters alone (LP, Minswap, …). */
 const titleCaseWords = (s) =>
   String(s ?? "").replace(/(^|[^A-Za-z0-9])([a-z])/g, (_, sep, ch) => sep + ch.toUpperCase());
+
+/** Card / modal title. DApp event titles are shown as authored by the detector. */
+function formatEventTitle(ev) {
+  if (!ev) return "";
+  if (ev.kind === "vote_delegation") return "DRep Delegation";
+  if (ev.category === "dapp") return String(ev.title || "");
+  return titleCaseWords(ev.title);
+}
 const short = (h, a = 8, b = 6) => {
   h = String(h ?? "");
   return h.length <= a + b + 1 ? h : h.slice(0, a) + "…" + h.slice(-b);
@@ -1521,6 +1529,43 @@ function keepDexEvent(ev) {
   }
   return true;
 }
+
+/** Blockfrost / Ogmios spellings → same labels the server emits. */
+function normalizeDrepLabel(id) {
+  if (!id) return "";
+  const s = String(id).trim();
+  if (
+    s === "drep_always_abstain"
+    || s === "always_abstain"
+    || s === "alwaysAbstain"
+    || s === "abstain"
+    || s === "Always Abstain"
+  ) return "Always Abstain";
+  if (
+    s === "drep_always_no_confidence"
+    || s === "always_no_confidence"
+    || s === "alwaysNoConfidence"
+    || s === "noConfidence"
+    || s === "Always No Confidence"
+  ) return "Always No Confidence";
+  return s;
+}
+
+/** Hide pool / DRep cards that only “redelegate” to the same target. */
+function isNoopRedelegation(ev) {
+  const d = ev?.data || {};
+  if (ev.kind === "delegation") {
+    const from = d.fromPool;
+    const to = d.pool;
+    return !!(from && to && from === to);
+  }
+  if (ev.kind === "vote_delegation") {
+    const from = d.fromDrep;
+    const to = d.drep;
+    return !!(from && to && normalizeDrepLabel(from) === normalizeDrepLabel(to));
+  }
+  return false;
+}
 /** Paid → want flow for buy / sell / swap / fill; LP shows deposited amounts. */
 function dexFlowHtml(d) {
   if (!d) return "";
@@ -1585,7 +1630,7 @@ function cardBody(ev) {
         d.assets ? `${fmtInt(d.assets)} asset${d.assets > 1 ? "s" : ""}` : "",
       ]) + txStakesHtml(d.stakes);
     case "token_transfer":
-      return assetChipsHtml(d.assets);
+      return (d.scam ? `<span class="badge scam">scam token</span>` : "") + assetChipsHtml(d.assets);
     case "mint":
       return `<span class="badge plus">mint</span>` + assetChipsHtml(d.assets);
     case "burn":
@@ -1899,7 +1944,7 @@ function addressSpan(addr, head = 14, tail = 8) {
 /** Prefer stamped/cached givenName; enrichDreps fills misses via /api/drep. */
 function drepSpan(id, stampedName) {
   if (!id) return "";
-  const s = String(id);
+  const s = normalizeDrepLabel(id);
   if (s === "Always Abstain" || s === "Always No Confidence") {
     return `<b title="${esc(s)}">${esc(s)}</b>`;
   }
@@ -1909,6 +1954,7 @@ function drepSpan(id, stampedName) {
   }
   const known = (typeof stampedName === "string" && stampedName)
     || drepMeta.get(s)?.name
+    || drepMeta.get(String(id))?.name
     || "";
   if (known) {
     if (!drepMeta.get(s)?.name) drepMeta.set(s, { name: known });
@@ -1976,7 +2022,7 @@ const txByHash = new Map();     // tx_hash -> transaction event
 /** Index one event into the client-side 24h retention cache. */
 function retentionIndex(ev) {
   if (!ev || ev.id == null) return;
-  if (!keepDexEvent(ev)) return;
+  if (!keepDexEvent(ev) || isNoopRedelegation(ev)) return;
   if (ev.kind === "orphaned_block" && ev.block_hash) {
     orphanedBlocks.add(ev.block_hash);
   }
@@ -2159,7 +2205,7 @@ async function absorbRetentionHits(opts = {}) {
  * so a small tx isn't dropped while its DEX/token children still show.
  */
 function eventPassesFeedFilters(ev, opts = {}) {
-  if (!ev || !keepDexEvent(ev)) return false;
+  if (!ev || !keepDexEvent(ev) || isNoopRedelegation(ev)) return false;
   if (!settings.filters[ev.category]) return false;
   // Orphaned-block content is gated by Forks & Battles (not only alert cards).
   if (
@@ -3075,11 +3121,12 @@ function buildCard(ev) {
 
   const title = ev.kind === "block"
     ? `Block <span class="height">${fmtInt(ev.height)}</span>`
-    : esc(titleCaseWords(ev.kind === "vote_delegation" ? "DRep Delegation" : ev.title));
+    : esc(formatEventTitle(ev));
 
   let iconHtml = iconFor(ev.kind, ev.category, ev.data?.side, ev.data?.vote);
   let iconClass = "ev-icon";
   let iconStyle = "";
+  const scam = ev.kind === "token_transfer" && !!ev.data?.scam;
   const branded =
     (ev.category === "dapp" && dappIconHtml && dappIconHtml(ev.data?.dapp))
     || (ev.category === "dex" && dexIconHtml && dexIconHtml(ev.data?.dex))
@@ -3091,9 +3138,12 @@ function buildCard(ev) {
       iconStyle = ` style="--ev-plate:${esc(branded.plate)}"`;
     }
   }
+  if (scam) iconClass += " has-scam";
 
   card.innerHTML = `
-    <div class="${iconClass}"${iconStyle}>${iconHtml}</div>
+    <div class="${iconClass}"${iconStyle}>${iconHtml}${
+      scam ? `<span class="scam-flag" title="Known scam token" aria-label="scam">🚩</span>` : ""
+    }</div>
     <div class="ev-body">
       <div class="ev-head">
         <span class="ev-title">${title}</span>
@@ -3532,7 +3582,7 @@ function repairBlockGroup(g) {
 }
 
 function routeEvent(ev) {
-  if (!keepDexEvent(ev)) return;
+  if (!keepDexEvent(ev) || isNoopRedelegation(ev)) return;
   if (ev?.id != null && seenEventIds.has(ev.id)) {
     // Id was recorded but the card never landed (group eviction / ensure raced).
     // Remount so children aren't orphaned under a spine gap.
@@ -5204,9 +5254,7 @@ const mono = (s, full) =>
 function openModal(ev) {
   overlay.classList.add("show");
   if (ev.tx_hash) return openTx(ev);
-  mTitle.textContent = titleCaseWords(
-    ev.kind === "vote_delegation" ? "DRep Delegation" : ev.title
-  );
+  mTitle.textContent = formatEventTitle(ev);
   mBody.innerHTML = renderEventDetail(ev);
 }
 

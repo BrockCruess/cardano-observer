@@ -919,21 +919,21 @@ fn decode_address(addr: &str) -> Option<(String, Vec<u8>)> {
     Some((hrp, bytes))
 }
 
-/// Human-friendly DRep identifier (bech32 drep1… per CIP-105, or the special
+/// Human-friendly DRep identifier (CIP-129 bech32 `drep1…`, or the special
 /// always-abstain / no-confidence dreps).
+///
+/// Encodes the 28-byte credential with the CIP-129 header byte so the id matches
+/// Blockfrost / modern explorers. Legacy CIP-105 forms still resolve via
+/// [`crate::dreps::drep_id_aliases`].
 pub fn drep_display(drep: &Value) -> String {
     match drep.get("type").and_then(Value::as_str) {
         Some("abstain") | Some("alwaysAbstain") => "Always Abstain".into(),
         Some("noConfidence") | Some("alwaysNoConfidence") => "Always No Confidence".into(),
         _ => {
             let id = drep.get("id").and_then(Value::as_str).unwrap_or("");
-            match hex::decode(id).ok().filter(|b| b.len() == 28).and_then(|bytes| {
-                let hrp = Hrp::parse("drep").ok()?;
-                bech32::encode::<Bech32>(hrp, &bytes).ok()
-            }) {
-                Some(b32) => b32,
-                None => id.to_string(),
-            }
+            let from = drep.get("from").and_then(Value::as_str);
+            let encoded = crate::dreps::drep_bech32_cip129(id, from).unwrap_or_else(|| id.to_string());
+            crate::dreps::normalize_drep_id(&encoded)
         }
     }
 }

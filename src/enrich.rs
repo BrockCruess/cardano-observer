@@ -13,6 +13,7 @@ use crate::gov_actions::{self, GovActionCache};
 use crate::handles::HandleCache;
 use crate::pools::{PoolCache, PoolEntry};
 use crate::registry::TokenRegistry;
+use crate::scam_tokens::ScamTokenList;
 use crate::trending::KeywordMeta;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -33,6 +34,8 @@ pub struct Enricher {
     drep_cache: DrepCache,
     /// Durable gov-action title cache - `{tx}#{index}` → CIP-108 title.
     gov_action_cache: GovActionCache,
+    /// CIP-14 fingerprints known to be scam tokens.
+    scam_tokens: ScamTokenList,
     /// ADA Handle preferred-name lookups (optional).
     handles: HandleCache,
     assets: Mutex<HashMap<String, Value>>,
@@ -67,6 +70,20 @@ impl Enricher {
         let pool_cache = PoolCache::load(cache_dir);
         let drep_cache = DrepCache::load(cache_dir);
         let gov_action_cache = GovActionCache::load(cache_dir);
+        let scam_tokens = match ScamTokenList::load(
+            &http,
+            cache_dir,
+            &config.scam_token_list_url,
+            config.scam_token_list_refresh,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("scam-token list load failed ({e:#}) - scam warnings unavailable");
+                ScamTokenList::empty(cache_dir, &config.scam_token_list_url)
+            }
+        };
 
         Enricher {
             http: reqwest::Client::builder()
@@ -80,6 +97,7 @@ impl Enricher {
             pool_cache,
             drep_cache,
             gov_action_cache,
+            scam_tokens,
             handles: HandleCache::new(config.ada_handle_url.clone(), config.ada_handle_api),
             assets: Mutex::new(HashMap::new()),
         }
@@ -99,6 +117,10 @@ impl Enricher {
 
     pub fn gov_action_cache_len(&self) -> usize {
         self.gov_action_cache.titled_len()
+    }
+
+    pub fn scam_token_list_len(&self) -> usize {
+        self.scam_tokens.len()
     }
 
     /// Run pool/DRep Blockfrost scrapes when the on-disk cache was empty (or a
@@ -171,6 +193,7 @@ impl Enricher {
             );
             tokio::time::sleep(wait).await;
             self.refresh_token_registry().await;
+            self.refresh_scam_token_list().await;
             if self.blockfrost_url.is_some() {
                 self.refresh_pool_and_drep_caches().await;
             }
@@ -188,6 +211,14 @@ impl Enricher {
                 tracing::info!("token registry refreshed ({n} subjects)");
             }
             Err(e) => tracing::warn!("token registry refresh failed: {e:#}"),
+        }
+    }
+
+    async fn refresh_scam_token_list(&self) {
+        tracing::info!("refreshing scam-token fingerprint list…");
+        match self.scam_tokens.refresh(&self.http).await {
+            Ok(n) => tracing::info!("scam-token list refreshed ({n} fingerprints)"),
+            Err(e) => tracing::warn!("scam-token list refresh failed: {e:#}"),
         }
     }
 
@@ -222,6 +253,34 @@ impl Enricher {
     /// an event so the UI can format quantities without a per-token round-trip.
     pub fn stamp_event_assets(&self, event: &mut crate::model::ChainEvent) {
         stamp_json_assets(&mut event.data, &self.registry);
+    }
+
+    /// Mark token-transfer events that move a known scam fingerprint.
+    pub fn stamp_event_scam(&self, event: &mut crate::model::ChainEvent) {
+        if event.kind != "token_transfer" {
+            return;
+        }
+        let Some(obj) = event.data.as_object_mut() else {
+            return;
+        };
+        let Some(items) = obj
+            .get("assets")
+            .and_then(|a| a.get("items"))
+            .and_then(Value::as_array)
+        else {
+            obj.remove("scam");
+            return;
+        };
+        let hit = items.iter().any(|a| {
+            a.get("fingerprint")
+                .and_then(Value::as_str)
+                .is_some_and(|fp| self.scam_tokens.contains(fp))
+        });
+        if hit {
+            obj.insert("scam".into(), json!(true));
+        } else {
+            obj.remove("scam");
+        }
     }
 
     /// Stamp CIP-119 givenNames onto DRep id fields when the durable cache has them.
@@ -480,10 +539,15 @@ impl Enricher {
         if let Some(hit) = self.drep_cache.get(id) {
             return hit.to_json(id);
         }
-        let meta = self
-            .drep_from_blockfrost(id)
-            .await
-            .unwrap_or_else(|| json!({ "drep": id }));
+        // Blockfrost historically keys by CIP-105; try every alias.
+        let mut meta = None;
+        for alt in dreps::drep_id_aliases(id) {
+            if let Some(m) = self.drep_from_blockfrost(&alt).await {
+                meta = Some(m);
+                break;
+            }
+        }
+        let meta = meta.unwrap_or_else(|| json!({ "drep": id }));
         let entry = DrepEntry {
             name: meta
                 .get("name")
@@ -630,7 +694,7 @@ impl Enricher {
                     .get("drep_id")
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
-                    .map(str::to_string);
+                    .map(crate::dreps::normalize_drep_id);
                 Some((stake, json!({ "pool": pool, "drep": drep })))
             });
         }

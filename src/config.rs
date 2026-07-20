@@ -19,6 +19,10 @@ pub struct Config {
     pub pool_cache_refresh: bool,
     /// Force re-scrape of Blockfrost DRep list even if dreps.json exists.
     pub drep_cache_refresh: bool,
+    /// CIP-14 scam fingerprint list URL (raw text, `#` comments ignored).
+    pub scam_token_list_url: String,
+    /// Force re-download of the scam list even if the cache file exists.
+    pub scam_token_list_refresh: bool,
     pub network: Network,
     pub bind: String,
     /// How many hours of events to keep in the in-memory ring (trending + fast search).
@@ -114,6 +118,13 @@ impl Config {
             ),
             drep_cache_refresh: matches!(
                 non_empty("DREP_CACHE_REFRESH").as_deref(),
+                Some("true") | Some("1") | Some("yes")
+            ),
+            scam_token_list_url: non_empty("SCAM_TOKEN_LIST_URL").unwrap_or_else(|| {
+                crate::scam_tokens::DEFAULT_SCAM_TOKEN_LIST_URL.to_string()
+            }),
+            scam_token_list_refresh: matches!(
+                non_empty("SCAM_TOKEN_LIST_REFRESH").as_deref(),
                 Some("true") | Some("1") | Some("yes")
             ),
             network,

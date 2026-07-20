@@ -17,6 +17,7 @@ mod parse;
 mod persist;
 mod pools;
 mod registry;
+mod scam_tokens;
 mod server;
 mod state;
 mod trending;
@@ -97,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
     state.set_keyword_meta(enricher.clone());
     // Restored JSONL events predate registry stamping — fill decimals now.
     state.stamp_buffered_assets();
+    state.stamp_buffered_scam();
     // Learn DRep names from registration anchors in the retention window, then stamp.
     {
         let buf = state.events.lock().unwrap();
@@ -120,11 +122,12 @@ async fn main() -> anyhow::Result<()> {
         state.seed_trending(snap);
     }
     tracing::info!(
-        "token registry ready ({} subjects); pool cache ready ({} pools); drep cache ready ({} dreps); gov-action titles ready ({} titled)",
+        "token registry ready ({} subjects); pool cache ready ({} pools); drep cache ready ({} dreps); gov-action titles ready ({} titled); scam-token list ready ({} fingerprints)",
         enricher.registry_len(),
         enricher.pool_cache_len(),
         enricher.drep_cache_len(),
-        enricher.gov_action_cache_len()
+        enricher.gov_action_cache_len(),
+        enricher.scam_token_list_len()
     );
     tokio::spawn(enricher.clone().refresh_meta_caches_loop());
     // Empty (or forced) pool/DRep caches scrape in the background; lookups

@@ -104,7 +104,7 @@ function escAttr(s) {
  */
 export function renderDappActivityHtml(d, ui) {
   const { esc, fmtAda, fmtTokenQty, assetChipsHtml, actorSpan, sub } = ui;
-  // Surf/Indigo-style loan cards: `assets`/`ada` = principal, `collateral` = vault.
+  // Surf-style loan cards: `assets`/`ada` = principal, `collateral` = vault.
   const principalLabel =
     d.eventType === "borrow" ? "borrowed" : d.eventType === "repay" ? "repaid" : "";
   const chips = d.assets
@@ -126,11 +126,10 @@ export function renderDappActivityHtml(d, ui) {
   const nodeId = d.nodeId
     ? `node id <span class="hash" title="Node ID">${esc(d.nodeId)}</span>`
     : "";
-  // Indigo: one stability pool per iAsset — ticker is the pool id.
+  // Optional pool/market id when stamped by the detector.
   const iassetPool = d.iasset
     ? `<span class="hash" title="Stability pool">${esc(d.iasset)} pool</span>`
     : "";
-  // Liqwid: market id + qToken receipt amount when no underlying chips.
   const market = d.market
     ? `<span class="hash" title="Market">${esc(d.market)} market</span>`
     : "";
