@@ -868,6 +868,8 @@ const TIP_DOM_MIN_GROUPS = 4;
  * or 5,000. Unmounted events remain in retentionCache and remount on scroll.
  */
 const DOM_WINDOW_CARDS = 350;
+/** Below this scrollY the reader counts as parked at the tip (matches isPaused). */
+const TIP_SCROLL_EPS = 48;
 /** Groups within this distance of the viewport are always kept mounted. */
 const DOM_WINDOW_MARGIN_PX = 1500;
 /**
@@ -2204,10 +2206,11 @@ function retentionIndex(ev) {
   }
   retentionCache.set(ev.id, { ev, hay: cardSearchText(ev) });
   indexEventByTx(ev);
-  // Only a backward insert (hydrate / backfill) can add hits the paging cursor
-  // has not passed; tip events are newer than the buffer and the tip path paints
-  // them directly.
-  if (!feedHitBuffer.length || ev.id < feedHitBuffer[0]?.id) feedHitsDirty = true;
+  // Every cached event joins the hit list, in either direction: hydration adds
+  // older events past the tail, live events add newer ones ahead of the head.
+  // The list is what upward paging reads, so the head has to track the chain
+  // tip or returning from history stops short of the newest events.
+  feedHitsDirty = true;
   if (ev.kind === "block" && ev.block_hash) blocksByHash.set(ev.block_hash, ev);
   if (ev.kind === "transaction" && ev.tx_hash) txByHash.set(ev.tx_hash, ev);
   indexTxGraph(ev);
@@ -3088,16 +3091,35 @@ function appendNewFeedHits() {
   if (!byId.size) return;
   const added = sortEventsNewestFirst([...byId.values()]);
   for (const id of byId.keys()) feedHitIds.add(id);
+  const head = feedHitBuffer[0];
   const tail = feedHitBuffer[feedHitBuffer.length - 1];
-  if (!tail || cmpSlotIdDesc(tail.slot || 0, tail.id, added[0].slot || 0, added[0].id) <= 0) {
+  const isNewerThanHead = (ev) =>
+    head && cmpSlotIdDesc(ev.slot || 0, ev.id, head.slot || 0, head.id) < 0;
+  const isOlderThanTail = (ev) =>
+    !tail || cmpSlotIdDesc(tail.slot || 0, tail.id, ev.slot || 0, ev.id) <= 0;
+
+  const newer = added.filter(isNewerThanHead);
+  const older = added.filter((ev) => !isNewerThanHead(ev) && isOlderThanTail(ev));
+
+  if (newer.length + older.length !== added.length) {
+    // Something lands inside the current range; a merge keeps ordering exact.
+    feedHitBuffer = sortEventsNewestFirst(feedHitBuffer.concat(added));
+    reindexFeedHits();
+    return;
+  }
+  if (older.length) {
     const base = feedHitBuffer.length;
-    feedHitBuffer = feedHitBuffer.concat(added);
-    for (let i = 0; i < added.length; i++) {
-      const id = added[i]?.id;
+    feedHitBuffer = feedHitBuffer.concat(older);
+    for (let i = 0; i < older.length; i++) {
+      const id = older[i]?.id;
       if (id != null) feedHitIndexById.set(id, base + i);
     }
-  } else {
-    feedHitBuffer = sortEventsNewestFirst(feedHitBuffer.concat(added));
+  }
+  if (newer.length) {
+    // Prepending shifts every existing position, so the window edges move with it.
+    feedHitBuffer = newer.concat(feedHitBuffer);
+    feedHitStart += newer.length;
+    feedHitOffset += newer.length;
     reindexFeedHits();
   }
 }
@@ -3614,7 +3636,13 @@ function pruneTipDomGroups() {
   }
 
   if (!dropped) return;
-  if (anchor && anchor.isConnected && anchorTop != null && settings.layout === "vertical") {
+  if (
+    anchor
+    && anchor.isConnected
+    && anchorTop != null
+    && settings.layout === "vertical"
+    && (window.scrollY || 0) >= TIP_SCROLL_EPS
+  ) {
     const delta = anchor.getBoundingClientRect().top - anchorTop;
     if (Math.abs(delta) > 0.5) {
       window.scrollBy(0, delta);
@@ -4656,6 +4684,10 @@ function maybeLoadHistory() {
  */
 function withAnchoredScroll(fn) {
   if (settings.layout !== "vertical") return fn();
+  // At the tip there is nothing above the reader to compensate for, and nudging
+  // scrollY off zero reads as "scrolled away" to isPaused(), which parks live
+  // events in `pending`. Leave the scroll position alone.
+  if ((window.scrollY || 0) < TIP_SCROLL_EPS) return fn();
   const vh = window.innerHeight || 0;
   let anchor = null;
   for (const g of groupOrder) {
