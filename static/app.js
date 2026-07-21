@@ -964,6 +964,16 @@ let feedHitStart = 0;
 let feedHitsDirty = false;
 /** Ids present in feedHitBuffer — lets hydration fold in only the delta. */
 let feedHitIds = new Set();
+/** Event id -> its index in feedHitBuffer. */
+let feedHitIndexById = new Map();
+
+function reindexFeedHits() {
+  feedHitIndexById = new Map();
+  for (let i = 0; i < feedHitBuffer.length; i++) {
+    const id = feedHitBuffer[i]?.id;
+    if (id != null) feedHitIndexById.set(id, i);
+  }
+}
 /** Serialized filter state used to build feedHitBuffer. */
 let feedHitKey = "";
 /** True once feedHitBuffer has been fully rendered (further scroll → disk). */
@@ -3047,7 +3057,10 @@ function collectFeedHits() {
     }
   }
   feedHitIds = new Set(byId.keys());
-  return sortEventsNewestFirst([...byId.values()]);
+  const list = sortEventsNewestFirst([...byId.values()]);
+  feedHitBuffer = list;
+  reindexFeedHits();
+  return list;
 }
 
 /**
@@ -3075,9 +3088,15 @@ function appendNewFeedHits() {
   for (const id of byId.keys()) feedHitIds.add(id);
   const tail = feedHitBuffer[feedHitBuffer.length - 1];
   if (!tail || cmpSlotIdDesc(tail.slot || 0, tail.id, added[0].slot || 0, added[0].id) <= 0) {
+    const base = feedHitBuffer.length;
     feedHitBuffer = feedHitBuffer.concat(added);
+    for (let i = 0; i < added.length; i++) {
+      const id = added[i]?.id;
+      if (id != null) feedHitIndexById.set(id, base + i);
+    }
   } else {
     feedHitBuffer = sortEventsNewestFirst(feedHitBuffer.concat(added));
+    reindexFeedHits();
   }
 }
 
@@ -3089,6 +3108,63 @@ function appendNewFeedHits() {
  * the mounted cards, so unmounting either end moves the corresponding edge and
  * paging continues outward from there in both directions.
  */
+/**
+ * Mount the page of newer events immediately above the window, mirroring the
+ * downward page. Events route into their block groups and resortFeedBySlot
+ * places them by slot, so they land above whatever is on screen.
+ */
+function renderNewerPage() {
+  if (feedHitStart <= 0) return 0;
+  const batch = [];
+  const batchIds = new Set();
+  while (batch.length < FEED_PAGE_SIZE && feedHitStart > 0) {
+    const ev = feedHitBuffer[--feedHitStart];
+    if (ev?.id == null || seenEventIds.has(ev.id) || batchIds.has(ev.id)) continue;
+    if (ev.kind !== "block" && ev.block_hash && settings.filters.block) {
+      const blockEv = findBlockEvent(ev.block_hash);
+      if (blockEv && !seenEventIds.has(blockEv.id) && !batchIds.has(blockEv.id)) {
+        batch.push(blockEv);
+        batchIds.add(blockEv.id);
+      }
+    }
+    if (ev.kind !== "block" && ev.kind !== "transaction" && settings.filters.transaction) {
+      const parentTx = parentTransactionEvent(ev);
+      if (parentTx && !seenEventIds.has(parentTx.id) && !batchIds.has(parentTx.id)) {
+        batch.push(parentTx);
+        batchIds.add(parentTx.id);
+      }
+    }
+    batch.push(ev);
+    batchIds.add(ev.id);
+  }
+  if (!batch.length) return 0;
+  suppressFeedResort = true;
+  try {
+    for (const ev of batch) routeEvent(ev);
+  } finally {
+    suppressFeedResort = false;
+  }
+  resortFeedBySlot();
+  return batch.length;
+}
+
+/** Refill the window upward when the reader approaches the newest mounted event. */
+function maybeLoadNewer() {
+  if ($("search").value.trim()) return;
+  if (historyLoading || feedRebuilding) return;
+  if (feedHitStart <= 0) return;
+  const first = groupOrder[0];
+  if (!first) return;
+  // Only once the top of the mounted window is within reach of the viewport.
+  if (first.getBoundingClientRect().top < -1200) return;
+  withAnchoredScroll(() => {
+    renderNewerPage();
+    applyFilters();
+  });
+  pruneTipDomGroups();
+  updateLoadedEventCount();
+}
+
 function syncFeedHitOffset() {
   if (!feedHitBuffer.length) {
     feedHitStart = 0;
@@ -3098,9 +3174,9 @@ function syncFeedHitOffset() {
   }
   let lo = Infinity;
   let hi = -1;
-  for (let i = 0; i < feedHitBuffer.length; i++) {
-    const id = feedHitBuffer[i]?.id;
-    if (id == null || !seenEventIds.has(id)) continue;
+  for (const id of seenEventIds) {
+    const i = feedHitIndexById.get(id);
+    if (i == null) continue;
     if (i < lo) lo = i;
     if (i > hi) hi = i;
   }
@@ -3508,9 +3584,14 @@ function pruneTipDomGroups() {
   // How far a group sits outside the viewport; the furthest go first.
   const distance = (r) => (r.bottom < 0 ? -r.bottom : (r.top > vh ? r.top - vh : 0));
 
+  // The newest groups are held only while the reader is at the tip, so the feed
+  // stays populated there. Reading history, they are evicted like any other
+  // distant group, which keeps the mounted range contiguous around the viewport
+  // and lets it refill from either edge.
+  const atTip = (window.scrollY || 0) < vh;
   const evictable = rows
     .map((row, i) => ({ ...row, i }))
-    .filter((row) => !row.near && row.i >= TIP_DOM_MIN_GROUPS)
+    .filter((row) => !row.near && (!atTip || row.i >= TIP_DOM_MIN_GROUPS))
     .sort((a, b) => distance(b.r) - distance(a.r));
 
   let dropped = false;
@@ -4161,7 +4242,10 @@ function onScrollDirection() {
   const towardHistory = pos > lastScrollPos + 2;
   const towardTip = pos < lastScrollPos - 2;
   lastScrollPos = pos;
-  if (towardTip) scheduleFlushPending();
+  if (towardTip) {
+    scheduleFlushPending();
+    maybeLoadNewer();
+  }
   // Keep the mounted window bounded whether at tip or reading history. Throttled
   // because the prune reads a rect per mounted group; it also runs on a 30s timer
   // and after every page load.
@@ -6020,3 +6104,5 @@ loadDrepMeta();
 loadGovMeta();
 connect();
 window.addEventListener("resize", scheduleHierarchyPipes);
+
+
