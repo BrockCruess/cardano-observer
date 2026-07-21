@@ -1280,7 +1280,9 @@ function formatHistorySpan(hours) {
     const t = Math.round(hours * 10) / 10;
     return `${t}h`;
   }
-  return `${Math.floor(hours)}h`;
+  // Round to the nearest hour: a full 24h window ends one block short of the
+  // boundary (~23.98h), and flooring reported that as 23h.
+  return `${Math.round(hours)}h`;
 }
 
 function paintCatCounts() {
