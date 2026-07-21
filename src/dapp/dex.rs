@@ -376,22 +376,23 @@ impl DexRegistry {
             // Same-block: spend an order that was placed earlier in this block.
             for input in inputs {
                 let Some(outpoint) = input_outpoint(input) else { continue };
-                let Some((_place_tx, mut info)) = deferred.remove(&outpoint) else {
+                let Some((place_tx, mut info)) = deferred.remove(&outpoint) else {
                     continue;
                 };
                 self.finalize_want(&mut info, Some(tx));
                 hits.push((
                     tx_hash.to_string(),
-                    settle_or_cancel(&info, &pools_touched, true),
+                    settle_or_cancel(&info, &pools_touched, true, Some(&place_tx)),
                 ));
             }
 
             // Prior-block orders spent by this tx.
-            for (_outpoint, mut info) in self.take_consumed(inputs) {
+            for (outpoint, mut info) in self.take_consumed(inputs) {
                 self.finalize_want(&mut info, Some(tx));
+                let order_tx = outpoint.split('#').next();
                 hits.push((
                     tx_hash.to_string(),
-                    settle_or_cancel(&info, &pools_touched, false),
+                    settle_or_cancel(&info, &pools_touched, false, order_tx),
                 ));
             }
 
@@ -689,15 +690,22 @@ fn settle_or_cancel(
     info: &OrderInfo,
     pools_touched: &HashSet<&'static str>,
     same_block: bool,
+    order_tx: Option<&str>,
 ) -> DexHit {
-    if pools_touched.contains(info.dex) {
+    let mut hit = if pools_touched.contains(info.dex) {
         fill_hit(info, same_block)
     } else if is_orderbook_dex(info.dex) {
         // Peer fill (or cancel — we can't see the redeemer cheaply).
         fill_hit(info, false)
     } else {
         cancel_hit(info)
+    };
+    // The order this settlement closes. Clients pair the settlement with its
+    // order card directly from this field.
+    if let (Some(tx), Some(obj)) = (order_tx, hit.data.as_object_mut()) {
+        obj.insert("orderTx".into(), json!(tx));
     }
+    hit
 }
 
 fn order_hit(info: &OrderInfo) -> DexHit {

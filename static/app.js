@@ -724,8 +724,7 @@ function updateDexOrderCardPill(card, status) {
 }
 
 function parentHasDexOrder(orderTx, dex) {
-  for (const { ev } of retentionCache.values()) {
-    if (ev.tx_hash !== orderTx) continue;
+  for (const ev of eventsForTx(orderTx)) {
     if (ev.kind !== "dex_order" && ev.kind !== "dex_lp") continue;
     if (dex && ev.data?.dex && ev.data.dex !== dex) continue;
     return true;
@@ -741,8 +740,7 @@ function markDexOrderSettled(orderTx, status, settleEv) {
   if (prev && prev.status !== status) return; // first terminal status per venue
   dexOrderSettlement.set(mapKey, { status, dex });
 
-  for (const { ev } of retentionCache.values()) {
-    if (ev.tx_hash !== orderTx) continue;
+  for (const ev of eventsForTx(orderTx)) {
     if (ev.kind !== "dex_order" && ev.kind !== "dex_lp") continue;
     if (dex && ev.data?.dex && ev.data.dex !== dex) continue;
     if (!ev.data || typeof ev.data !== "object") ev.data = {};
@@ -760,6 +758,14 @@ function markDexOrderSettled(orderTx, status, settleEv) {
 function applyDexSettlement(settleEv) {
   if (!settleEv?.tx_hash) return;
   if (settleEv.kind !== "dex_fill" && settleEv.kind !== "dex_cancel") return;
+  // The detector names the order this settlement closes, so the pairing is a
+  // direct lookup with no tx-graph traversal.
+  const stamped = settleEv.data?.orderTx;
+  if (stamped) {
+    const status = settleEv.kind === "dex_cancel" ? "cancelled" : "filled";
+    markDexOrderSettled(String(stamped), status, settleEv);
+    return;
+  }
   const parents = parentTxsOf(settleEv.tx_hash);
   if (!parents.length) {
     if (!pendingDexSettlements.includes(settleEv)) pendingDexSettlements.push(settleEv);
@@ -786,8 +792,7 @@ function reconcileDexSettlementsForTx(txHash) {
     pendingDexSettlements.splice(i, 1);
     applyDexSettlement(ev);
   }
-  for (const { ev } of retentionCache.values()) {
-    if (ev.tx_hash !== txHash) continue;
+  for (const ev of [...eventsForTx(txHash)]) {
     if (ev.kind === "dex_fill" || ev.kind === "dex_cancel") applyDexSettlement(ev);
   }
 }
@@ -853,7 +858,18 @@ const MAX_GROUPS = 50_000;
  */
 const TIP_DOM_GROUPS = 250;
 /** Always keep at least this many newest groups so the tip never goes empty. */
-const TIP_DOM_MIN_GROUPS = 10;
+const TIP_DOM_MIN_GROUPS = 4;
+/**
+ * Mounted-card budget for the feed window.
+ *
+ * Per-append work — filtering, hierarchy sorting, pipe layout, pruning — is
+ * proportional to what is mounted. Holding the mounted count near this number
+ * keeps each additional page the same cost whether the reader is 50 events deep
+ * or 5,000. Unmounted events remain in retentionCache and remount on scroll.
+ */
+const DOM_WINDOW_CARDS = 350;
+/** Groups within this distance of the viewport are always kept mounted. */
+const DOM_WINDOW_MARGIN_PX = 1500;
 /**
  * Automatic tip paint / retention-absorb hard stop (block-groups). Prevents
  * mobile + flaky scrollHeight checks from dumping thousands of cards before
@@ -911,6 +927,29 @@ let searchHitsExhausted = false;
  * Kept fully in memory; the feed only renders small pages from it on scroll.
  */
 const retentionCache = new Map(); // id -> { ev, hay }
+/** tx hash -> Set of cached events carrying it. */
+const eventsByTx = new Map();
+
+function indexEventByTx(ev) {
+  if (!ev?.tx_hash) return;
+  let set = eventsByTx.get(ev.tx_hash);
+  if (!set) eventsByTx.set(ev.tx_hash, (set = new Set()));
+  set.add(ev);
+}
+
+function unindexEventByTx(ev) {
+  if (!ev?.tx_hash) return;
+  const set = eventsByTx.get(ev.tx_hash);
+  if (!set) return;
+  set.delete(ev);
+  if (!set.size) eventsByTx.delete(ev.tx_hash);
+}
+
+/** Cached events for a tx hash, newest-first insertion order. */
+function eventsForTx(txHash) {
+  return txHash ? (eventsByTx.get(txHash) || EMPTY_EVENT_SET) : EMPTY_EVENT_SET;
+}
+const EMPTY_EVENT_SET = new Set();
 let retentionReady = false;
 let retentionLoading = null; // Promise while /api/buffer is in flight
 let retentionLoadGen = 0; // bumped on reconnect so stale preloads don't notify
@@ -919,6 +958,12 @@ let retentionWaiters = []; // resolvers waiting for ready
 let feedHitBuffer = [];
 /** How far through feedHitBuffer we have rendered into the DOM. */
 let feedHitOffset = 0;
+/** Index of the first mounted hit; the window runs [feedHitStart, feedHitOffset). */
+let feedHitStart = 0;
+/** True when retentionCache has gained events the hit list has not folded in. */
+let feedHitsDirty = false;
+/** Ids present in feedHitBuffer — lets hydration fold in only the delta. */
+let feedHitIds = new Set();
 /** Serialized filter state used to build feedHitBuffer. */
 let feedHitKey = "";
 /** True once feedHitBuffer has been fully rendered (further scroll → disk). */
@@ -926,7 +971,7 @@ let retentionHistoryDone = false;
 
 const SEARCH_PRIME_LOOKBACK = 300;
 /** Events rendered into the DOM per scroll page (from the in-memory 24h buffer). */
-const FEED_PAGE_SIZE = 40;
+const FEED_PAGE_SIZE = 50;
 /** Matches rendered per search page - keeps the DOM/scrollbar bounded. */
 const SEARCH_PAGE_SIZE = 40;
 /** Older-than-24h disk pages (only after retention is exhausted). */
@@ -941,7 +986,6 @@ const BUFFER_PAGE_SIZE = 5000;
  * When the filtered hit list is at most this size, paint every match on filter
  * change (sparse dApp/DEX views). Larger sets still tip-paint and scroll-load.
  */
-const SPARSE_FULL_PAINT = 1500;
 /** Yield to the browser while indexing a hydrate chunk (keep rare — speed first). */
 const RETENTION_INDEX_CHUNK = 2500;
 /** Yield every N feed pages while painting so large match sets stay responsive. */
@@ -982,41 +1026,49 @@ function applyFilters() {
   const q = $("search").value.trim().toLowerCase();
   for (const g of groupOrder) {
     let visible = 0;
+    const cards = g.querySelectorAll(".card");
     // Pass 1: non-min-ADA hide reasons (needed to know which tx children stay).
-    const baseHide = new Map();
-    g.querySelectorAll(".card").forEach((card) => {
+    // min-ADA needs two passes to keep parents of visible children; every other
+    // filter decides and applies in a single walk.
+    const twoPass = minL > 0;
+    const baseHide = twoPass ? new Map() : null;
+    cards.forEach((card) => {
       let hide = false;
       if (q && !(card.dataset.search || "").includes(q)) hide = true;
       if (card.dataset.category === "finance" && !financeAppEnabled(financeNameOf(card))) hide = true;
       if (card.dataset.category === "dapp" && !dappAppEnabled(card.dataset.dapp)) hide = true;
       if (card.dataset.category === "governance" && !govTypeEnabled(card.dataset.govType)) hide = true;
-      baseHide.set(card, hide);
+      if (twoPass) {
+        baseHide.set(card, hide);
+        return;
+      }
+      card.classList.toggle("f-hide", hide);
+      if (!hide && settings.filters[card.dataset.category]) visible++;
     });
-    // Tx ids that still have a visible child — keep those parents despite min-ADA.
-    const parentsWithKids = new Set();
-    if (minL > 0) {
-      g.querySelectorAll(".card").forEach((card) => {
+    if (twoPass) {
+      // Tx ids that still have a visible child — keep those parents despite min-ADA.
+      const parentsWithKids = new Set();
+      cards.forEach((card) => {
         if (baseHide.get(card)) return;
         if (!settings.filters[card.dataset.category]) return;
         const parent = card.dataset.parent;
         if (parent && card.dataset.kind !== "transaction") parentsWithKids.add(parent);
       });
+      cards.forEach((card) => {
+        let hide = baseHide.get(card) || false;
+        if (
+          card.dataset.category === "transaction"
+          && Number(card.dataset.ada || 0) < minL
+          && !parentsWithKids.has(card.dataset.eid)
+        ) {
+          hide = true;
+        }
+        card.classList.toggle("f-hide", hide);
+        if (!hide && settings.filters[card.dataset.category]) {
+          visible++;
+        }
+      });
     }
-    g.querySelectorAll(".card").forEach((card) => {
-      let hide = baseHide.get(card) || false;
-      if (
-        minL > 0
-        && card.dataset.category === "transaction"
-        && Number(card.dataset.ada || 0) < minL
-        && !parentsWithKids.has(card.dataset.eid)
-      ) {
-        hide = true;
-      }
-      card.classList.toggle("f-hide", hide);
-      if (!hide && settings.filters[card.dataset.category]) {
-        visible++;
-      }
-    });
     // Collapse groups with nothing visible (category / venue / search filters),
     // so rare filtered events aren't separated by long empty spine stretches.
     // Orphaned blocks (and their detail events) are part of Forks & Battles —
@@ -1120,6 +1172,23 @@ function updateFilterEasterEgg() {
 }
 
 /** Visible (filter-matching) events currently shown in the feed. */
+/**
+ * Footer total: events from the chain tip down to the deepest one loaded, under
+ * the active filters. Counting the mounted window instead would shrink as older
+ * events are pruned, hiding the fact that history keeps growing.
+ */
+function countLoadedSpan() {
+  const n = Math.max(feedHitOffset, 0);
+  let oldest = Infinity;
+  for (let i = 0; i < n && i < feedHitBuffer.length; i++) {
+    const ts = Number(feedHitBuffer[i]?.timestamp || 0);
+    if (ts > 0 && ts < oldest) oldest = ts;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const hours = Number.isFinite(oldest) && oldest < now ? (now - oldest) / 3600 : 0;
+  return { n: Math.min(n, feedHitBuffer.length), hours };
+}
+
 function countVisibleEvents() {
   let n = 0;
   let oldest = Infinity;
@@ -1144,7 +1213,7 @@ function countVisibleEvents() {
 function updateLoadedEventCount() {
   const el = $("ft-session");
   if (!el) return;
-  const { n, hours } = countVisibleEvents();
+  const { n, hours } = countLoadedSpan();
   const span = formatHistorySpan(hours);
   const unit = `event${n === 1 ? "" : "s"}`;
   el.textContent = span
@@ -2122,6 +2191,11 @@ function retentionIndex(ev) {
     orphanedBlocks.add(ev.block_hash);
   }
   retentionCache.set(ev.id, { ev, hay: cardSearchText(ev) });
+  indexEventByTx(ev);
+  // Only a backward insert (hydrate / backfill) can add hits the paging cursor
+  // has not passed; tip events are newer than the buffer and the tip path paints
+  // them directly.
+  if (!feedHitBuffer.length || ev.id < feedHitBuffer[0]?.id) feedHitsDirty = true;
   if (ev.kind === "block" && ev.block_hash) blocksByHash.set(ev.block_hash, ev);
   if (ev.kind === "transaction" && ev.tx_hash) txByHash.set(ev.tx_hash, ev);
   indexTxGraph(ev);
@@ -2142,6 +2216,7 @@ function retentionTrim() {
   for (const [id, row] of retentionCache) {
     if ((row.ev.timestamp || 0) < cutoff) {
       retentionCache.delete(id);
+      unindexEventByTx(row.ev);
       const ev = row.ev;
       if (ev.kind === "block" && ev.block_hash && blocksByHash.get(ev.block_hash) === ev) {
         blocksByHash.delete(ev.block_hash);
@@ -2279,15 +2354,15 @@ async function absorbRetentionHits(opts = {}) {
   if (feedRebuilding) return;
   if (opts.gen != null && opts.gen !== retentionLoadGen) return;
   // Tip already seeded — keep hydrating retentionCache only; don't keep painting.
+  // The hit list is left dirty and folded in lazily when something needs it.
   if (tipPaintBudgetExceeded() || (groupOrder.length >= TIP_DOM_MIN_GROUPS && visibleFeedFillsPage())) {
-    ensureFeedHitBuffer(true);
     return;
   }
 
-  ensureFeedHitBuffer(true);
-  const paintAll = feedHitBuffer.length <= SPARSE_FULL_PAINT;
-  const sync = paintAll && feedHitBuffer.length <= FEED_PAGE_SIZE * 6;
-  await paintFeedHitPages({ all: paintAll, gen: feedRebuildGen, sync });
+  ensureFeedHitBuffer();
+  // Seed the tip once; afterwards hydration only keeps the hit buffer fresh.
+  if (groupOrder.length) return;
+  await paintFeedHitPages({ pages: 1, gen: feedRebuildGen, sync: true });
   resortFeedBySlot();
   applyFilters();
   pruneTipDomGroups();
@@ -2462,8 +2537,11 @@ function resortFeedBySlot() {
     if (host) {
       resolveCardParents(host);
       const cards = [...host.querySelectorAll(":scope > .card")];
-      cards.sort(cmpHierarchy);
-      for (const c of cards) host.appendChild(c);
+      const sorted = [...cards].sort(cmpHierarchy);
+      // Re-append only when the order actually changed; each move costs a reflow.
+      if (sorted.some((c, i) => c !== cards[i])) {
+        for (const c of sorted) host.appendChild(c);
+      }
     }
     syncGroupSortKey(g);
   }
@@ -2968,20 +3046,70 @@ function collectFeedHits() {
       byId.set(parent.id, parent);
     }
   }
+  feedHitIds = new Set(byId.keys());
   return sortEventsNewestFirst([...byId.values()]);
 }
 
+/**
+ * Fold newly-cached events into the existing hit list.
+ *
+ * The only work proportional to cache size is one Set lookup per entry;
+ * filtering and sorting touch just the delta. Hydration pages backwards, so new
+ * hits are older than the current tail and concatenate directly; a merged
+ * re-sort covers any other ordering.
+ */
+function appendNewFeedHits() {
+  const byId = new Map();
+  const consider = (ev, opts) => {
+    if (!ev || feedHitIds.has(ev.id) || byId.has(ev.id)) return;
+    if (!eventPassesFeedFilters(ev, opts)) return;
+    byId.set(ev.id, ev);
+  };
+  for (const { ev } of retentionCache.values()) {
+    if (feedHitIds.has(ev.id)) continue;
+    consider(ev);
+    if (byId.has(ev.id)) consider(parentTransactionEvent(ev), { ignoreMinAda: true });
+  }
+  if (!byId.size) return;
+  const added = sortEventsNewestFirst([...byId.values()]);
+  for (const id of byId.keys()) feedHitIds.add(id);
+  const tail = feedHitBuffer[feedHitBuffer.length - 1];
+  if (!tail || cmpSlotIdDesc(tail.slot || 0, tail.id, added[0].slot || 0, added[0].id) <= 0) {
+    feedHitBuffer = feedHitBuffer.concat(added);
+  } else {
+    feedHitBuffer = sortEventsNewestFirst(feedHitBuffer.concat(added));
+  }
+}
+
+/**
+ * Align the paging cursors with what is mounted.
+ *
+ * The feed shows a window over feedHitBuffer: `feedHitStart` is the first
+ * mounted hit and `feedHitOffset` is one past the last. Both are derived from
+ * the mounted cards, so unmounting either end moves the corresponding edge and
+ * paging continues outward from there in both directions.
+ */
 function syncFeedHitOffset() {
-  // Prune can un-see older hits while the cursor stayed past them — rewind so
-  // scroll-load remounts from the in-memory 24h buffer instead of skipping to disk.
-  if (feedHitBuffer.length && feedHitOffset > 0) {
-    for (let i = 0; i < feedHitOffset && i < feedHitBuffer.length; i++) {
-      const id = feedHitBuffer[i]?.id;
-      if (id != null && !seenEventIds.has(id)) {
-        feedHitOffset = i;
-        break;
-      }
-    }
+  if (!feedHitBuffer.length) {
+    feedHitStart = 0;
+    feedHitOffset = 0;
+    retentionHistoryDone = false;
+    return;
+  }
+  let lo = Infinity;
+  let hi = -1;
+  for (let i = 0; i < feedHitBuffer.length; i++) {
+    const id = feedHitBuffer[i]?.id;
+    if (id == null || !seenEventIds.has(id)) continue;
+    if (i < lo) lo = i;
+    if (i > hi) hi = i;
+  }
+  if (hi < 0) {
+    feedHitStart = Math.min(feedHitStart, feedHitBuffer.length);
+    feedHitOffset = Math.max(feedHitStart, Math.min(feedHitOffset, feedHitBuffer.length));
+  } else {
+    feedHitStart = lo;
+    feedHitOffset = hi + 1;
   }
   while (
     feedHitOffset < feedHitBuffer.length
@@ -2994,10 +3122,19 @@ function syncFeedHitOffset() {
 
 function ensureFeedHitBuffer(force = false) {
   const key = feedFilterKey();
-  if (!force && key === feedHitKey && feedHitBuffer.length) {
+  if (!force && !feedHitsDirty && key === feedHitKey && feedHitBuffer.length) {
     syncFeedHitOffset();
     return;
   }
+  // Same filters, list already built: fold in what hydration added. A full
+  // rebuild is reserved for a filter change or an explicit force.
+  if (!force && feedHitsDirty && key === feedHitKey && feedHitBuffer.length) {
+    feedHitsDirty = false;
+    appendNewFeedHits();
+    syncFeedHitOffset();
+    return;
+  }
+  feedHitsDirty = false;
   // Preserve paint cursor across rebuilds when filters are unchanged (force refresh
   // after hydrate). Filter changes start from the tip again.
   const prevOffset = key === feedHitKey ? feedHitOffset : 0;
@@ -3096,13 +3233,16 @@ function clearFeedDom() {
  * Pass `{ sync: true }` to never yield (used for small sparse filters).
  */
 async function paintFeedHitPages(opts = {}) {
-  const paintAll = !!opts.all;
+  // Paint exactly `pages` pages of FEED_PAGE_SIZE matches each.
+  const maxPages = Math.max(1, opts.pages || 1);
   const gen = opts.gen;
   const sync = !!opts.sync;
   let pages = 0;
-  while (feedHitOffset < feedHitBuffer.length) {
+  // Bound the walk over already-seen gaps so a long run can't spin.
+  let guard = 0;
+  while (feedHitOffset < feedHitBuffer.length && pages < maxPages) {
     if (gen != null && gen !== feedRebuildGen) return pages;
-    if (!paintAll && (visibleFeedFillsPage() || tipPaintBudgetExceeded())) break;
+    if (++guard > maxPages * 20) break;
     const before = feedHitOffset;
     const n = renderFeedPage({ animate: false, skipApplyFilters: true });
     // All-seen gaps: renderFeedPage advances offset and returns 0 — keep going.
@@ -3141,9 +3281,7 @@ async function onFeedFiltersChanged() {
     feedHitOffset = 0;
     retentionHistoryDone = false;
 
-    const paintAll = feedHitBuffer.length <= SPARSE_FULL_PAINT;
-    const sync = paintAll && feedHitBuffer.length <= FEED_PAGE_SIZE * 6;
-    await paintFeedHitPages({ all: paintAll, gen, sync });
+    await paintFeedHitPages({ pages: 1, gen, sync: true });
     if (gen !== feedRebuildGen) return;
 
     resortFeedBySlot();
@@ -3348,52 +3486,58 @@ function pruneTipDomGroups() {
   if (!groupOrder.length) return;
 
   const now = Date.now();
-  // Refresh lastViewed for anything currently on screen (IO can lag).
-  for (const g of groupOrder) {
-    if (groupNearViewport(g)) touchGroupViewed(g, now);
+  const vh = window.innerHeight || 0;
+
+  // One layout read per group, reused for every decision below.
+  const rows = groupOrder.map((g) => {
+    const r = g.getBoundingClientRect();
+    return {
+      g,
+      r,
+      cards: g.querySelectorAll(".card").length,
+      near: r.bottom > -DOM_WINDOW_MARGIN_PX && r.top < vh + DOM_WINDOW_MARGIN_PX,
+    };
+  });
+
+  let mounted = 0;
+  for (const row of rows) {
+    mounted += row.cards;
+    if (row.near) touchGroupViewed(row.g, now);
   }
+
+  // How far a group sits outside the viewport; the furthest go first.
+  const distance = (r) => (r.bottom < 0 ? -r.bottom : (r.top > vh ? r.top - vh : 0));
+
+  const evictable = rows
+    .map((row, i) => ({ ...row, i }))
+    .filter((row) => !row.near && row.i >= TIP_DOM_MIN_GROUPS)
+    .sort((a, b) => distance(b.r) - distance(a.r));
 
   let dropped = false;
-  // Stale groups beyond the tip floor — walk oldest→newest so history the user
-  // is reading (fresh lastViewed) is kept while forgotten tip/history falls off.
-  for (let i = groupOrder.length - 1; i >= TIP_DOM_MIN_GROUPS; i--) {
-    const g = groupOrder[i];
-    if (groupNearViewport(g)) continue;
-    const last = Number(g.dataset.lastViewed || 0);
-    if (now - last <= VIEW_STALE_MS) continue;
-    dropBlockGroup(g);
-    dropped = true;
+  const vhNow = vh;
+  let anchor = null;
+  for (const g of groupOrder) {
+    const r = g.getBoundingClientRect();
+    if (r.bottom > 0 && r.top < vhNow) { anchor = g; break; }
   }
-
-  const readingHistory = nearHistoryEnd() || historyLoaderUserPinned;
-  while (groupOrder.length > TIP_DOM_GROUPS) {
-    let dropIdx = -1;
-    if (readingHistory) {
-      // Shed tipward (just after the tip floor); keep the oldest pages in view.
-      for (let i = TIP_DOM_MIN_GROUPS; i < groupOrder.length; i++) {
-        if (!groupNearViewport(groupOrder[i])) {
-          dropIdx = i;
-          break;
-        }
-      }
-    } else {
-      // At tip: shed oldest unviewed first.
-      for (let i = groupOrder.length - 1; i >= TIP_DOM_MIN_GROUPS; i--) {
-        if (!groupNearViewport(groupOrder[i])) {
-          dropIdx = i;
-          break;
-        }
-      }
-    }
-    if (dropIdx < 0) {
-      dropIdx = readingHistory ? TIP_DOM_MIN_GROUPS : groupOrder.length - 1;
-    }
-    if (dropIdx < TIP_DOM_MIN_GROUPS || dropIdx >= groupOrder.length) break;
-    dropBlockGroup(groupOrder[dropIdx]);
+  const anchorTop = anchor ? anchor.getBoundingClientRect().top : null;
+  for (const row of evictable) {
+    const overBudget = mounted > DOM_WINDOW_CARDS || groupOrder.length > TIP_DOM_GROUPS;
+    const idle = now - Number(row.g.dataset.lastViewed || 0) > VIEW_STALE_MS;
+    if (!overBudget && !idle) continue;
+    mounted -= row.cards;
+    dropBlockGroup(row.g);
     dropped = true;
   }
 
   if (!dropped) return;
+  if (anchor && anchor.isConnected && anchorTop != null && settings.layout === "vertical") {
+    const delta = anchor.getBoundingClientRect().top - anchorTop;
+    if (Math.abs(delta) > 0.5) {
+      window.scrollBy(0, delta);
+      lastScrollPos = feedScrollPos();
+    }
+  }
   clearLightCone();
   refreshOldestEventId();
   if (typeof syncFeedHitOffset === "function") syncFeedHitOffset();
@@ -3623,6 +3767,7 @@ function ensureParentTransaction(ev) {
   }
   withEnterMode(null, () => {
     g.querySelector(".group-events").appendChild(buildCard(parent));
+    markGroupDirty(g);
   });
 }
 
@@ -3632,23 +3777,47 @@ function ensureParentTransaction(ev) {
  */
 function repairBlockGroup(g) {
   if (!g) return;
+  // Repair cost scales with the group's cards, so groups untouched since their
+  // last repair are skipped. Pending enter animations still need a look.
+  if (g.dataset.repairClean === "1" && !g.querySelector(".enter-tip-pending")) return;
   const hash = g.dataset.block;
   if (hash && !g.querySelector(".card-block")) {
     ensureBlockCard(hash);
   }
   const host = g.querySelector(".group-events");
   if (!host) return;
+
+  // One scan builds every index this function needs.
+  const cards = [...host.querySelectorAll(":scope > .card")];
+  const mountedEids = new Set();
+  const childrenByParent = new Map();
+  let hasVisibleEvent = false;
+  for (const card of cards) {
+    if (card.dataset.eid) mountedEids.add(card.dataset.eid);
+    const pid = card.dataset.parent;
+    if (pid) {
+      let list = childrenByParent.get(pid);
+      if (!list) childrenByParent.set(pid, (list = []));
+      list.push(card);
+    }
+    if (
+      !hasVisibleEvent
+      && !card.classList.contains("enter-tip-pending")
+      && !card.classList.contains("f-hide")
+    ) {
+      hasVisibleEvent = true;
+    }
+  }
+
   // Children whose Transaction card never mounted (or was lost) sort above every
   // other tx and look like block-level orphans — remount the parent.
   if (settings.filters.transaction) {
     const missingParents = new Set();
-    for (const card of host.querySelectorAll(":scope > .card")) {
+    for (const card of cards) {
       if (card.dataset.kind === "block" || card.dataset.kind === "transaction") continue;
       const pid = card.dataset.parent;
       if (!pid) continue;
-      if (!host.querySelector(`:scope > .card[data-eid="${pid}"]`)) {
-        missingParents.add(pid);
-      }
+      if (!mountedEids.has(pid)) missingParents.add(pid);
     }
     for (const pid of missingParents) {
       const row = retentionCache.get(Number(pid));
@@ -3663,23 +3832,28 @@ function repairBlockGroup(g) {
       });
     }
   }
-  const visibleEvent = [...host.querySelectorAll(":scope > .card")].some(
-    (c) => !c.classList.contains("enter-tip-pending") && !c.classList.contains("f-hide"),
-  );
   // Header still invisible while children already show → card-sized hole.
-  if (visibleEvent) {
+  if (hasVisibleEvent) {
     g.querySelectorAll(".card-block.enter-tip-pending").forEach((card) => {
       card.classList.remove("enter-tip-pending", "enter-tip", "enter-hist");
     });
   }
-  host.querySelectorAll(".card[data-kind=transaction].enter-tip-pending").forEach((tx) => {
+  for (const tx of cards) {
+    if (tx.dataset.kind !== "transaction") continue;
+    if (!tx.classList.contains("enter-tip-pending")) continue;
     const eid = tx.dataset.eid;
-    if (!eid) return;
-    const kidVisible = [...host.querySelectorAll(`.card[data-parent="${eid}"]`)].some(
+    if (!eid) continue;
+    const kidVisible = (childrenByParent.get(eid) || []).some(
       (c) => !c.classList.contains("enter-tip-pending") && !c.classList.contains("f-hide"),
     );
     if (kidVisible) tx.classList.remove("enter-tip-pending", "enter-tip", "enter-hist");
-  });
+  }
+  g.dataset.repairClean = "1";
+}
+
+/** Mark a group as needing repair after its card set changes. */
+function markGroupDirty(g) {
+  if (g && g.dataset) delete g.dataset.repairClean;
 }
 
 function routeEvent(ev) {
@@ -3698,6 +3872,7 @@ function routeEvent(ev) {
       const host = g?.querySelector(".group-events");
       if (host && !host.querySelector(`.card[data-eid="${ev.id}"]`)) {
         withEnterMode(null, () => host.appendChild(buildCard(ev)));
+        markGroupDirty(host.parentElement);
         scheduleFeedResort();
       }
     }
@@ -3747,12 +3922,14 @@ function routeEvent(ev) {
   else touchGroupViewed(g);
   noteGroupHeight(g, ev);
   g.querySelector(".group-events").appendChild(buildCard(ev));
+  markGroupDirty(g);
   scheduleFeedResort();
 }
 
 function standaloneCard(ev) {
   const g = newGroup(null, ev);
   g.querySelector(".group-events").appendChild(buildCard(ev));
+  markGroupDirty(g);
   scheduleFeedResort();
 }
 
@@ -3975,6 +4152,9 @@ function consumeHistoryLoadArm() {
   pinHistoryLoaderForUser();
   return true;
 }
+/** Minimum gap between scroll-driven prunes (ms). */
+const SCROLL_PRUNE_MIN_MS = 400;
+let lastScrollPruneAt = 0;
 function onScrollDirection() {
   const pos = feedScrollPos();
   // Require clear movement toward history — ignore jitter / overscroll bounce.
@@ -3982,8 +4162,14 @@ function onScrollDirection() {
   const towardTip = pos < lastScrollPos - 2;
   lastScrollPos = pos;
   if (towardTip) scheduleFlushPending();
-  // Drop unviewed / over-cap groups whether at tip or reading history.
-  pruneTipDomGroups();
+  // Keep the mounted window bounded whether at tip or reading history. Throttled
+  // because the prune reads a rect per mounted group; it also runs on a 30s timer
+  // and after every page load.
+  const nowMs = Date.now();
+  if (nowMs - lastScrollPruneAt > SCROLL_PRUNE_MIN_MS) {
+    lastScrollPruneAt = nowMs;
+    pruneTipDomGroups();
+  }
   if (!towardHistory) {
     if (!nearHistoryEnd()) {
       historyLoadArmed = true;
@@ -4004,8 +4190,21 @@ function onScrollDirection() {
     scheduleLoadHistory();
   }
 }
-addEventListener("scroll", onScrollDirection, { passive: true });
-feed.addEventListener("scroll", onScrollDirection, { passive: true });
+/**
+ * Scroll fires many times per frame and the handler reads layout
+ * (`getBoundingClientRect` per group in the prune, `scrollHeight` in
+ * nearHistoryEnd), so coalesce both listeners into one run per frame.
+ */
+let scrollRaf = 0;
+function onScrollEvent() {
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0;
+    onScrollDirection();
+  });
+}
+addEventListener("scroll", onScrollEvent, { passive: true });
+feed.addEventListener("scroll", onScrollEvent, { passive: true });
 
 // Feeds that don't fill the viewport can't scroll - treat wheel-down as load-more.
 addEventListener("wheel", (e) => {
@@ -4333,7 +4532,7 @@ async function extendSearchHistory() {
 
 function scheduleLoadHistory() {
   clearTimeout(historyLoadTimer);
-  historyLoadTimer = setTimeout(maybeLoadHistory, 120);
+  historyLoadTimer = setTimeout(maybeLoadHistory, 40);
 }
 
 function maybeLoadHistory() {
@@ -4361,6 +4560,31 @@ function maybeLoadHistory() {
  * captured before `await` snaps the user back to the bottom if they scroll
  * toward the tip while history is still loading.
  */
+/**
+ * Hold the reader's position across a DOM change.
+ *
+ * A group intersecting the viewport is measured before and after `fn`, and the
+ * scroll is corrected by the difference, so whatever is on screen stays on
+ * screen while content is added below or removed above. Groups touching the
+ * viewport are never evicted, so the anchor survives the mutation.
+ */
+function withAnchoredScroll(fn) {
+  if (settings.layout !== "vertical") return fn();
+  const vh = window.innerHeight || 0;
+  let anchor = null;
+  for (const g of groupOrder) {
+    const r = g.getBoundingClientRect();
+    if (r.bottom > 0 && r.top < vh) { anchor = g; break; }
+  }
+  const before = anchor ? anchor.getBoundingClientRect().top : null;
+  const result = fn();
+  if (anchor && anchor.isConnected && before != null) {
+    const delta = anchor.getBoundingClientRect().top - before;
+    if (Math.abs(delta) > 0.5) window.scrollBy(0, delta);
+  }
+  return result;
+}
+
 function withPinnedFeedScroll(fn) {
   const y = window.scrollY;
   const x = feed.scrollLeft;
@@ -4392,65 +4616,42 @@ async function loadHistory() {
 
   if (!retentionReady) {
     startRetentionPreload();
-    // Spinner already shown by scroll/wheel if the user is at the bottom.
-    await whenRetentionReady();
-    if ($("search").value.trim()) {
-      releaseHistoryLoaderForUser(historyExhausted);
-      return;
+    // Serve whatever the partially-hydrated cache already holds; wait for the
+    // 24h load only when it holds nothing this filter can use.
+    ensureFeedHitBuffer();
+    if (feedHitOffset >= feedHitBuffer.length) {
+      // Spinner already shown by scroll/wheel if the user is at the bottom.
+      await whenRetentionReady();
+      if ($("search").value.trim()) {
+        releaseHistoryLoaderForUser(historyExhausted);
+        return;
+      }
     }
   }
 
   historyLoading = true;
-  // Always refresh from retention — a stale hit list (built mid-hydrate) was
+  // Refresh from retention when the cache moved (dirty) — a stale hit list was
   // getting drained then skipped via seekPastRetentionWindow, freezing history
   // around the tip window (~20 minutes on sparse filters).
-  ensureFeedHitBuffer(true);
+  ensureFeedHitBuffer();
   const beforeVisible = visibleMatchCount();
   const userAtEnd = nearHistoryEnd() || historyLoaderUserPinned;
 
-  // Tip seed only: if almost nothing is mounted, paint up to the tip budget.
-  // Otherwise require the user at the history end before appending more.
+  // One page per trigger; reaching the bottom again asks for the next page.
   if (feedHitOffset < feedHitBuffer.length) {
     if (!userAtEnd && groupOrder.length >= TIP_DOM_MIN_GROUPS) {
       releaseHistoryLoaderForUser(false);
       return;
     }
-    if (!visibleFeedFillsPage() && groupOrder.length < TIP_PAINT_MAX_GROUPS) {
-      await withPinnedFeedScroll(() =>
-        paintFeedHitPages({ all: false, gen: feedRebuildGen }),
-      );
+    withAnchoredScroll(() => {
+      renderFeedPage();
       resortFeedBySlot();
       applyFilters();
-      pruneTipDomGroups();
-      if (!userAtEnd) {
-        releaseHistoryLoaderForUser(false);
-        return;
-      }
-    }
-    // User at end / short view: append exactly one more buffer page.
-    if (feedHitOffset < feedHitBuffer.length && userAtEnd) {
-      await withPinnedFeedScroll(() => { renderFeedPage(); });
-      pruneTipDomGroups();
-      ensureFeedHitBuffer(true);
-      historyLoadArmed = true;
-      const moreBuffered = feedHitOffset < feedHitBuffer.length;
-      const keepGoing = moreBuffered && (
-        !visibleFeedFillsPage()
-        || nearHistoryEnd()
-        || historyLoaderUserPinned
-      );
-      releaseHistoryLoaderForUser(false);
-      if (keepGoing) {
-        pinHistoryLoaderForUser();
-        setTimeout(() => maybeLoadHistory(), 0);
-      }
-      return;
-    }
-    if (feedHitOffset < feedHitBuffer.length) {
-      historyLoadArmed = true;
-      releaseHistoryLoaderForUser(false);
-      return;
-    }
+    });
+    pruneTipDomGroups();
+    historyLoadArmed = true;
+    releaseHistoryLoaderForUser(false);
+    return;
   }
 
   // In-memory hit list drained. If 24h is still hydrating, wait — do not hit disk.
