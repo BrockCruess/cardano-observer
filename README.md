@@ -166,13 +166,17 @@ forks, orphaned blocks and slot battles.
 
 - [Ogmios](https://ogmios.dev) attached to a `cardano-node` (**required** -
   this is the event source)
-- [Blockfrost RYO](https://github.com/blockfrost/blockfrost-backend-ryo)
-  (optional but recommended - pool/DRep/gov-action metadata, account lookups,
-  historical txs, and the recurring pool/DRep scrapes into `pools.json` /
-  `dreps.json`)
+- An enrichment API (optional but recommended - pool/DRep/gov-action metadata,
+  account lookups, historical txs, and the recurring pool/DRep scrapes into
+  `pools.json` / `dreps.json`). Two interchangeable options:
+  - **[cardano-observer-backend](cardano-observer-backend/README.md)** (bundled
+    in this repo) - self-hosted Rust API that queries your cardano-db-sync
+    PostgreSQL directly. Set `USE_OBSERVER_BACKEND=true` and
+    `OBSERVER_BACKEND_URL` in `.env`.
+  - [Blockfrost RYO](https://github.com/blockfrost/blockfrost-backend-ryo) -
+    set `BLOCKFROST_URL` (and optionally `BLOCKFROST_PROJECT_ID`).
 - [cardano-db-sync](https://github.com/IntersectMBO/cardano-db-sync) **if you
-  run Blockfrost RYO** - RYO is an API over a db-sync database, so enrichment
-  and historical tx lookups need that stack behind `BLOCKFROST_URL`. The
+  run either enrichment API** - both are APIs over a db-sync database. The
   observer itself does not talk to db-sync directly.
 - An [ADA Handle](https://handle.me) resolver (optional) - defaults to the free
   public API at `https://api.handle.me`. Self-host with
@@ -181,9 +185,9 @@ forks, orphaned blocks and slot battles.
   and point `ADA_HANDLE_URL` at it.
 - Rust 1.85+ to build (edition 2024)
 
-Without Blockfrost, the live feed still works from Ogmios alone; token
+Without an enrichment API, the live feed still works from Ogmios alone; token
 enrichment falls back to the on-disk CIP-26 registry cache, pool/DRep names
-stay incomplete until Blockfrost is configured, and older tx modals may be
+stay incomplete until one is configured, and older tx modals may be
 incomplete. Handle labels still work against the public API unless you set
 `ADA_HANDLE_URL=none`.
 

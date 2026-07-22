@@ -34,12 +34,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = config::Config::from_env();
+    let api_backend = match (&config.blockfrost_url, config.use_observer_backend) {
+        (Some(url), true) => format!("observer-backend @ {url}"),
+        (Some(url), false) => format!("blockfrost @ {url}"),
+        (None, _) => "(disabled)".to_string(),
+    };
     tracing::info!(
-        "cardano-observer v{} - network={} ogmios={} blockfrost={} handles={} demo={}",
+        "cardano-observer v{} - network={} ogmios={} api={} handles={} demo={}",
         env!("CARGO_PKG_VERSION"),
         config.network.as_str(),
         config.ogmios_url,
-        config.blockfrost_url.as_deref().unwrap_or("(disabled)"),
+        api_backend,
         config.ada_handle_url.as_deref().unwrap_or("(disabled)"),
         config.demo,
     );

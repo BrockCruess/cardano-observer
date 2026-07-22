@@ -1,3 +1,6 @@
+[workspace]
+members = ["cardano-observer-backend"]
+
 [package]
 name = "cardano-observer"
 version = "1.0.0"
