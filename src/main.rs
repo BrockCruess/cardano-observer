@@ -10,6 +10,7 @@ mod dreps;
 mod enrich;
 mod gov_actions;
 mod handles;
+mod logo_colors;
 mod model;
 mod ogmios;
 mod parse;
@@ -182,7 +183,15 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(ogmios::backfill_missing_txs(config.clone(), state.clone()));
     }
 
-    let app = server::router(server::ServerCtx { state, enricher });
+    // Brand-logo accent colours for tinting DEX / dApp cards. Computed once per
+    // logo and cached under DATA_DIR; existing entries are reused as-is.
+    let logo_colors = Arc::new(logo_colors::build(config.data_dir.as_deref().map(std::path::Path::new)));
+
+    let app = server::router(server::ServerCtx {
+        state,
+        enricher,
+        logo_colors,
+    });
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
     tracing::info!("web ui listening on http://{}", config.bind);
     axum::serve(listener, app)

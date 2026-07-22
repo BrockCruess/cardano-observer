@@ -838,6 +838,54 @@ header {
   transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* Subtle brand tint for DEX / dApp cards: a three-point gradient sampled from
+   the venue logo (see `/api/logo-colors`), layered over the base surface and
+   behind all card content. `--logo-grad` is set inline per card. */
+.card.has-logo-tint {
+  background:
+    var(--logo-grad),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.022), rgba(255, 255, 255, 0)),
+    var(--surface);
+}
+
+/* Faded brand watermark: the venue logo (`--logo-img`) hinted in behind the
+   card content, its centre pinned to the right edge of the logo frame and
+   scaled to 4× the card height, fading out radially into the tint. Isolated so
+   the watermark sits above the card background but below all content, and
+   clipped to the card so the oversized mark never bleeds onto neighbours.
+   Sizes are relative (card height / icon geometry), so it tracks every layout –
+   desktop, mobile, compact, regular. */
+.card.has-logo-wm { isolation: isolate; }
+.logo-wm {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  z-index: -1;
+  pointer-events: none;
+}
+.logo-wm::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  /* Centre pinned to the icon frame's right edge:
+     3px left border + 14px padding + 34px icon = 51px. */
+  left: 51px;
+  height: 300%;          /* 3× the card height */
+  aspect-ratio: 1 / 1;   /* square region → width tracks height */
+  transform: translate(-50%, -50%);
+  background: var(--logo-img) center / contain no-repeat;
+  opacity: 0.2;
+  filter: blur(3px);     /* blur the logo to make it more subtle */
+  /* Radial fall-off from the mark's centre to its edges, all around. */
+  -webkit-mask-image: radial-gradient(circle closest-side, #000, transparent);
+  mask-image: radial-gradient(circle closest-side, #000, transparent);
+}
+body.compact .logo-wm::before {
+  /* compact: 3px border + 12px padding + 26px icon = 41px */
+  left: 41px;
+}
+
 /* Live tip arrivals: held invisible while the list slides, then faded in. */
 .card.enter-tip-pending {
   opacity: 0 !important;

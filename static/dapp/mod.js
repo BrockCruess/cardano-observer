@@ -93,6 +93,8 @@ export function dappIconHtml(dappName) {
       `title="${name}" decoding="async">`,
     badge: !!logo.badge,
     plate: logo.plate || "",
+    // Colour-cache key: served logo path without leading slash or `?v=`.
+    key: logo.src.replace(/^\//, "").replace(/\?.*$/, ""),
   };
 }
 

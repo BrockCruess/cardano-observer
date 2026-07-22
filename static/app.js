@@ -75,6 +75,104 @@ let FINANCE_APPS = [...new Set([...DEX_VENUES, ...FINANCE_DAPPS])];
 // Everything left over (Iagon, Wayup) keeps its own dApp chip.
 DAPP_APPS = DAPP_APPS.filter((a) => !FINANCE_DAPP_NAMES.has(a));
 
+/* ── Brand-logo card tints ────────────────────────────────────────────── */
+/**
+ * Per-logo accent colours from `/api/logo-colors` (computed once server-side
+ * from each brand mark). Keyed by served logo path, e.g. `dex/logos/minswap.svg`.
+ * @type {Record<string, string[]>}
+ */
+let LOGO_COLORS = {};
+/** Tint strength - kept low so branded cards read as subtle, not loud. */
+const LOGO_TINT_ALPHA = 0.16;
+
+function hexToRgb(hex) {
+  const n = String(hex).replace("#", "");
+  return [
+    parseInt(n.slice(0, 2), 16),
+    parseInt(n.slice(2, 4), 16),
+    parseInt(n.slice(4, 6), 16),
+  ];
+}
+
+function hexToRgba(hex, a) {
+  const [r, g, b] = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
+/** HSV hue (deg), saturation (0-1), and value (0-1) for a hex colour. */
+function hexHsv(hex) {
+  let [r, g, b] = hexToRgb(hex).map((v) => v / 255);
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d > 0) {
+    if (mx === r) h = ((g - b) / d) % 6;
+    else if (mx === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = (h * 60 + 360) % 360;
+  }
+  return { h, s: mx === 0 ? 0 : d / mx, v: mx };
+}
+
+/** Smallest angle between two hues, in degrees. */
+function hueGap(a, b) {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+}
+
+/** Paint a card's `--logo-grad` from its `data-logo-key`, if colours are known. */
+function applyLogoTint(card) {
+  const key = card.dataset.logoKey;
+  if (!key) return;
+  const c = LOGO_COLORS[key];
+  if (!Array.isArray(c) || c.length < 3) return;
+  const a = LOGO_TINT_ALPHA;
+
+  // Decide the gradient shape from the palette. A logo whose stops all share
+  // one hue (e.g. Wayup's limes) reads flat as a three-shade ramp, so instead
+  // fade that single brand colour into the plain card background.
+  const info = c.map((hex, i) => ({ ...hexHsv(hex), i }));
+  const chromatic = info.filter((o) => o.s > 0.12);
+  let oneColour = chromatic.length < 2;
+  if (!oneColour) {
+    let spread = 0;
+    for (let i = 0; i < chromatic.length; i++)
+      for (let j = i + 1; j < chromatic.length; j++)
+        spread = Math.max(spread, hueGap(chromatic[i].h, chromatic[j].h));
+    oneColour = spread <= 40;
+  }
+
+  let grad;
+  if (oneColour) {
+    // Brand colour = the most vivid (brightest chromatic) stop, so the fade
+    // stays visible; fall back to the lightest stop for a greyscale mark.
+    const brand = (chromatic.length ? chromatic : info).reduce((best, o) =>
+      o.v > best.v ? o : best,
+    );
+    const col = c[brand.i];
+    // 2-point: brand colour on the left, falling off into the card background.
+    grad = `linear-gradient(90deg, ${hexToRgba(col, a)} 0%, ${hexToRgba(col, 0)} 100%)`;
+  } else {
+    // Colours are ordered light→dark; 90deg runs them left→right so the card is
+    // lightest at the start and the tint falls off toward the (right) end.
+    grad =
+      `linear-gradient(90deg, ${hexToRgba(c[0], a)} 0%, ` +
+      `${hexToRgba(c[1], a)} 50%, ${hexToRgba(c[2], a)} 100%)`;
+  }
+  card.style.setProperty("--logo-grad", grad);
+  card.classList.add("has-logo-tint");
+}
+
+// Load colours once; re-tint any cards already rendered before they arrived.
+fetch("/api/logo-colors")
+  .then((r) => (r.ok ? r.json() : {}))
+  .then((m) => {
+    LOGO_COLORS = m || {};
+    document.querySelectorAll(".card[data-logo-key]").forEach(applyLogoTint);
+  })
+  .catch(() => {
+    /* no tints without the endpoint - cards still render normally */
+  });
+
 /* ── Category & icon registry ─────────────────────────────────────────── */
 
 /**
@@ -3476,10 +3574,21 @@ function buildCard(ev) {
     if (branded.plate) {
       iconStyle = ` style="--ev-plate:${esc(branded.plate)}"`;
     }
+    // Tint the card background with a subtle gradient sampled from the logo,
+    // and hint the brand mark in as a faded watermark behind the content.
+    if (branded.key) {
+      card.dataset.logoKey = branded.key;
+      card.style.setProperty("--logo-img", `url("/${branded.key}")`);
+      card.classList.add("has-logo-wm");
+      applyLogoTint(card);
+    }
   }
   if (scam) iconClass += " has-scam";
 
-  card.innerHTML = `
+  const wmHtml = card.classList.contains("has-logo-wm")
+    ? `<span class="logo-wm" aria-hidden="true"></span>`
+    : "";
+  card.innerHTML = `${wmHtml}
     <div class="${iconClass}"${iconStyle}>${iconHtml}${
       scam ? `<span class="scam-flag" title="Known scam token" aria-label="scam">🚩</span>` : ""
     }</div>

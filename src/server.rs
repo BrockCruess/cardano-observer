@@ -20,6 +20,9 @@ use tower_http::compression::CompressionLayer;
 pub struct ServerCtx {
     pub state: Arc<AppState>,
     pub enricher: Arc<Enricher>,
+    /// Brand-logo accent colours (`{ "dex/logos/x.svg": ["#..","#..","#.."] }`)
+    /// for tinting DEX / dApp cards; served at `/api/logo-colors`.
+    pub logo_colors: Arc<serde_json::Value>,
 }
 
 pub fn router(ctx: ServerCtx) -> Router {
@@ -50,6 +53,7 @@ pub fn router(ctx: ServerCtx) -> Router {
         .route("/api/vote-rationale", get(api_vote_rationale))
         .route("/api/stats", get(api_stats))
         .route("/api/trending", get(api_trending))
+        .route("/api/logo-colors", get(api_logo_colors))
         .route("/healthz", get(|| async { "ok" }))
         .layer(CompressionLayer::new())
         .with_state(ctx)
@@ -487,4 +491,9 @@ async fn api_stats(State(ctx): State<ServerCtx>) -> Response {
 
 async fn api_trending(State(ctx): State<ServerCtx>) -> Response {
     Json(json!({ "terms": ctx.state.trending_top() })).into_response()
+}
+
+/// Brand-logo accent colours for DEX / dApp card tints (computed once at boot).
+async fn api_logo_colors(State(ctx): State<ServerCtx>) -> Response {
+    Json((*ctx.logo_colors).clone()).into_response()
 }
