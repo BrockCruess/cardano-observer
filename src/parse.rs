@@ -568,6 +568,24 @@ pub fn collect_assets(value: Option<&Value>, into: &mut Vec<(String, String, i12
     }
 }
 
+/// Native assets that appear in a tx's outputs but were not minted/burned in
+/// the same tx - the candidates for a "token transfer". Mirrors the collection
+/// done inline in [`parse_tx`]; kept as a shared helper so the post-parse
+/// internal-transfer filter judges the exact same asset set.
+pub fn transferred_assets(tx: &Value) -> Vec<(String, String, i128)> {
+    let empty = Vec::new();
+    let mut moved: Vec<(String, String, i128)> = Vec::new();
+    for o in tx.get("outputs").and_then(Value::as_array).unwrap_or(&empty) {
+        collect_assets(o.get("value"), &mut moved);
+    }
+    let mut minted: Vec<(String, String, i128)> = Vec::new();
+    collect_assets(tx.get("mint"), &mut minted);
+    moved
+        .into_iter()
+        .filter(|(p, n, _)| !minted.iter().any(|(mp, mn, _)| mp == p && mn == n))
+        .collect()
+}
+
 pub fn asset_list(assets: &[&(String, String, i128)]) -> Value {
     const MAX: usize = 12;
     let items: Vec<Value> = assets

@@ -379,6 +379,11 @@ async fn handle_forward(
         state.cache_tx(hash, tx, block_ctx.clone());
     }
 
+    // Drop token-transfer cards that only reshuffle assets within their own
+    // payment credentials (change / self-sends / consolidations). Runs after
+    // the block's txs are cached so spent-input credentials resolve.
+    state.drop_internal_token_transfers(&mut parsed.events);
+
     // Orphan bookkeeping + slot/height battle detection
     let block_ref = BlockRef {
         hash: parsed.hash.clone(),

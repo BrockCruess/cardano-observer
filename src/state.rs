@@ -254,6 +254,100 @@ impl AppState {
         }
     }
 
+    /// Narrow token-transfer events to only the assets that actually move to a
+    /// *new* payment credential, dropping any event that turns out to be a pure
+    /// internal reshuffle (self-send, change output, consolidation).
+    ///
+    /// Meant to run in the ingest path after this block's txs are cached and
+    /// before events are published, so internal reshuffles never reach the feed
+    /// or persistence. Ownership is proven via [`parse::asset_changes_hands`],
+    /// resolving spent-input credentials from the tx cache (memory + on-disk
+    /// hash index). When an asset cannot be proven internal (e.g. a spent parent
+    /// isn't cached), it is kept.
+    pub fn drop_internal_token_transfers(&self, events: &mut Vec<ChainEvent>) {
+        let before = events.len();
+        events.retain_mut(|ev| self.keep_token_transfer(ev));
+        let dropped = before - events.len();
+        if dropped > 0 {
+            tracing::debug!("dropped {dropped} internal token-transfer event(s)");
+        }
+    }
+
+    /// Rewrites a token-transfer event's asset list to only the assets that
+    /// change hands and returns whether it survives (any external asset left).
+    /// Non-transfer events pass through untouched.
+    fn keep_token_transfer(&self, ev: &mut ChainEvent) -> bool {
+        if ev.kind != "token_transfer" {
+            return true;
+        }
+        let Some(hash) = ev.tx_hash.clone() else {
+            return true;
+        };
+        let Some(entry) = self.get_tx(&hash) else {
+            return true; // no body ⇒ can't prove internal; keep as-is
+        };
+        let Some(tx) = entry.get("tx") else {
+            return true;
+        };
+        let transferred = parse::transferred_assets(tx);
+        if transferred.is_empty() {
+            return true;
+        }
+
+        // Pull spent parents so input payment credentials can be resolved.
+        let mut parents: HashMap<String, Value> = HashMap::new();
+        let empty = Vec::new();
+        for i in tx.get("inputs").and_then(Value::as_array).unwrap_or(&empty) {
+            let Some(src) = i
+                .get("transaction")
+                .and_then(|t| t.get("id"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if parents.contains_key(src) {
+                continue;
+            }
+            if let Some(pentry) = self.get_tx(src) {
+                if let Some(ptx) = pentry.get("tx").cloned() {
+                    parents.insert(src.to_string(), ptx);
+                }
+            }
+        }
+
+        let total = transferred.len();
+        let external: Vec<(String, String, i128)> = transferred
+            .into_iter()
+            .filter(|(policy, name_hex, _)| {
+                parse::asset_changes_hands(tx, policy, name_hex, |src, idx| {
+                    let parent = parents.get(src)?;
+                    let o = parent.get("outputs")?.as_array()?.get(idx as usize)?;
+                    Some((
+                        o.get("address")?.as_str()?.to_string(),
+                        o.get("value")?.clone(),
+                    ))
+                })
+            })
+            .collect();
+
+        if external.is_empty() {
+            return false; // pure internal reshuffle → drop
+        }
+        if external.len() < total {
+            // Some assets were internal change; keep only the ones that moved.
+            let refs: Vec<&(String, String, i128)> = external.iter().collect();
+            if let Some(obj) = ev.data.as_object_mut() {
+                obj.insert("assets".into(), parse::asset_list(&refs));
+            }
+            ev.title = if external.len() == 1 {
+                "Token Transfer".into()
+            } else {
+                format!("Token Transfer ×{}", external.len())
+            };
+        }
+        true
+    }
+
     /// Flag buffered token-transfer events that move a known scam fingerprint
     /// across payment credentials (not same-pkh internal reshuffles).
     pub fn stamp_buffered_scam(&self) {
@@ -805,5 +899,164 @@ fn value_contains_ci(v: &Value, q: &str) -> bool {
         }
         Value::Number(n) => n.to_string().contains(q),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bech32::{Bech32, Hrp};
+
+    fn base_addr(payment_hex: &str, stake_hex: &str) -> String {
+        let mut bytes = vec![0x01]; // CIP-19 type 0 (key+key), mainnet
+        bytes.extend(hex::decode(payment_hex).unwrap());
+        bytes.extend(hex::decode(stake_hex).unwrap());
+        bech32::encode::<Bech32>(Hrp::parse("addr").unwrap(), &bytes).unwrap()
+    }
+
+    fn token_transfer(hash: &str) -> ChainEvent {
+        ChainEvent {
+            id: 0,
+            parent_id: None,
+            kind: "token_transfer".into(),
+            category: "token".into(),
+            slot: 1,
+            height: Some(1),
+            block_hash: None,
+            tx_hash: Some(hash.into()),
+            timestamp: 1,
+            title: "Token Transfer".into(),
+            summary: String::new(),
+            data: json!({}),
+        }
+    }
+
+    fn block_ctx() -> Value {
+        // Recent timestamp so the cached txs stay inside the retention window.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        json!({ "hash": "b", "height": 1, "slot": 1, "timestamp": now })
+    }
+
+    #[test]
+    fn drops_internal_keeps_external_token_transfers() {
+        let state = AppState::new("mainnet", 24, 0, None);
+        let stake = "cc".repeat(28);
+        let alice = base_addr(&"aa".repeat(28), &stake);
+        let bob = base_addr(&"bb".repeat(28), &stake);
+        let policy = "dd".repeat(28);
+        let name = "544f4b"; // TOK
+
+        // Parent UTxO: Alice holds one TOK.
+        let parent = json!({
+            "outputs": [{
+                "address": alice,
+                "value": { "ada": { "lovelace": 5_000_000u64 }, (policy.clone()): { (name): 1 } }
+            }]
+        });
+        state.cache_tx("parent".into(), parent, block_ctx());
+
+        // Internal: Alice spends her UTxO, TOK returns to Alice (change / consolidation).
+        let internal = json!({
+            "inputs": [{ "transaction": { "id": "parent" }, "index": 0 }],
+            "outputs": [
+                { "address": alice, "value": { "ada": { "lovelace": 2_000_000u64 }, (policy.clone()): { (name): 1 } } },
+                { "address": alice, "value": { "ada": { "lovelace": 2_800_000u64 } } }
+            ]
+        });
+        state.cache_tx("internal".into(), internal, block_ctx());
+
+        // External: Alice sends the TOK to Bob, ADA change back to herself.
+        let external = json!({
+            "inputs": [{ "transaction": { "id": "parent" }, "index": 0 }],
+            "outputs": [
+                { "address": bob, "value": { "ada": { "lovelace": 1_500_000u64 }, (policy.clone()): { (name): 1 } } },
+                { "address": alice, "value": { "ada": { "lovelace": 3_300_000u64 } } }
+            ]
+        });
+        state.cache_tx("external".into(), external, block_ctx());
+
+        let mut events = vec![
+            token_transfer("internal"),
+            token_transfer("external"),
+            // Non-transfer events are never touched.
+            ChainEvent {
+                kind: "transaction".into(),
+                tx_hash: Some("external".into()),
+                ..token_transfer("external")
+            },
+        ];
+        state.drop_internal_token_transfers(&mut events);
+
+        let kept: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == "token_transfer")
+            .filter_map(|e| e.tx_hash.clone())
+            .collect();
+        assert_eq!(kept, vec!["external".to_string()]);
+        assert_eq!(events.len(), 2); // external transfer + the transaction event
+    }
+
+    #[test]
+    fn keeps_transfer_when_parent_unresolved() {
+        // Without the spent parent cached, ownership can't be proven internal,
+        // so a genuine-looking multi-wallet tx is kept (conservative default).
+        let state = AppState::new("mainnet", 24, 0, None);
+        let stake = "cc".repeat(28);
+        let alice = base_addr(&"aa".repeat(28), &stake);
+        let bob = base_addr(&"bb".repeat(28), &stake);
+        let policy = "dd".repeat(28);
+        let name = "544f4b";
+        let tx = json!({
+            "inputs": [{ "transaction": { "id": "uncached" }, "index": 0 }],
+            "outputs": [
+                { "address": bob, "value": { "ada": { "lovelace": 1_500_000u64 }, (policy.clone()): { (name): 1 } } },
+                { "address": alice, "value": { "ada": { "lovelace": 2_000_000u64 } } }
+            ]
+        });
+        state.cache_tx("tx".into(), tx, block_ctx());
+        let mut events = vec![token_transfer("tx")];
+        state.drop_internal_token_transfers(&mut events);
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn mixed_tx_keeps_only_the_asset_that_moves() {
+        // Alice sends TOK to Bob and keeps TOK2 as change: the event survives
+        // but its asset list is narrowed to only the asset that changed hands.
+        let state = AppState::new("mainnet", 24, 0, None);
+        let stake = "cc".repeat(28);
+        let alice = base_addr(&"aa".repeat(28), &stake);
+        let bob = base_addr(&"bb".repeat(28), &stake);
+        let policy = "dd".repeat(28);
+        let tok = "544f4b"; // TOK  → Bob
+        let tok2 = "544f4b32"; // TOK2 → change back to Alice
+
+        let parent = json!({
+            "outputs": [{
+                "address": alice,
+                "value": { "ada": { "lovelace": 5_000_000u64 },
+                    (policy.clone()): { (tok): 1, (tok2): 1 } }
+            }]
+        });
+        state.cache_tx("parent2".into(), parent, block_ctx());
+
+        let tx = json!({
+            "inputs": [{ "transaction": { "id": "parent2" }, "index": 0 }],
+            "outputs": [
+                { "address": bob, "value": { "ada": { "lovelace": 1_500_000u64 }, (policy.clone()): { (tok): 1 } } },
+                { "address": alice, "value": { "ada": { "lovelace": 3_000_000u64 }, (policy.clone()): { (tok2): 1 } } }
+            ]
+        });
+        state.cache_tx("mixed".into(), tx, block_ctx());
+
+        let mut events = vec![token_transfer("mixed")];
+        state.drop_internal_token_transfers(&mut events);
+        assert_eq!(events.len(), 1);
+        let items = events[0].data["assets"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "only the moved asset should remain");
+        assert_eq!(items[0]["nameHex"], tok);
     }
 }
