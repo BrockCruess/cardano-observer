@@ -3,7 +3,7 @@
 //! Keys are `{tx_hash}#{cert_index}`. On first sight of a proposal or a vote
 //! referencing one we:
 //! 1. Ask Ogmios for the on-chain metadata anchor (`queryLedgerState/governanceProposals`)
-//! 2. Optionally try Blockfrost `/governance/proposals/{tx}/{index}/metadata`
+//! 2. Optionally try the backend `/governance/proposals/{tx}/{index}/metadata`
 //! 3. Fetch the CIP-108 JSON from the anchor URL and read `body.title`
 //!
 //! Only confirmed results are written to `gov-actions.json` (including
@@ -28,7 +28,7 @@ pub struct GovActionEntry {
     /// CIP-108 title when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Anchor URL from Ogmios / Blockfrost / the proposal event (optional).
+    /// Anchor URL from Ogmios / the backend / the proposal event (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
@@ -120,7 +120,7 @@ impl GovActionCache {
         match load_cache(&path) {
             Ok(mut map) => {
                 // Drop hollow entries from failed lookups (pre-fix caches that
-                // recorded `{}` on Blockfrost timeouts) so we retry.
+                // recorded `{}` on backend timeouts) so we retry.
                 let before = map.len();
                 map.retain(|_, e| e.has_title() || e.url.as_ref().is_some_and(|u| !u.is_empty()));
                 let dropped = before - map.len();
@@ -216,8 +216,7 @@ pub fn collect_refs(
 /// Fetch titles for unresolved refs and write confirmed results into the cache.
 pub async fn ensure_titles(
     http: &reqwest::Client,
-    blockfrost_url: Option<&str>,
-    project_id: Option<&str>,
+    backend_url: Option<&str>,
     ogmios_url: Option<&str>,
     cache: &GovActionCache,
     refs: Vec<(String, u64, Option<String>)>,
@@ -229,7 +228,7 @@ pub async fn ensure_titles(
     tracing::info!("gov-action cache: resolving {} new proposal title(s)…", refs.len());
 
     // Prefer Ogmios for anchors — it is already required and returns metadata.url
-    // even when Blockfrost is down or hanging.
+    // even when the backend is down or hanging.
     let mut ogmios_anchors = HashMap::new();
     if let Some(url) = ogmios_url {
         let want: Vec<(String, u64)> = refs.iter().map(|(t, i, _)| (t.clone(), *i)).collect();
@@ -265,13 +264,11 @@ pub async fn ensure_titles(
         let key = cache_key(&tx, index);
         let ogmios_anchor = ogmios_anchors.get(&key).cloned();
         let http = http.clone();
-        let bf_base = blockfrost_url.map(str::to_string);
-        let pid = project_id.map(str::to_string);
+        let backend_base = backend_url.map(str::to_string);
         set.spawn(async move {
             let entry = resolve_one(
                 &http,
-                bf_base.as_deref(),
-                pid.as_deref(),
+                backend_base.as_deref(),
                 &tx,
                 index,
                 event_anchor.as_deref(),
@@ -300,15 +297,14 @@ pub async fn ensure_titles(
 /// Returns `None` on transport failure so we retry later.
 async fn resolve_one(
     http: &reqwest::Client,
-    blockfrost_url: Option<&str>,
-    project_id: Option<&str>,
+    backend_url: Option<&str>,
     tx: &str,
     index: u64,
     event_anchor: Option<&str>,
     ogmios_anchor: Option<&str>,
 ) -> Option<GovActionEntry> {
-    // Prefer Ogmios/event anchors — Blockfrost often hangs on RYO while the
-    // node already has the metadata URL.
+    // Prefer Ogmios/event anchors — the node already has the metadata URL, so
+    // this avoids a backend round-trip when possible.
     if let Some(u) = ogmios_anchor.or(event_anchor) {
         match fetch_anchor_title(http, u).await {
             AnchorResult::Ok(entry) => return Some(entry),
@@ -319,21 +315,21 @@ async fn resolve_one(
                 });
             }
             AnchorResult::Error => {
-                // Fall through to Blockfrost if configured; otherwise retry later.
-                if blockfrost_url.is_none() {
+                // Fall through to the backend if configured; otherwise retry later.
+                if backend_url.is_none() {
                     return None;
                 }
             }
         }
     }
 
-    let Some(base) = blockfrost_url else {
+    let Some(base) = backend_url else {
         return None;
     };
 
-    match fetch_blockfrost(http, base, project_id, tx, index).await {
-        BfResult::Ok(entry) if entry.has_title() => Some(entry),
-        BfResult::Ok(entry) => {
+    match fetch_backend(http, base, tx, index).await {
+        BackendResult::Ok(entry) if entry.has_title() => Some(entry),
+        BackendResult::Ok(entry) => {
             if let Some(u) = entry.url.as_deref().or(ogmios_anchor).or(event_anchor) {
                 match fetch_anchor_title(http, u).await {
                     AnchorResult::Ok(from_anchor) => Some(from_anchor),
@@ -344,49 +340,45 @@ async fn resolve_one(
                     AnchorResult::Error => None,
                 }
             } else {
-                Some(entry) // BF responded; no title, no URL
+                Some(entry) // backend responded; no title, no URL
             }
         }
-        BfResult::Miss => Some(GovActionEntry::default()),
-        BfResult::Error => None,
+        BackendResult::Miss => Some(GovActionEntry::default()),
+        BackendResult::Error => None,
     }
 }
 
-enum BfResult {
+enum BackendResult {
     Ok(GovActionEntry),
     Miss,
     Error,
 }
 
-async fn fetch_blockfrost(
+async fn fetch_backend(
     http: &reqwest::Client,
     base: &str,
-    project_id: Option<&str>,
     tx: &str,
     index: u64,
-) -> BfResult {
+) -> BackendResult {
     let path = format!("/governance/proposals/{tx}/{index}/metadata");
-    let mut req = http.get(format!("{base}{path}"));
-    if let Some(pid) = project_id {
-        req = req.header("project_id", pid);
-    }
+    let req = http.get(format!("{base}{path}"));
     let resp = match tokio::time::timeout(Duration::from_secs(5), req.send()).await {
         Ok(Ok(r)) => r,
-        _ => return BfResult::Error,
+        _ => return BackendResult::Error,
     };
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return BfResult::Miss;
+        return BackendResult::Miss;
     }
     if !resp.status().is_success() {
-        return BfResult::Error;
+        return BackendResult::Error;
     }
     match resp.json::<Value>().await {
-        Ok(v) => BfResult::Ok(entry_from_blockfrost(&v)),
-        Err(_) => BfResult::Error,
+        Ok(v) => BackendResult::Ok(entry_from_backend(&v)),
+        Err(_) => BackendResult::Error,
     }
 }
 
-fn entry_from_blockfrost(v: &Value) -> GovActionEntry {
+fn entry_from_backend(v: &Value) -> GovActionEntry {
     let title = extract_title(v.get("json_metadata").unwrap_or(v));
     let url = v
         .get("url")

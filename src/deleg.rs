@@ -1,6 +1,6 @@
 //! Tracks the last-seen pool / DRep for each stake credential so delegation
 //! events can show `from → to`. Seeded from persisted history; live updates
-//! cost nothing. Cache misses are filled via Blockfrost before the events
+//! cost nothing. Cache misses are filled via the backend before the events
 //! are published.
 
 use crate::enrich::Enricher;
@@ -100,11 +100,11 @@ impl DelegationTracker {
 /// For delegation events still missing `fromPool` / `fromDrep`, batch-query
 /// account state and fill when the live tip still shows the *previous* target
 /// (i.e. the new cert hasn't been reflected yet). Cheap no-op when the tip
-/// already matches the new target. Pool misses also try Blockfrost delegation
+/// already matches the new target. Pool misses also try the backend delegation
 /// history (skipping the current tx) as a second shot.
 ///
 /// After filling, drops pool/DRep events whose `from` equals `to` (no-op
-/// redelegations, including Blockfrost `drep_always_*` vs UI label mismatches).
+/// redelegations, including `drep_always_*` vs UI label mismatches).
 pub async fn fill_missing_froms(enricher: &Enricher, events: &mut Vec<ChainEvent>) {
     let mut need_pool: Vec<(usize, String, String, Option<String>)> = Vec::new(); // idx, stake, new, tx
     let mut need_drep: Vec<(usize, String, String)> = Vec::new();

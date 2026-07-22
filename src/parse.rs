@@ -1073,7 +1073,7 @@ fn decode_address(addr: &str) -> Option<(String, Vec<u8>)> {
 /// always-abstain / no-confidence dreps).
 ///
 /// Encodes the 28-byte credential with the CIP-129 header byte so the id matches
-/// Blockfrost / modern explorers. Legacy CIP-105 forms still resolve via
+/// modern explorers. Legacy CIP-105 forms still resolve via
 /// [`crate::dreps::drep_id_aliases`].
 pub fn drep_display(drep: &Value) -> String {
     match drep.get("type").and_then(Value::as_str) {

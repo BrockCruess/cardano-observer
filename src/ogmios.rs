@@ -358,11 +358,11 @@ async fn handle_forward(
         return;
     };
 
-    // Cache-miss from→to: one short batched Blockfrost account lookup.
+    // Cache-miss from→to: one short batched backend account lookup.
     deleg::fill_missing_froms(enricher, &mut parsed.events).await;
     // Learn DRep names from any registration/update anchors in this block.
     enricher.warm_dreps_from_events(&parsed.events).await;
-    // CIP-108 titles: Blockfrost once per new governance action.
+    // CIP-108 titles: backend once per new governance action.
     enricher.ensure_gov_action_titles(&parsed.events).await;
 
     state.counters.blocks.fetch_add(1, Ordering::Relaxed);

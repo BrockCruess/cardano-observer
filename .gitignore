@@ -4,6 +4,9 @@
 # Runtime persistence & caches (events, txs, pools.json, token-registry.*)
 /data/
 
+# Backend log written by start.sh / start-dev.sh
+/backend.log
+
 # Local secrets / machine config (start scripts copy from .env.example)
 .env
 .env.*

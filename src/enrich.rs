@@ -1,7 +1,7 @@
 //! Metadata enrichment: in-memory Cardano token registry (CIP-26), stake pool
 //! ticker cache, and DRep name cache loaded from disk at boot. Pool/DRep
-//! Blockfrost scrapes run in the background when caches are empty (or refresh
-//! flags are set); live Blockfrost lookups only run for pools/dreps missing from
+//! backend scrapes run in the background when caches are empty (or refresh
+//! flags are set); live backend lookups only run for pools/dreps missing from
 //! those durable caches (assets use CIP-26 only — unknowns are local stubs).
 //! Token registry, pool, and DRep caches are re-scraped daily at 00:00 UTC.
 //! Governance action titles (CIP-108) are fetched once on first sight and
@@ -23,8 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct Enricher {
     http: reqwest::Client,
-    blockfrost_url: Option<String>,
-    project_id: Option<String>,
+    backend_url: Option<String>,
     ogmios_url: String,
     /// Full CIP-26 registry - subject → name/ticker/decimals.
     registry: TokenRegistry,
@@ -66,7 +65,7 @@ impl Enricher {
             }
         };
 
-        // Disk only — Blockfrost scrapes run in a background task from main.
+        // Disk only — backend scrapes run in a background task from main.
         let pool_cache = PoolCache::load(cache_dir);
         let drep_cache = DrepCache::load(cache_dir);
         let gov_action_cache = GovActionCache::load(cache_dir);
@@ -90,8 +89,7 @@ impl Enricher {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("http client"),
-            blockfrost_url: config.blockfrost_url.clone(),
-            project_id: config.blockfrost_project_id.clone(),
+            backend_url: config.backend_url.clone(),
             ogmios_url: config.ogmios_url.clone(),
             registry,
             pool_cache,
@@ -123,12 +121,12 @@ impl Enricher {
         self.scam_tokens.len()
     }
 
-    /// Run pool/DRep Blockfrost scrapes when the on-disk cache was empty (or a
+    /// Run pool/DRep backend scrapes when the on-disk cache was empty (or a
     /// refresh flag is set). Intended to be `tokio::spawn`ed so boot is not blocked.
     /// Returns whether the DRep cache gained entries (caller may re-stamp events).
     pub async fn run_initial_scrapes(&self, force_pools: bool, force_dreps: bool) -> bool {
-        if self.blockfrost_url.is_none() {
-            tracing::info!("pool/drep initial scrape skipped (no BLOCKFROST_URL)");
+        if self.backend_url.is_none() {
+            tracing::info!("pool/drep initial scrape skipped (no OBSERVER_BACKEND_URL)");
             return false;
         }
         let need_pools = force_pools || self.pool_cache.len() == 0;
@@ -147,13 +145,12 @@ impl Enricher {
             tracing::info!("drep cache: empty - background scrape starting");
         }
 
-        // Pools then DReps sequentially so they don't contend for the same RYO.
+        // Pools then DReps sequentially so they don't contend for the backend.
         if need_pools {
-            let Some(base) = self.blockfrost_url.as_deref() else {
+            let Some(base) = self.backend_url.as_deref() else {
                 return false;
             };
-            let pid = self.project_id.as_deref();
-            match self.pool_cache.refresh(&self.http, base, pid).await {
+            match self.pool_cache.refresh(&self.http, base).await {
                 Ok(0) => tracing::warn!("pool cache initial scrape returned 0 entries"),
                 Ok(n) => tracing::info!("pool cache initial scrape done ({n} pools)"),
                 Err(e) => tracing::warn!("pool cache initial scrape failed: {e:#}"),
@@ -162,11 +159,10 @@ impl Enricher {
         if !need_dreps {
             return false;
         }
-        let Some(base) = self.blockfrost_url.as_deref() else {
+        let Some(base) = self.backend_url.as_deref() else {
             return false;
         };
-        let pid = self.project_id.as_deref();
-        match self.drep_cache.refresh(&self.http, base, pid).await {
+        match self.drep_cache.refresh(&self.http, base).await {
             Ok(0) => {
                 tracing::warn!("drep cache initial scrape returned 0 names");
                 false
@@ -194,7 +190,7 @@ impl Enricher {
             tokio::time::sleep(wait).await;
             self.refresh_token_registry().await;
             self.refresh_scam_token_list().await;
-            if self.blockfrost_url.is_some() {
+            if self.backend_url.is_some() {
                 self.refresh_pool_and_drep_caches().await;
             }
             // Stay past midnight so the next wait targets tomorrow.
@@ -223,17 +219,16 @@ impl Enricher {
     }
 
     async fn refresh_pool_and_drep_caches(&self) {
-        let Some(base) = self.blockfrost_url.as_deref() else {
+        let Some(base) = self.backend_url.as_deref() else {
             return;
         };
-        let pid = self.project_id.as_deref();
-        tracing::info!("refreshing pool and drep caches from Blockfrost…");
-        match self.pool_cache.refresh(&self.http, base, pid).await {
+        tracing::info!("refreshing pool and drep caches from the backend…");
+        match self.pool_cache.refresh(&self.http, base).await {
             Ok(0) => tracing::warn!("pool cache refresh returned 0 entries - keeping previous"),
             Ok(n) => tracing::info!("pool cache refreshed ({n} pools)"),
             Err(e) => tracing::warn!("pool cache refresh failed: {e:#}"),
         }
-        match self.drep_cache.refresh(&self.http, base, pid).await {
+        match self.drep_cache.refresh(&self.http, base).await {
             Ok(0) => tracing::warn!("drep cache refresh returned 0 names - keeping previous"),
             Ok(n) => tracing::info!("drep cache refreshed ({n} dreps)"),
             Err(e) => tracing::warn!("drep cache refresh failed: {e:#}"),
@@ -378,7 +373,7 @@ impl Enricher {
     }
 
     /// Resolve titles for any new gov actions referenced by these events
-    /// (Blockfrost once per action; later hits are cache-only).
+    /// (backend once per action; later hits are cache-only).
     pub async fn ensure_gov_action_titles(&self, events: &[crate::model::ChainEvent]) {
         let refs = gov_actions::collect_refs(events, &self.gov_action_cache);
         if refs.is_empty() {
@@ -390,8 +385,7 @@ impl Enricher {
             .unwrap_or_else(|_| self.http.clone());
         gov_actions::ensure_titles(
             &http,
-            self.blockfrost_url.as_deref(),
-            self.project_id.as_deref(),
+            self.backend_url.as_deref(),
             Some(self.ogmios_url.as_str()),
             &self.gov_action_cache,
             refs,
@@ -474,18 +468,14 @@ impl Enricher {
             .or_else(|| e.name.filter(|s| !s.is_empty()))
     }
 
-    fn bf(&self, path: &str) -> Option<reqwest::RequestBuilder> {
-        let base = self.blockfrost_url.as_ref()?;
-        let mut req = self.http.get(format!("{base}{path}"));
-        if let Some(pid) = &self.project_id {
-            req = req.header("project_id", pid);
-        }
-        Some(req)
+    fn backend_req(&self, path: &str) -> Option<reqwest::RequestBuilder> {
+        let base = self.backend_url.as_ref()?;
+        Some(self.http.get(format!("{base}{path}")))
     }
 
     /// Asset metadata for a unit (policy hex + asset-name hex).
     ///
-    /// CIP-26 registry only — we do **not** hit Blockfrost for unknowns. Tokens
+    /// CIP-26 registry only — we do **not** hit the backend for unknowns. Tokens
     /// missing from the cache are treated as unregistered (NFT / junk / no
     /// decimals): return a local stub so the UI can still show a decoded name.
     pub async fn asset(&self, unit: &str) -> Value {
@@ -527,7 +517,7 @@ impl Enricher {
             return hit.to_json(pool_id);
         }
         let meta = self
-            .pool_from_blockfrost(pool_id)
+            .pool_from_backend(pool_id)
             .await
             .unwrap_or_else(|| json!({ "pool": pool_id }));
         let entry = PoolEntry {
@@ -565,10 +555,10 @@ impl Enricher {
         if let Some(hit) = self.drep_cache.get(id) {
             return hit.to_json(id);
         }
-        // Blockfrost historically keys by CIP-105; try every alias.
+        // Historically keyed by CIP-105; try every alias.
         let mut meta = None;
         for alt in dreps::drep_id_aliases(id) {
-            if let Some(m) = self.drep_from_blockfrost(&alt).await {
+            if let Some(m) = self.drep_from_backend(&alt).await {
                 meta = Some(m);
                 break;
             }
@@ -643,8 +633,8 @@ impl KeywordMeta for Enricher {
 }
 
 impl Enricher {
-    async fn pool_from_blockfrost(&self, pool_id: &str) -> Option<Value> {
-        let req = self.bf(&format!("/pools/{pool_id}/metadata"))?;
+    async fn pool_from_backend(&self, pool_id: &str) -> Option<Value> {
+        let req = self.backend_req(&format!("/pools/{pool_id}/metadata"))?;
         let v: Value = req.send().await.ok()?.error_for_status().ok()?.json().await.ok()?;
         let ticker = v.get("ticker").and_then(Value::as_str).filter(|s| !s.is_empty());
         let name = v.get("name").and_then(Value::as_str).filter(|s| !s.is_empty());
@@ -656,8 +646,8 @@ impl Enricher {
         }))
     }
 
-    async fn drep_from_blockfrost(&self, drep_id: &str) -> Option<Value> {
-        let req = self.bf(&format!("/governance/dreps/{drep_id}/metadata"))?;
+    async fn drep_from_backend(&self, drep_id: &str) -> Option<Value> {
+        let req = self.backend_req(&format!("/governance/dreps/{drep_id}/metadata"))?;
         let v: Value = tokio::time::timeout(Duration::from_secs(8), req.send())
             .await
             .ok()?
@@ -667,7 +657,7 @@ impl Enricher {
             .json()
             .await
             .ok()?;
-        if let Some(entry) = DrepEntry::from_blockfrost_meta(&v) {
+        if let Some(entry) = DrepEntry::from_backend_meta(&v) {
             return Some(entry.to_json(drep_id));
         }
         // If BF only returned the anchor URL, fetch CIP-119 ourselves.
@@ -681,27 +671,23 @@ impl Enricher {
         if stakes.is_empty() {
             return HashMap::new();
         }
-        self.accounts_from_blockfrost(stakes)
+        self.accounts_from_backend(stakes)
             .await
             .unwrap_or_default()
     }
 
-    async fn accounts_from_blockfrost(&self, stakes: &[String]) -> Option<HashMap<String, Value>> {
-        if self.blockfrost_url.is_none() {
+    async fn accounts_from_backend(&self, stakes: &[String]) -> Option<HashMap<String, Value>> {
+        if self.backend_url.is_none() {
             return None;
         }
         let mut out = HashMap::new();
-        // Parallelism capped - RYO nodes dislike huge bursts.
+        // Parallelism capped - avoid overwhelming the backend with bursts.
         let mut set = tokio::task::JoinSet::new();
         for stake in stakes.iter().cloned().take(32) {
             let http = self.http.clone();
-            let base = self.blockfrost_url.clone()?;
-            let pid = self.project_id.clone();
+            let base = self.backend_url.clone()?;
             set.spawn(async move {
-                let mut req = http.get(format!("{base}/accounts/{stake}"));
-                if let Some(pid) = pid {
-                    req = req.header("project_id", pid);
-                }
+                let req = http.get(format!("{base}/accounts/{stake}"));
                 let v: Value = tokio::time::timeout(Duration::from_millis(900), req.send())
                     .await
                     .ok()?
@@ -733,14 +719,14 @@ impl Enricher {
         Some(out)
     }
 
-    /// Previous pool from Blockfrost delegation history, skipping the current tx.
+    /// Previous pool from backend delegation history, skipping the current tx.
     pub async fn previous_pool_from_history(
         &self,
         stake: &str,
         new_pool: &str,
         current_tx: Option<&str>,
     ) -> Option<String> {
-        let req = self.bf(&format!(
+        let req = self.backend_req(&format!(
             "/accounts/{stake}/delegations?count=5&order=desc"
         ))?;
         let v: Value = tokio::time::timeout(Duration::from_millis(900), req.send())
@@ -766,52 +752,52 @@ impl Enricher {
     }
 
     /// Fallback tx lookup when a hash is not in the local tx index.
-    /// Local Blockfrost RYO often hangs on `/txs/{hash}` — keep this short.
+    /// Kept short so a slow backend never stalls a modal open.
     pub async fn tx_fallback(&self, hash: &str) -> Option<Value> {
-        if self.blockfrost_url.is_none() {
+        if self.backend_url.is_none() {
             return None;
         }
         if !hash.chars().all(|c| c.is_ascii_hexdigit()) || hash.len() != 64 {
             return None;
         }
-        let tx: Value = match self.bf(&format!("/txs/{hash}")) {
+        let tx: Value = match self.backend_req(&format!("/txs/{hash}")) {
             Some(req) => match tokio::time::timeout(Duration::from_secs(2), req.send()).await {
                 Ok(Ok(resp)) => match resp.error_for_status() {
                     Ok(ok) => match ok.json().await {
                         Ok(v) => v,
                         Err(e) => {
-                            tracing::warn!("blockfrost tx {hash}: bad json: {e}");
+                            tracing::warn!("backend tx {hash}: bad json: {e}");
                             return None;
                         }
                     },
                     Err(e) => {
-                        tracing::debug!("blockfrost tx {hash}: {e}");
+                        tracing::debug!("backend tx {hash}: {e}");
                         return None;
                     }
                 },
                 Ok(Err(e)) => {
-                    tracing::debug!("blockfrost tx {hash}: {e}");
+                    tracing::debug!("backend tx {hash}: {e}");
                     return None;
                 }
                 Err(_) => {
-                    tracing::debug!("blockfrost tx {hash}: timed out");
+                    tracing::debug!("backend tx {hash}: timed out");
                     return None;
                 }
             },
             None => return None,
         };
-        let utxos: Option<Value> = match self.bf(&format!("/txs/{hash}/utxos")) {
+        let utxos: Option<Value> = match self.backend_req(&format!("/txs/{hash}/utxos")) {
             Some(req) => match tokio::time::timeout(Duration::from_secs(2), req.send()).await {
                 Ok(Ok(resp)) => resp.error_for_status().ok()?.json().await.ok(),
                 _ => None,
             },
             None => None,
         };
-        Some(json!({ "blockfrost": { "tx": tx, "utxos": utxos } }))
+        Some(json!({ "backend": { "tx": tx, "utxos": utxos } }))
     }
 
-    pub fn has_blockfrost(&self) -> bool {
-        self.blockfrost_url.is_some()
+    pub fn has_backend(&self) -> bool {
+        self.backend_url.is_some()
     }
 }
 

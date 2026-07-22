@@ -22,7 +22,7 @@ fn tx_hash_bytes(hash: &str) -> Result<(String, Vec<u8>), ApiError> {
     Ok((hash, bytes))
 }
 
-/// Builds a Blockfrost-style amount list: lovelace first, then any native
+/// Builds an amount list: lovelace first, then any native
 /// assets from a `json_agg` column.
 fn amount_list(lovelace: Option<String>, assets: Option<Value>) -> Value {
     let mut list = vec![json!({

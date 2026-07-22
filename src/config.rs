@@ -3,12 +3,10 @@ use std::env;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub ogmios_url: String,
-    /// Base URL of the enrichment API (Blockfrost-compatible). Populated from
-    /// OBSERVER_BACKEND_URL when USE_OBSERVER_BACKEND is set, else BLOCKFROST_URL.
-    pub blockfrost_url: Option<String>,
-    pub blockfrost_project_id: Option<String>,
-    /// True when the self-hosted cardano-observer-backend is selected.
-    pub use_observer_backend: bool,
+    /// Base URL of the cardano-observer-backend enrichment API
+    /// (`OBSERVER_BACKEND_URL`). `None` disables metadata / account / tx
+    /// enrichment - the feed still runs from Ogmios and the on-disk caches.
+    pub backend_url: Option<String>,
     /// Base URL for ADA Handle resolution (KoraLabs or CF resolver).
     /// `None` disables Handle enrichment on event cards.
     pub ada_handle_url: Option<String>,
@@ -19,9 +17,9 @@ pub struct Config {
     pub token_registry_zip: String,
     /// Force re-download of the registry zip even if the cache file exists.
     pub token_registry_refresh: bool,
-    /// Force re-scrape of Blockfrost pool list even if pools.json exists.
+    /// Force re-scrape of the backend pool list even if pools.json exists.
     pub pool_cache_refresh: bool,
-    /// Force re-scrape of Blockfrost DRep list even if dreps.json exists.
+    /// Force re-scrape of the backend DRep list even if dreps.json exists.
     pub drep_cache_refresh: bool,
     /// CIP-14 scam fingerprint list URL (raw text, `#` comments ignored).
     pub scam_token_list_url: String,
@@ -94,28 +92,12 @@ impl Config {
             Some("preview") => Network::Preview,
             _ => Network::Mainnet,
         };
-        // Backend selection: USE_OBSERVER_BACKEND=true points the enrichment
-        // API at a self-hosted cardano-observer-backend instead of Blockfrost.
-        // Both speak the same HTTP API, so the rest of the app is agnostic.
-        let use_observer_backend = matches!(
-            non_empty("USE_OBSERVER_BACKEND").as_deref(),
-            Some("true") | Some("1") | Some("yes")
-        );
-        let (blockfrost_url, blockfrost_project_id) = if use_observer_backend {
-            let url = non_empty("OBSERVER_BACKEND_URL")
-                .unwrap_or_else(|| "http://127.0.0.1:3300".into());
-            (Some(url.trim_end_matches('/').to_string()), None)
-        } else {
-            (
-                non_empty("BLOCKFROST_URL").map(|u| u.trim_end_matches('/').to_string()),
-                non_empty("BLOCKFROST_PROJECT_ID"),
-            )
-        };
         Config {
             ogmios_url: non_empty("OGMIOS_URL").unwrap_or_else(|| "ws://127.0.0.1:1337".into()),
-            blockfrost_url,
-            blockfrost_project_id,
-            use_observer_backend,
+            // Enrichment API base URL. Empty disables enrichment; the feed then
+            // runs from Ogmios plus the on-disk metadata caches only.
+            backend_url: non_empty("OBSERVER_BACKEND_URL")
+                .map(|u| u.trim_end_matches('/').to_string()),
             ada_handle_url: match non_empty("ADA_HANDLE_URL").as_deref() {
                 Some("none") | Some("off") | Some("false") => None,
                 Some(url) => Some(url.trim_end_matches('/').to_string()),

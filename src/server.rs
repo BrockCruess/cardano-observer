@@ -352,10 +352,10 @@ async fn api_tx(State(ctx): State<ServerCtx>, Path(hash): Path<String>) -> Respo
     if let Some(fallback) = ctx.enricher.tx_fallback(&hash).await {
         return Json(fallback).into_response();
     }
-    let reason = if ctx.enricher.has_blockfrost() {
-        "cache_miss_blockfrost_failed"
+    let reason = if ctx.enricher.has_backend() {
+        "cache_miss_backend_failed"
     } else {
-        "cache_miss_no_blockfrost"
+        "cache_miss_no_backend"
     };
     (
         StatusCode::NOT_FOUND,

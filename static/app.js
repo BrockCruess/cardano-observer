@@ -1683,7 +1683,7 @@ function keepDexEvent(ev) {
   return true;
 }
 
-/** Blockfrost / Ogmios spellings → same labels the server emits. */
+/** Backend / Ogmios spellings → same labels the server emits. */
 function normalizeDrepLabel(id) {
   if (!id) return "";
   const s = String(id).trim();
@@ -5715,7 +5715,7 @@ async function openTx(ev) {
     }
     mBody.innerHTML = detail.tx
       ? renderOgmiosTx(hash, detail.tx, detail.block, ev)
-      : renderBlockfrostTx(hash, detail.blockfrost, ev);
+      : renderBackendTx(hash, detail.backend, ev);
     enrichAssets(mBody);
     enrichHandles(mBody);
     await hydrateVoteRationales(ev, detail.tx || null);
@@ -5929,7 +5929,7 @@ function formatRationaleText(raw) {
     .join("");
 }
 
-function renderBlockfrostTx(hash, bf, ev) {
+function renderBackendTx(hash, bf, ev) {
   if (!bf || !bf.tx) return `<div class="m-empty">No details available.</div>${explorers(hash)}`;
   const tx = bf.tx;
   const utxos = bf.utxos || {};
@@ -5953,7 +5953,7 @@ function renderBlockfrostTx(hash, bf, ev) {
       ${kvRow("fee", fmtAda(tx.fees))}
       ${kvRow("total output", fmtAda(tx.output_amount?.find((a) => a.unit === "lovelace")?.quantity))}
       ${kvRow("certificates", (tx.stake_cert_count || 0) + (tx.delegation_count || 0) + (tx.pool_update_count || 0) || null)}
-      ${kvRow("source", "Blockfrost (historical)")}
+      ${kvRow("source", "db-sync (historical)")}
     </dl></div>
     <div class="m-section io">
       <div class="io-col"><h4>Inputs</h4>${io(utxos.inputs, "in")}</div>

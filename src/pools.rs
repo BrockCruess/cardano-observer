@@ -1,7 +1,7 @@
 //! Durable stake-pool metadata cache (ticker / name / homepage).
 //!
 //! Loads `pools.json` from DATA_DIR when present (boot stays non-blocking).
-//! Missing / forced refreshes scrape Blockfrost `/pools` (+ per-pool
+//! Missing / forced refreshes scrape the backend `/pools` (+ per-pool
 //! `/metadata`) in the background; when the scrape finishes the in-memory map
 //! and on-disk file are replaced. A daily UTC-midnight job re-scrapes the same
 //! way. Individual misses are fetched live once and appended.
@@ -46,7 +46,7 @@ impl PoolEntry {
         })
     }
 
-    fn from_blockfrost_meta(v: &Value) -> Option<Self> {
+    fn from_backend_meta(v: &Value) -> Option<Self> {
         let ticker = v
             .get("ticker")
             .and_then(Value::as_str)
@@ -104,21 +104,16 @@ impl PoolCache {
         }
     }
 
-    /// Replace the in-memory + on-disk cache with a fresh Blockfrost scrape.
-    pub async fn refresh(
-        &self,
-        http: &reqwest::Client,
-        blockfrost_url: &str,
-        project_id: Option<&str>,
-    ) -> Result<usize> {
+    /// Replace the in-memory + on-disk cache with a fresh backend scrape.
+    pub async fn refresh(&self, http: &reqwest::Client, backend_url: &str) -> Result<usize> {
         let scrape_http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .connect_timeout(Duration::from_secs(8))
             .build()
             .unwrap_or_else(|_| http.clone());
-        let map = scrape_pools(&scrape_http, blockfrost_url, project_id)
+        let map = scrape_pools(&scrape_http, backend_url)
             .await
-            .context("Blockfrost pool scrape failed")?;
+            .context("pool scrape failed")?;
         let n = map.len();
         if n == 0 {
             return Ok(0);
@@ -135,7 +130,7 @@ impl PoolCache {
         Ok(n)
     }
 
-    /// Load `pools.json` from disk only — never blocks on Blockfrost.
+    /// Load `pools.json` from disk only — never blocks on the backend.
     /// Background scrapes are started by [`crate::enrich::Enricher`].
     pub fn load(cache_dir: Option<&Path>) -> Self {
         let dir = cache_dir
@@ -200,47 +195,36 @@ fn save_cache(path: &Path, map: &HashMap<String, PoolEntry>) -> Result<()> {
     Ok(())
 }
 
-fn bf_get(
-    http: &reqwest::Client,
-    base: &str,
-    path: &str,
-    project_id: Option<&str>,
-) -> reqwest::RequestBuilder {
-    let mut req = http.get(format!("{base}{path}"));
-    if let Some(pid) = project_id {
-        req = req.header("project_id", pid);
-    }
-    req
+fn backend_get(http: &reqwest::Client, base: &str, path: &str) -> reqwest::RequestBuilder {
+    http.get(format!("{base}{path}"))
 }
 
 async fn scrape_pools(
     http: &reqwest::Client,
     base: &str,
-    project_id: Option<&str>,
 ) -> Result<HashMap<String, PoolEntry>> {
-    // Prefer `/pools/extended` (metadata in one page). Some RYO builds hang or
-    // 500 on it - fall back to `/pools` + per-id `/metadata`.
-    match scrape_extended(http, base, project_id).await {
+    // Prefer `/pools/extended` (metadata in one page). If a backend cannot
+    // serve it, fall back to `/pools` + per-id `/metadata`.
+    match scrape_extended(http, base).await {
         Ok(m) if !m.is_empty() => {
-            tracing::info!("pool cache: used Blockfrost /pools/extended");
+            tracing::info!("pool cache: used /pools/extended");
             return Ok(m);
         }
         Ok(_) => tracing::warn!("pool cache: /pools/extended returned no tickers - falling back"),
         Err(e) => tracing::warn!("pool cache: /pools/extended failed ({e:#}) - falling back"),
     }
-    scrape_list_and_metadata(http, base, project_id).await
+    scrape_list_and_metadata(http, base).await
 }
 
 async fn scrape_extended(
     http: &reqwest::Client,
     base: &str,
-    project_id: Option<&str>,
 ) -> Result<HashMap<String, PoolEntry>> {
     let mut map = HashMap::with_capacity(8_192);
     let mut page = 1u32;
     loop {
         let path = format!("/pools/extended?count={PAGE}&page={page}");
-        let rows: Value = bf_get(http, base, &path, project_id)
+        let rows: Value = backend_get(http, base, &path)
             .timeout(Duration::from_secs(20))
             .send()
             .await
@@ -261,7 +245,7 @@ async fn scrape_extended(
                 continue;
             };
             let meta = row.get("metadata").unwrap_or(row);
-            if let Some(entry) = PoolEntry::from_blockfrost_meta(meta) {
+            if let Some(entry) = PoolEntry::from_backend_meta(meta) {
                 map.insert(id.to_string(), entry);
             }
         }
@@ -279,11 +263,10 @@ async fn scrape_extended(
 async fn scrape_list_and_metadata(
     http: &reqwest::Client,
     base: &str,
-    project_id: Option<&str>,
 ) -> Result<HashMap<String, PoolEntry>> {
-    let ids = list_pool_ids(http, base, project_id).await?;
+    let ids = list_pool_ids(http, base).await?;
     if ids.is_empty() {
-        return Err(anyhow!("Blockfrost /pools returned no pool ids"));
+        return Err(anyhow!("/pools returned no pool ids"));
     }
     tracing::info!("pool cache: listed {} pools - fetching metadata…", ids.len());
 
@@ -310,13 +293,9 @@ async fn scrape_list_and_metadata(
         }
         let http = http.clone();
         let base = base.to_string();
-        let pid_header = project_id.map(str::to_string);
         set.spawn(async move {
             let path = format!("/pools/{id}/metadata");
-            let mut req = http.get(format!("{base}{path}"));
-            if let Some(pid) = pid_header {
-                req = req.header("project_id", pid);
-            }
+            let req = http.get(format!("{base}{path}"));
             let v: Value = tokio::time::timeout(Duration::from_secs(15), req.send())
                 .await
                 .ok()?
@@ -326,7 +305,7 @@ async fn scrape_list_and_metadata(
                 .json()
                 .await
                 .ok()?;
-            let entry = PoolEntry::from_blockfrost_meta(&v)?;
+            let entry = PoolEntry::from_backend_meta(&v)?;
             Some((id, entry))
         });
         outstanding += 1;
@@ -350,16 +329,12 @@ async fn scrape_list_and_metadata(
     Ok(map)
 }
 
-async fn list_pool_ids(
-    http: &reqwest::Client,
-    base: &str,
-    project_id: Option<&str>,
-) -> Result<Vec<String>> {
+async fn list_pool_ids(http: &reqwest::Client, base: &str) -> Result<Vec<String>> {
     let mut ids = Vec::with_capacity(8_192);
     let mut page = 1u32;
     loop {
         let path = format!("/pools?count={PAGE}&page={page}");
-        let rows: Value = bf_get(http, base, &path, project_id)
+        let rows: Value = backend_get(http, base, &path)
             .send()
             .await
             .with_context(|| format!("GET {base}{path}"))?

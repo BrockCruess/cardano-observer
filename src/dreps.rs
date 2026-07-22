@@ -1,16 +1,15 @@
 //! Durable DRep metadata cache (CIP-119 givenName).
 //!
 //! Loads `dreps.json` from DATA_DIR when present (boot stays non-blocking).
-//! Missing / forced refreshes scrape Blockfrost `GET /governance/dreps` in the
-//! background (Blockfrost only — no third-party indexers). Prefer RYO's
-//! undocumented `unpaged: true` header (one request, every active DRep,
-//! metadata included; `retired=false&expired=false`); fall back to paginated
-//! list + per-id `/metadata` when needed.
+//! Missing / forced refreshes scrape the backend `GET /governance/dreps` in the
+//! background. Prefer the `unpaged: true` header (one request, every active
+//! DRep, metadata included; `retired=false&expired=false`); fall back to a
+//! paginated list + per-id `/metadata` when needed.
 //! The scrape HTTP client has **no timeouts** (request/connect/idle) — it waits
-//! until RYO returns or the process is killed; failed attempts retry forever.
-//! A daily UTC-midnight job re-scrapes the same way. Misses are also filled by
-//! `GET /governance/dreps/{id}/metadata`, registration anchors, and live
-//! `/api/drep` lookups.
+//! until the backend returns or the process is killed; failed attempts retry
+//! forever. A daily UTC-midnight job re-scrapes the same way. Misses are also
+//! filled by `GET /governance/dreps/{id}/metadata`, registration anchors, and
+//! live `/api/drep` lookups.
 
 use anyhow::{anyhow, Context, Result};
 use bech32::{Bech32, Hrp};
@@ -30,7 +29,7 @@ const CIP129_DREP_SCRIPT: u8 = 0x23;
 
 const CACHE_FILE: &str = "dreps.json";
 const PAGE: usize = 100;
-/// Only currently registered, non-expired DReps (Blockfrost query filters).
+/// Only currently registered, non-expired DReps (backend query filters).
 const DREP_LIST_FILTERS: &str = "retired=false&expired=false";
 const META_CONCURRENCY: usize = 4;
 const ANCHOR_CONCURRENCY: usize = 12;
@@ -62,9 +61,9 @@ impl DrepEntry {
         })
     }
 
-    /// Extract CIP-119 fields from a Blockfrost metadata object
+    /// Extract CIP-119 fields from a backend metadata object
     /// (`/governance/dreps` embedded `metadata`, or `/dreps/{id}/metadata`).
-    pub fn from_blockfrost_meta(v: &Value) -> Option<Self> {
+    pub fn from_backend_meta(v: &Value) -> Option<Self> {
         if v.is_null() {
             return None;
         }
@@ -196,19 +195,18 @@ impl DrepCache {
         }
     }
 
-    /// Replace/merge the in-memory + on-disk cache with a Blockfrost scrape.
+    /// Replace/merge the in-memory + on-disk cache with a backend scrape.
     ///
     /// Dedicated HTTP client with **no request, connect, or pool idle timeout** —
-    /// an in-flight scrape waits until RYO responds or the process is killed.
+    /// an in-flight scrape waits until the backend responds or the process is killed.
     /// Failed attempts (connection reset, 5xx, decode) retry forever with backoff.
-    /// Prefers RYO `unpaged: true` (single full list); falls back to pagination.
+    /// Prefers `unpaged: true` (single full list); falls back to pagination.
     /// Only one scrape runs at a time so we never pile concurrent list calls
-    /// onto RYO.
+    /// onto the backend.
     pub async fn refresh(
         &self,
         http: &reqwest::Client,
-        blockfrost_url: &str,
-        project_id: Option<&str>,
+        backend_url: &str,
     ) -> Result<usize> {
         let Ok(_guard) = self.scrape_lock.try_lock() else {
             tracing::info!("drep cache: scrape already in progress - skipping");
@@ -229,10 +227,10 @@ impl DrepCache {
                     .expect("bare drep scrape http client")
             });
         tracing::info!(
-            "drep cache: scraping Blockfrost /governance/dreps (unpaged preferred, no timeouts, retry forever)…"
+            "drep cache: scraping the backend /governance/dreps (unpaged preferred, no timeouts, retry forever)…"
         );
         let before = self.len();
-        scrape_dreps(self, &scrape_http, blockfrost_url, project_id).await?;
+        scrape_dreps(self, &scrape_http, backend_url).await?;
         let n = self.len();
         if n == 0 {
             return Ok(0);
@@ -245,7 +243,7 @@ impl DrepCache {
         Ok(n)
     }
 
-    /// Load `dreps.json` from disk only — never blocks on Blockfrost.
+    /// Load `dreps.json` from disk only — never blocks on the backend.
     /// Background scrapes are started by [`crate::enrich::Enricher`].
     pub fn load(cache_dir: Option<&Path>) -> Self {
         let dir = cache_dir
@@ -323,7 +321,7 @@ pub fn is_lookup_drep_id(id: &str) -> bool {
     (id.starts_with("drep1") || id.starts_with("drep_script1")) && id.len() >= 50 && id.len() <= 120
 }
 
-/// Map Blockfrost / Ogmios spellings of the special DReps onto the UI labels
+/// Map backend / Ogmios spellings of the special DReps onto the UI labels
 /// used by [`crate::parse::drep_display`] (`Always Abstain` / `Always No Confidence`).
 pub fn normalize_drep_id(id: &str) -> String {
     match id.trim() {
@@ -452,18 +450,14 @@ fn image_url(img: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn bf_get(
+fn backend_get(
     http: &reqwest::Client,
     base: &str,
     path: &str,
-    project_id: Option<&str>,
     unpaged: bool,
 ) -> reqwest::RequestBuilder {
     let mut req = http.get(format!("{base}{path}"));
-    if let Some(pid) = project_id {
-        req = req.header("project_id", pid);
-    }
-    // Blockfrost RYO: bypasses count/page and runs the unpaged SQL path.
+    // The backend bypasses count/page and runs the unpaged query path.
     if unpaged {
         req = req.header("unpaged", "true");
     }
@@ -486,19 +480,18 @@ fn retry_backoff(attempt: u32) -> Duration {
     Duration::from_secs(secs)
 }
 
-/// GET JSON from Blockfrost. Retries forever on failure; in-flight waits have
+/// GET JSON from the backend. Retries forever on failure; in-flight waits have
 /// no deadline (caller must use a no-timeout client).
-async fn bf_get_json_retry(
+async fn backend_get_json_retry(
     http: &reqwest::Client,
     base: &str,
     path: &str,
-    project_id: Option<&str>,
     label: &str,
     unpaged: bool,
 ) -> Result<Value> {
     let mut attempt = 0u32;
     loop {
-        match bf_get(http, base, path, project_id, unpaged).send().await {
+        match backend_get(http, base, path, unpaged).send().await {
             Ok(resp) => match resp.error_for_status() {
                 Ok(ok) => match ok.json::<Value>().await {
                     Ok(v) => return Ok(v),
@@ -533,11 +526,10 @@ async fn fetch_drep_metadata_retry(
     http: &reqwest::Client,
     base: &str,
     path: &str,
-    project_id: Option<&str>,
 ) -> Option<DrepEntry> {
     let mut attempt = 0u32;
     loop {
-        match bf_get(http, base, path, project_id, false).send().await {
+        match backend_get(http, base, path, false).send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if status.as_u16() == 404 || status.as_u16() == 400 {
@@ -553,7 +545,7 @@ async fn fetch_drep_metadata_retry(
                     continue;
                 }
                 match resp.json::<Value>().await {
-                    Ok(v) => return DrepEntry::from_blockfrost_meta(&v),
+                    Ok(v) => return DrepEntry::from_backend_meta(&v),
                     Err(e) => {
                         tracing::warn!(
                             "drep cache: GET {path} decode failed (attempt {}): {e:#} - retrying",
@@ -585,9 +577,8 @@ async fn scrape_dreps(
     cache: &DrepCache,
     http: &reqwest::Client,
     base: &str,
-    project_id: Option<&str>,
 ) -> Result<()> {
-    match scrape_list_unpaged(cache, http, base, project_id).await? {
+    match scrape_list_unpaged(cache, http, base).await? {
         Some(ListScrape::Embedded) => {
             tracing::info!("drep cache: used unpaged /governance/dreps with embedded metadata");
             return Ok(());
@@ -596,14 +587,14 @@ async fn scrape_dreps(
             tracing::warn!(
                 "drep cache: unpaged /governance/dreps has no metadata field - fetching /metadata per id"
             );
-            return scrape_list_and_metadata(cache, http, base, project_id).await;
+            return scrape_list_and_metadata(cache, http, base).await;
         }
         None => {
             tracing::info!("drep cache: unpaged incomplete or unused - falling back to pagination");
         }
     }
 
-    match scrape_list_embedded(cache, http, base, project_id).await {
+    match scrape_list_embedded(cache, http, base).await {
         Ok(true) => {
             tracing::info!("drep cache: used paginated /governance/dreps with embedded metadata");
             Ok(())
@@ -612,7 +603,7 @@ async fn scrape_dreps(
             tracing::warn!(
                 "drep cache: /governance/dreps has no metadata field - fetching /metadata per id"
             );
-            scrape_list_and_metadata(cache, http, base, project_id).await
+            scrape_list_and_metadata(cache, http, base).await
         }
         Err(e) => Err(e),
     }
@@ -631,7 +622,7 @@ fn merge_embedded_rows(cache: &DrepCache, arr: &[Value]) -> (bool, usize) {
             saw_metadata_field = true;
         }
         if let Some(meta) = row.get("metadata") {
-            if let Some(entry) = DrepEntry::from_blockfrost_meta(meta) {
+            if let Some(entry) = DrepEntry::from_backend_meta(meta) {
                 batch.insert(id.to_string(), entry);
             }
         }
@@ -641,7 +632,7 @@ fn merge_embedded_rows(cache: &DrepCache, arr: &[Value]) -> (bool, usize) {
     (saw_metadata_field, named)
 }
 
-/// RYO `unpaged: true` — one `GET /governance/dreps?retired=false&expired=false`.
+/// `unpaged: true` — one `GET /governance/dreps?retired=false&expired=false`.
 ///
 /// Returns `None` when the response looks truncated (header ignored by a
 /// paginating proxy / public API) so the caller can paginate instead.
@@ -649,14 +640,12 @@ async fn scrape_list_unpaged(
     cache: &DrepCache,
     http: &reqwest::Client,
     base: &str,
-    project_id: Option<&str>,
 ) -> Result<Option<ListScrape>> {
     let path = dreps_list_path(None);
-    let rows = bf_get_json_retry(
+    let rows = backend_get_json_retry(
         http,
         base,
         &path,
-        project_id,
         "GET /governance/dreps (unpaged, active)",
         true,
     )
@@ -668,15 +657,14 @@ async fn scrape_list_unpaged(
         return Ok(None);
     }
 
-    // Public Blockfrost ignores unknown headers and returns the default page
+    // A backend that ignores unknown headers returns the default page
     // (count=100). If we got ≤ PAGE rows, check whether page 2 exists.
     if arr.len() <= PAGE {
         let probe = dreps_list_path(Some((PAGE, 2)));
-        let more = bf_get_json_retry(
+        let more = backend_get_json_retry(
             http,
             base,
             &probe,
-            project_id,
             "GET /governance/dreps?page=2 (unpaged probe)",
             false,
         )
@@ -711,7 +699,6 @@ async fn scrape_list_embedded(
     cache: &DrepCache,
     http: &reqwest::Client,
     base: &str,
-    project_id: Option<&str>,
 ) -> Result<bool> {
     let mut page = 1u32;
     let mut saw_metadata_field = false;
@@ -719,7 +706,7 @@ async fn scrape_list_embedded(
     loop {
         let path = dreps_list_path(Some((PAGE, page)));
         let label = format!("GET {path}");
-        let rows = bf_get_json_retry(http, base, &path, project_id, &label, false).await?;
+        let rows = backend_get_json_retry(http, base, &path, &label, false).await?;
         let Some(arr) = rows.as_array() else {
             break;
         };
@@ -737,7 +724,7 @@ async fn scrape_list_embedded(
             break;
         }
         page += 1;
-        // Older Blockfrost without a `metadata` field — fall through to per-id fetch.
+        // A backend without a `metadata` field — fall through to per-id fetch.
         if page == 2 && !saw_metadata_field {
             return Ok(false);
         }
@@ -749,11 +736,10 @@ async fn scrape_list_and_metadata(
     cache: &DrepCache,
     http: &reqwest::Client,
     base: &str,
-    project_id: Option<&str>,
 ) -> Result<()> {
-    let ids = list_drep_ids(http, base, project_id).await?;
+    let ids = list_drep_ids(http, base).await?;
     if ids.is_empty() {
-        return Err(anyhow!("Blockfrost /governance/dreps returned no drep ids"));
+        return Err(anyhow!("/governance/dreps returned no drep ids"));
     }
     tracing::info!(
         "drep cache: listed {} dreps - fetching /metadata (concurrency {META_CONCURRENCY})…",
@@ -783,10 +769,9 @@ async fn scrape_list_and_metadata(
         }
         let http = http.clone();
         let base = base.to_string();
-        let pid = project_id.map(str::to_string);
         set.spawn(async move {
             let path = format!("/governance/dreps/{id}/metadata");
-            fetch_drep_metadata_retry(&http, &base, &path, pid.as_deref())
+            fetch_drep_metadata_retry(&http, &base, &path)
                 .await
                 .map(|entry| (id, entry))
         });
@@ -810,14 +795,13 @@ async fn scrape_list_and_metadata(
 async fn list_drep_ids(
     http: &reqwest::Client,
     base: &str,
-    project_id: Option<&str>,
 ) -> Result<Vec<String>> {
     let mut ids = Vec::with_capacity(4_096);
     let mut page = 1u32;
     loop {
         let path = dreps_list_path(Some((PAGE, page)));
         let label = format!("GET {path}");
-        let rows = bf_get_json_retry(http, base, &path, project_id, &label, false).await?;
+        let rows = backend_get_json_retry(http, base, &path, &label, false).await?;
         let Some(arr) = rows.as_array() else {
             break;
         };
@@ -972,14 +956,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_embedded_blockfrost_metadata() {
+    fn parses_embedded_backend_metadata() {
         let v = json!({
             "url": "https://example.com/drep.json",
             "json_metadata": {
                 "body": { "givenName": "Ada Lovelace" }
             }
         });
-        let e = DrepEntry::from_blockfrost_meta(&v).expect("parse");
+        let e = DrepEntry::from_backend_meta(&v).expect("parse");
         assert_eq!(e.name.as_deref(), Some("Ada Lovelace"));
         assert_eq!(e.url.as_deref(), Some("https://example.com/drep.json"));
     }
@@ -1015,7 +999,7 @@ mod tests {
         assert_eq!(cache.len(), 0);
 
         let http = reqwest::Client::new();
-        let n = cache.refresh(&http, &server.uri(), None).await.unwrap();
+        let n = cache.refresh(&http, &server.uri()).await.unwrap();
         assert_eq!(n, 105);
         assert_eq!(cache.len(), 105);
         assert_eq!(
@@ -1070,14 +1054,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = DrepCache::load(Some(dir.path()));
         let http = reqwest::Client::new();
-        let n = cache.refresh(&http, &server.uri(), None).await.unwrap();
+        let n = cache.refresh(&http, &server.uri()).await.unwrap();
         assert_eq!(n, 105);
         assert_eq!(cache.len(), 105);
     }
 
     #[tokio::test]
     async fn scrape_waits_past_enricher_client_timeout() {
-        // Enricher's live client is 10s; scrape must still succeed if RYO is slower.
+        // Enricher's live client is 10s; scrape must still succeed if the backend is slower.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/governance/dreps"))
@@ -1108,7 +1092,7 @@ mod tests {
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .unwrap();
-        let n = cache.refresh(&short, &server.uri(), None).await.unwrap();
+        let n = cache.refresh(&short, &server.uri()).await.unwrap();
         assert_eq!(n, 2);
     }
 
@@ -1146,7 +1130,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = DrepCache::load(Some(dir.path()));
         let http = reqwest::Client::new();
-        let n = cache.refresh(&http, &server.uri(), None).await.unwrap();
+        let n = cache.refresh(&http, &server.uri()).await.unwrap();
         assert_eq!(n, 3);
         assert_eq!(cache.len(), 3);
     }
@@ -1165,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_blockfrost_special_dreps() {
+    fn normalizes_special_dreps() {
         assert_eq!(normalize_drep_id("drep_always_abstain"), "Always Abstain");
         assert_eq!(normalize_drep_id("Always Abstain"), "Always Abstain");
         assert_eq!(

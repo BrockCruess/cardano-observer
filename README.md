@@ -98,14 +98,14 @@ forks, orphaned blocks and slot battles.
   inputs/outputs with amounts and asset chips, certificates, withdrawals,
   proposals, votes, metadata, raw JSON, and explorer links (mainnet or
   `preprod.` / `preview.` Cardanoscan, Cexplorer, AdaStat). Served from an
-  in-memory cache; falls back to Blockfrost for older transactions.
+  in-memory cache; falls back to the backend for older transactions.
 - **Token, pool & DRep metadata.** Asset names, tickers, and decimals resolve
   from a durable CIP-26 token-registry cache (`DATA_DIR/token-registry.json`),
-  re-downloaded daily at 00:00 UTC. Unregistered assets get a local stub (no
-  Blockfrost). Pool tickers and DRep names come from Blockfrost scrapes into
-  `DATA_DIR/pools.json` and `DATA_DIR/dreps.json` (also refreshed daily), with
-  per-miss fetches appended. CIP-108 governance action titles are fetched on
-  first sight into `DATA_DIR/gov-actions.json`.
+  re-downloaded daily at 00:00 UTC. Unregistered assets get a local stub. Pool
+  tickers and DRep names come from backend scrapes into `DATA_DIR/pools.json`
+  and `DATA_DIR/dreps.json` (also refreshed daily), with per-miss fetches
+  appended. CIP-108 governance action titles are fetched on first sight into
+  `DATA_DIR/gov-actions.json`.
 - **ADA Handles.** Truncated addresses on cards and in the tx modal resolve to
   the account's preferred `$handle` when available, via the free public
   [Handles API](https://api.handle.me) (or your own KoraLabs / Cardano
@@ -113,7 +113,7 @@ forks, orphaned blocks and slot battles.
 - **Delegation context.** Stake-pool and DRep delegations always show the
   delegating stake address (or `$handle`), plus **from → to** when the
   previous target is known - via an in-process tracker seeded from persisted
-  history, with Blockfrost account lookups for misses.
+  history, with backend account lookups for misses.
 - **Filters that stick.** Per-category chips (including governance subtypes),
   free-text search (tx / block / address / policy / ticker / DEX name), URL
   deep-links (`?q=minswap`, `?BROCK`, `?filters=minswap&blocks&iagon`, …), a
@@ -166,18 +166,17 @@ forks, orphaned blocks and slot battles.
 
 - [Ogmios](https://ogmios.dev) attached to a `cardano-node` (**required** -
   this is the event source)
-- An enrichment API (optional but recommended - pool/DRep/gov-action metadata,
-  account lookups, historical txs, and the recurring pool/DRep scrapes into
-  `pools.json` / `dreps.json`). Two interchangeable options:
-  - **[cardano-observer-backend](cardano-observer-backend/README.md)** (bundled
-    in this repo) - self-hosted Rust API that queries your cardano-db-sync
-    PostgreSQL directly. Set `USE_OBSERVER_BACKEND=true` and
-    `OBSERVER_BACKEND_URL` in `.env`.
-  - [Blockfrost RYO](https://github.com/blockfrost/blockfrost-backend-ryo) -
-    set `BLOCKFROST_URL` (and optionally `BLOCKFROST_PROJECT_ID`).
-- [cardano-db-sync](https://github.com/IntersectMBO/cardano-db-sync) **if you
-  run either enrichment API** - both are APIs over a db-sync database. The
-  observer itself does not talk to db-sync directly.
+- **[cardano-observer-backend](cardano-observer-backend/README.md)** (bundled in
+  this repo, optional but recommended) - the app's own data API, providing
+  pool/DRep/gov-action metadata, account lookups, historical txs, and the
+  recurring pool/DRep scrapes into `pools.json` / `dreps.json`. It queries a
+  [cardano-db-sync](https://github.com/IntersectMBO/cardano-db-sync) PostgreSQL
+  database directly. Point `OBSERVER_BACKEND_URL` at it; the observer itself
+  never talks to db-sync.
+- [cardano-db-sync](https://github.com/IntersectMBO/cardano-db-sync) behind the
+  backend - a synced db-sync PostgreSQL is what the backend reads. See the
+  [backend README](cardano-observer-backend/README.md) for the recommended
+  db-sync indexes.
 - An [ADA Handle](https://handle.me) resolver (optional) - defaults to the free
   public API at `https://api.handle.me`. Self-host with
   [handles-public-api](https://github.com/koralabs/handles-public-api) or
@@ -185,9 +184,9 @@ forks, orphaned blocks and slot battles.
   and point `ADA_HANDLE_URL` at it.
 - Rust 1.85+ to build (edition 2024)
 
-Without an enrichment API, the live feed still works from Ogmios alone; token
+Without the backend, the live feed still works from Ogmios alone; token
 enrichment falls back to the on-disk CIP-26 registry cache, pool/DRep names
-stay incomplete until one is configured, and older tx modals may be
+stay incomplete until it is configured, and older tx modals may be
 incomplete. Handle labels still work against the public API unless you set
 `ADA_HANDLE_URL=none`.
 
@@ -197,17 +196,21 @@ Build and run locally - there is no pre-built binary to download.
 
 ```bash
 git clone <this repo> && cd cardano-observer
-cp .env.example .env        # point OGMIOS_URL / BLOCKFROST_URL at your services
+cp .env.example .env        # set OGMIOS_URL, DBSYNC_URL / OBSERVER_BACKEND_URL
 ./start.sh                  # cargo build --release, then run the binary
 # → open http://<host>:9070
 ```
 
 `./start.sh` copies `.env.example` if needed, cleans this package (so embedded
-`static/` assets stay fresh), builds a release binary, and execs
-`./target/release/cardano-observer`. Equivalent by hand:
+`static/` assets stay fresh), builds a release binary, and runs
+`./target/release/cardano-observer`. When `DBSYNC_URL` is set in `.env`, it also
+builds and launches [cardano-observer-backend](cardano-observer-backend/README.md)
+alongside the observer (and stops it on exit); when `DBSYNC_URL` is empty the
+backend is assumed to run elsewhere and only `OBSERVER_BACKEND_URL` is used.
+Equivalent by hand (observer only):
 
 ```bash
-cargo build --release
+cargo build --release -p cardano-observer
 ./target/release/cardano-observer
 ```
 
@@ -221,14 +224,14 @@ the browser after each rebuild).
 | Variable | Default | Purpose |
 |---|---|---|
 | `OGMIOS_URL` | `ws://127.0.0.1:1337` | Ogmios WebSocket endpoint (unused when `DEMO=true`) |
-| `BLOCKFROST_URL` | *(unset / disabled)* | Blockfrost RYO base URL (optional; needs db-sync behind it). Example: `http://127.0.0.1:3000` |
-| `BLOCKFROST_PROJECT_ID` | *(empty)* | `project_id` header, if your instance needs one |
+| `OBSERVER_BACKEND_URL` | *(empty / disabled)* | [cardano-observer-backend](cardano-observer-backend/README.md) base URL (optional). Empty = run without a backend. Auto-filled by the start scripts when `DBSYNC_URL` is set. Example: `http://127.0.0.1:3300` |
+| `DBSYNC_URL` | *(empty)* | db-sync PostgreSQL URL for a backend on this host. When set, `start.sh` / `start-dev.sh` build and launch the backend locally and point the observer at it; empty = no local backend. Example: `postgres://username@localhost:5432/cexplorer` |
 | `ADA_HANDLE_URL` | public API for `NETWORK` | Handle resolver base URL. Defaults to `https://api.handle.me` (mainnet) or the matching preprod/preview host. Point at a local instance (e.g. `http://127.0.0.1:9095`). `none` / `off` / `false` disables |
 | `ADA_HANDLE_API` | `auto` | `auto` \| `kora` \| `cf` — HTTP API shape (`auto` picks CF for port 9095 / adahandle URLs, else KoraLabs) |
 | `TOKEN_REGISTRY_ZIP` | Cardano Foundation GitHub master zip | CIP-26 mappings zip used to build `token-registry.json` on first boot (also re-downloaded daily at 00:00 UTC while running) |
 | `TOKEN_REGISTRY_REFRESH` | `false` | `true` / `1` / `yes` to re-download the registry zip on boot |
-| `POOL_CACHE_REFRESH` | `false` | `true` / `1` / `yes` to re-scrape Blockfrost `/pools` into `pools.json` on boot (also auto-refreshed daily at 00:00 UTC while running) |
-| `DREP_CACHE_REFRESH` | `false` | `true` / `1` / `yes` to re-scrape Blockfrost `/governance/dreps` into `dreps.json` on boot (also auto-refreshed daily at 00:00 UTC while running) |
+| `POOL_CACHE_REFRESH` | `false` | `true` / `1` / `yes` to re-scrape the backend `/pools` into `pools.json` on boot (also auto-refreshed daily at 00:00 UTC while running) |
+| `DREP_CACHE_REFRESH` | `false` | `true` / `1` / `yes` to re-scrape the backend `/governance/dreps` into `dreps.json` on boot (also auto-refreshed daily at 00:00 UTC while running) |
 | `NETWORK` | `mainnet` | `mainnet` \| `preprod` \| `preview` (addresses & explorer links) |
 | `BIND` | `0.0.0.0:9070` | web UI listen address |
 | `DATA_DIR` | `./data` | persisted event/tx history + registry/pool/drep/gov-action caches (JSONL/JSON); tx bodies are kept forever on disk with a hash index; on startup any event whose tx body is missing is refilled from Ogmios (no event republish); `none` / `off` / `false` disables persistence |
@@ -265,8 +268,8 @@ cardano-node ── Ogmios (chain-sync WS) ──▶ parse / DEX / dApp ──�
                                                     │
                       ┌── token-registry.json ──────┤
                       │                             │
-Blockfrost RYO  ◀── enrichment / pools / dreps / gov┘
-   └── cardano-db-sync (required by RYO)
+cardano-observer-backend ◀── enrichment / pools / dreps / gov┘
+   └── cardano-db-sync (PostgreSQL)
 
 Handle API    ◀── stake → preferred $handle (optional)
 ```
@@ -297,15 +300,15 @@ Handle API    ◀── stake → preferred $handle (optional)
 - `src/persist.rs` - append-only JSONL history (full event + tx history;
   never compacted), restore on boot, hash-indexed tx lookups
 - `src/enrich.rs` - CIP-26 stamps, pool/DRep/gov-action/Handle caches,
-  Blockfrost account / historical-tx lookups; background + daily scrapes
+  backend account / historical-tx lookups; background + daily scrapes
 - `src/handles.rs` - ADA Handle preferred-name lookup (KoraLabs or CF API)
 - `src/registry.rs` - CIP-26 token registry zip → durable slim cache (daily
   re-download)
-- `src/pools.rs` - Blockfrost pool-metadata scrape → `pools.json` (daily
+- `src/pools.rs` - backend pool-metadata scrape → `pools.json` (daily
   refresh)
-- `src/dreps.rs` - Blockfrost DRep scrape (unpaged + active filters) +
+- `src/dreps.rs` - backend DRep scrape (unpaged + active filters) +
   registration-anchor fetch → `dreps.json` (daily refresh)
-- `src/gov_actions.rs` - first-sight CIP-108 titles via Ogmios/Blockfrost →
+- `src/gov_actions.rs` - first-sight CIP-108 titles via Ogmios / the backend →
   `gov-actions.json`
 - `src/deleg.rs` - stake/DRep from→to tracker across live + restored events
 - `src/demo.rs` - synthetic event stream when `DEMO=true`
@@ -321,7 +324,7 @@ Handle API    ◀── stake → preferred $handle (optional)
 ### Notes
 
 - The UI shows input *references* for live transactions (Ogmios doesn't
-  resolve them); configure Blockfrost (and therefore cardano-db-sync) to get
+  resolve them); run the backend (and therefore cardano-db-sync) to get
   fully resolved inputs for historical lookups.
 - Event colours were chosen as a colourblind-checked categorical palette; every
   card also carries an icon and a text label, so colour never stands alone.
