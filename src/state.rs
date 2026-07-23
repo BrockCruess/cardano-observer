@@ -315,36 +315,30 @@ impl AppState {
             }
         }
 
-        let total = transferred.len();
-        let external: Vec<(String, String, i128)> = transferred
-            .into_iter()
-            .filter(|(policy, name_hex, _)| {
-                parse::asset_changes_hands(tx, policy, name_hex, |src, idx| {
-                    let parent = parents.get(src)?;
-                    let o = parent.get("outputs")?.as_array()?.get(idx as usize)?;
-                    Some((
-                        o.get("address")?.as_str()?.to_string(),
-                        o.get("value")?.clone(),
-                    ))
-                })
-            })
-            .collect();
+        // Which assets left the sender, and how much of each (change excluded).
+        let external = parse::external_transfer_amounts(tx, |src, idx| {
+            let parent = parents.get(src)?;
+            let o = parent.get("outputs")?.as_array()?.get(idx as usize)?;
+            Some((
+                o.get("address")?.as_str()?.to_string(),
+                o.get("value")?.clone(),
+            ))
+        });
 
         if external.is_empty() {
             return false; // pure internal reshuffle → drop
         }
-        if external.len() < total {
-            // Some assets were internal change; keep only the ones that moved.
-            let refs: Vec<&(String, String, i128)> = external.iter().collect();
-            if let Some(obj) = ev.data.as_object_mut() {
-                obj.insert("assets".into(), parse::asset_list(&refs));
-            }
-            ev.title = if external.len() == 1 {
-                "Token Transfer".into()
-            } else {
-                format!("Token Transfer ×{}", external.len())
-            };
+        // Rewrite with the amounts that actually moved (a no-op when nothing
+        // was change, since it then matches what parsing already emitted).
+        let refs: Vec<&(String, String, i128)> = external.iter().collect();
+        if let Some(obj) = ev.data.as_object_mut() {
+            obj.insert("assets".into(), parse::asset_list(&refs));
         }
+        ev.title = if external.len() == 1 {
+            "Token Transfer".into()
+        } else {
+            format!("Token Transfer ×{}", external.len())
+        };
         true
     }
 
@@ -1020,6 +1014,50 @@ mod tests {
         let mut events = vec![token_transfer("tx")];
         state.drop_internal_token_transfers(&mut events);
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn dex_order_reports_only_the_amount_that_left_not_the_change() {
+        // Real shape (mainnet ae012e42…): a wallet spends 50,757,246,501 NIGHT,
+        // sends 22,428,519,910 to the Minswap order script and takes the rest
+        // back as change to the very same address. The card must show what left.
+        let state = AppState::new("mainnet", 24, 0, None);
+        let stake = "cc".repeat(28);
+        let user = base_addr(&"aa".repeat(28), &stake);
+        let script = base_addr(&"11".repeat(28), &stake); // order script cred
+        let policy = "dd".repeat(28);
+        let night = "4e49474854"; // NIGHT
+        let (ordered, change) = (22_428_519_910i64, 28_328_726_591i64);
+
+        let parent = json!({
+            "outputs": [{
+                "address": user,
+                "value": { "ada": { "lovelace": 5_000_000u64 },
+                    (policy.clone()): { (night): ordered + change } }
+            }]
+        });
+        state.cache_tx("p".into(), parent, block_ctx());
+
+        let tx = json!({
+            "inputs": [{ "transaction": { "id": "p" }, "index": 0 }],
+            "outputs": [
+                { "address": script, "value": { "ada": { "lovelace": 2_000_000u64 },
+                    (policy.clone()): { (night): ordered } } },
+                { "address": user, "value": { "ada": { "lovelace": 2_500_000u64 },
+                    (policy.clone()): { (night): change } } }
+            ]
+        });
+        state.cache_tx("order".into(), tx, block_ctx());
+
+        let mut events = vec![token_transfer("order")];
+        state.drop_internal_token_transfers(&mut events);
+        assert_eq!(events.len(), 1, "a real transfer to the script must survive");
+        let items = events[0].data["assets"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0]["qty"], ordered.to_string(),
+            "must report the ordered amount, not order + change"
+        );
     }
 
     #[test]

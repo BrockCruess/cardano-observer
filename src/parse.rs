@@ -586,6 +586,83 @@ pub fn transferred_assets(tx: &Value) -> Vec<(String, String, i128)> {
         .collect()
 }
 
+/// Native assets that actually *leave* the sender in this tx, and how much of
+/// each left: for every asset, the sum landing at output payment credentials
+/// that are **not** among the credentials this tx spends from. Change returning
+/// to a spending credential is excluded, so e.g. a DEX order reports the amount
+/// ordered rather than order + change.
+///
+/// `resolve_spent(tx_hash, index)` supplies the spent output's `(address, value)`.
+/// When no input resolves, ownership can't be determined: the full transferred
+/// amounts are returned (filtered by the output-only heuristic) so a real
+/// transfer is never under-reported.
+pub fn external_transfer_amounts(
+    tx: &Value,
+    mut resolve_spent: impl FnMut(&str, u64) -> Option<(String, Value)>,
+) -> Vec<(String, String, i128)> {
+    let all = transferred_assets(tx);
+    if all.is_empty() {
+        return all;
+    }
+    let empty = Vec::new();
+
+    // Payment credentials this tx spends from.
+    let mut in_creds: HashSet<String> = HashSet::new();
+    let mut resolved_any = false;
+    for i in tx.get("inputs").and_then(Value::as_array).unwrap_or(&empty) {
+        let Some(src) = i
+            .get("transaction")
+            .and_then(|t| t.get("id"))
+            .and_then(Value::as_str)
+            .or_else(|| i.get("txId").and_then(Value::as_str))
+        else {
+            continue;
+        };
+        let Some(index) = i
+            .get("index")
+            .and_then(Value::as_u64)
+            .or_else(|| i.get("outputIndex").and_then(Value::as_u64))
+        else {
+            continue;
+        };
+        let Some((addr, _)) = resolve_spent(src, index) else {
+            continue;
+        };
+        resolved_any = true;
+        if let Some(c) = payment_credential(&addr) {
+            in_creds.insert(c);
+        }
+    }
+
+    if !resolved_any {
+        // Can't separate change from a genuine transfer - keep full amounts,
+        // dropping only what the output-only ownership heuristic calls internal.
+        return all
+            .into_iter()
+            .filter(|(p, n, _)| asset_changes_hands(tx, p, n, |_, _| None))
+            .collect();
+    }
+
+    // Sum each asset only where it lands outside the spending credentials.
+    let mut out: Vec<(String, String, i128)> = Vec::new();
+    for o in tx.get("outputs").and_then(Value::as_array).unwrap_or(&empty) {
+        let own = o
+            .get("address")
+            .and_then(Value::as_str)
+            .and_then(payment_credential)
+            .is_some_and(|c| in_creds.contains(&c));
+        if own {
+            continue; // change back to the sender
+        }
+        collect_assets(o.get("value"), &mut out);
+    }
+    // Assets minted here are covered by the mint/burn cards.
+    let mut minted: Vec<(String, String, i128)> = Vec::new();
+    collect_assets(tx.get("mint"), &mut minted);
+    out.retain(|(p, n, q)| *q > 0 && !minted.iter().any(|(mp, mn, _)| mp == p && mn == n));
+    out
+}
+
 pub fn asset_list(assets: &[&(String, String, i128)]) -> Value {
     const MAX: usize = 12;
     let items: Vec<Value> = assets
