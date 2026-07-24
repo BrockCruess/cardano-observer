@@ -454,6 +454,8 @@ fn parse_certificate(
         )),
         "stakePoolRegistration" => {
             let p = cert.get("stakePool").cloned().unwrap_or(Value::Null);
+            // Carry the full declared parameter set: a later pass compares it
+            // against the pool's previous registration to show what changed.
             events.push(ev(
                 "pool_registration",
                 "pool",
@@ -464,6 +466,11 @@ fn parse_certificate(
                     "cost": p.get("cost").and_then(|v| v.get("ada")).and_then(|a| a.get("lovelace")),
                     "margin": p.get("margin"),
                     "metadataUrl": p.get("metadata").and_then(|m| m.get("url")),
+                    "metadataHash": p.get("metadata").and_then(|m| m.get("hash")),
+                    "owners": p.get("owners"),
+                    "relays": p.get("relays"),
+                    "rewardAccount": p.get("rewardAccount"),
+                    "vrf": p.get("vrfVerificationKeyHash"),
                 }),
             ));
         }

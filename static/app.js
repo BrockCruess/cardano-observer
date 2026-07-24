@@ -1922,13 +1922,22 @@ function cardBody(ev) {
         `<b>${fmtAda(d.lovelace)}</b>`,
         stakeSpan(d.account, 12, 5),
       ]);
-    case "pool_registration":
+    case "pool_registration": {
+      const poolId = d.pool
+        ? `<span class="pool-id" data-pool="${esc(d.pool)}" title="${esc(d.pool)}">${esc(short(d.pool, 12, 5))}</span>`
+        : "";
+      // A re-registration shows what changed rather than restating everything.
+      if (d.update && Array.isArray(d.changes) && d.changes.length) {
+        return sub([poolId, ...d.changes.map(poolChangeHtml)]);
+      }
       return sub([
-        d.pool ? `<span class="pool-id" data-pool="${esc(d.pool)}" title="${esc(d.pool)}">${esc(short(d.pool, 12, 5))}</span>` : "",
+        poolId,
         d.pledge ? `pledge <b>${fmtAda(d.pledge)}</b>` : "",
-        d.margin ? `margin ${esc(marginPct(d.margin))}` : "",
-        d.cost ? `cost ${fmtAda(d.cost)}` : "",
+        d.margin ? `margin <b>${esc(marginPct(d.margin))}</b>` : "",
+        d.cost ? `cost <b>${fmtAda(d.cost)}</b>` : "",
+        d.update ? `<span class="muted">no parameter changes</span>` : "",
       ]);
+    }
     case "pool_retirement":
       return sub([
         d.pool ? `<span class="pool-id" data-pool="${esc(d.pool)}" title="${esc(d.pool)}">${esc(short(d.pool, 12, 5))}</span>` : "",
@@ -2028,7 +2037,28 @@ function marginPct(m) {
     const [a, b] = m.split("/").map(Number);
     if (b) return (100 * a / b).toFixed(1) + "%";
   }
+  // Backend history reports margin as a plain fraction (0.02 → 2.0%).
+  const n = Number(m);
+  if (Number.isFinite(n)) return (100 * n).toFixed(1) + "%";
   return String(m);
+}
+
+/** One changed pool parameter: numeric ones show from → to, the rest read as new. */
+const POOL_CHANGE_LABEL = {
+  metadata: "new metadata",
+  owners: "new owner",
+  relays: "new relay",
+  rewardAccount: "new reward account",
+  vrf: "new VRF key",
+};
+
+function poolChangeHtml(c) {
+  if (!c || !c.key) return "";
+  const fmt = c.key === "margin" ? marginPct : fmtAda;
+  if (c.from != null && c.to != null) {
+    return `${esc(c.key)} <b>${fmt(c.from)}</b> → <b>${fmt(c.to)}</b>`;
+  }
+  return esc(POOL_CHANGE_LABEL[c.key] || `new ${c.key}`);
 }
 
 function poolIdsFromData(d) {

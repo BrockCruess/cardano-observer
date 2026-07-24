@@ -65,6 +65,8 @@ returns the complete listing in one response.
 | `GET /pools` | Bech32 ids of all registered pools |
 | `GET /pools/extended` | Pool list with embedded off-chain metadata |
 | `GET /pools/{pool_id}/metadata` | Off-chain metadata for one pool (bech32 or hex id) |
+| `GET /pools/{pool_id}/updates` | Lifecycle actions: `tx_hash`, `cert_index`, `action` (`registered` / `deregistered`) |
+| `GET /pools/{pool_id}/registrations` | **Extension** - parameters each registration certificate declared (pledge, cost, margin, VRF, reward account, metadata, owners, relays) |
 | `GET /governance/dreps` | DRep list; supports `retired` / `expired` boolean filters |
 | `GET /governance/dreps/{drep_id}/metadata` | CIP-119 anchor metadata (CIP-105 or CIP-129 ids) |
 | `GET /governance/proposals/{tx_hash}/{cert_index}/metadata` | CIP-108 anchor metadata |
@@ -77,6 +79,12 @@ Amounts are strings (lovelace / asset quantities exceed 2^53), asset units are
 `policy_hex + name_hex`, and DRep ids are returned in CIP-129 form. Errors use
 the standard envelope `{ "status_code", "error", "message" }`. Off-chain
 metadata whose fetch failed carries an `error` envelope `{ code, message }`.
+
+`/pools/{pool_id}/registrations` is the one endpoint here with no counterpart in
+the API this surface otherwise mirrors: that API reports *that* a pool
+registered but never the parameters a past certificate carried, which is what
+diffing a re-registration against the previous one needs. It is additive - the
+standard `/pools/{pool_id}/updates` keeps its usual action-log shape.
 
 `/pools/extended` intentionally omits `active_stake` / `live_stake` /
 `live_saturation` / `blocks_minted`: each one costs a ledger-wide or chain-wide

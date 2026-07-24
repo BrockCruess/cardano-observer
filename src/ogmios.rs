@@ -364,6 +364,10 @@ async fn handle_forward(
     enricher.warm_dreps_from_events(&parsed.events).await;
     // CIP-108 titles: backend once per new governance action.
     enricher.ensure_gov_action_titles(&parsed.events).await;
+    // Pool re-registrations: retitle and diff against the previous certificate.
+    enricher
+        .stamp_pool_registration_updates(network, &mut parsed.events)
+        .await;
 
     state.counters.blocks.fetch_add(1, Ordering::Relaxed);
     state.counters.txs.fetch_add(parsed.txs.len() as u64, Ordering::Relaxed);

@@ -148,6 +148,16 @@ ORDER BY p.id {dir}
     Ok(Json(Value::Array(out)))
 }
 
+/// 404 unless the pool has ever been registered, matching the per-pool
+/// endpoints' behaviour for an unknown id.
+async fn require_pool(state: &AppState, pool_id: &str) -> Result<(), ApiError> {
+    let exists = sqlx::query("SELECT 1 FROM pool_hash WHERE view = $1")
+        .bind(pool_id)
+        .fetch_optional(&state.db)
+        .await?;
+    exists.map(|_| ()).ok_or(ApiError::NotFound)
+}
+
 const POOL_METADATA_SQL: &str = r#"
 WITH pool AS (
   SELECT id, view, hash_raw FROM pool_hash WHERE view = $1
@@ -193,14 +203,7 @@ pub async fn metadata(
 ) -> Result<Json<Value>, ApiError> {
     let pool_id = ids::normalize_pool_id(&pool_id)
         .ok_or_else(|| ApiError::bad_request("Invalid or malformed pool id format."))?;
-
-    let exists = sqlx::query("SELECT 1 FROM pool_hash WHERE view = $1")
-        .bind(&pool_id)
-        .fetch_optional(&state.db)
-        .await?;
-    if exists.is_none() {
-        return Err(ApiError::NotFound);
-    }
+    require_pool(&state, &pool_id).await?;
 
     let row = sqlx::query(POOL_METADATA_SQL)
         .bind(&pool_id)
@@ -225,4 +228,144 @@ pub async fn metadata(
             .insert("error".into(), crate::fetch_error::envelope(&msg));
     }
     Ok(Json(body))
+}
+
+/// Pool lifecycle actions (registration + retirement certificates), matching
+/// the standard `/pools/{pool_id}/updates` shape: `tx_hash`, `cert_index`, and
+/// `action`. Ordered oldest-first by default, like the other list endpoints.
+const POOL_UPDATES_SQL: &str = r#"
+SELECT tx_hash, cert_index, action
+FROM (
+  SELECT t.id AS ord,
+    encode(t.hash, 'hex') AS tx_hash,
+    pu.cert_index::INTEGER AS cert_index,
+    'registered' AS action
+  FROM pool_update pu
+    JOIN pool_hash ph ON ph.id = pu.hash_id
+    JOIN tx t ON t.id = pu.registered_tx_id
+  WHERE ph.view = $1
+  UNION ALL
+  SELECT t.id AS ord,
+    encode(t.hash, 'hex') AS tx_hash,
+    pr.cert_index::INTEGER AS cert_index,
+    'deregistered' AS action
+  FROM pool_retire pr
+    JOIN pool_hash ph ON ph.id = pr.hash_id
+    JOIN tx t ON t.id = pr.announced_tx_id
+  WHERE ph.view = $1
+) u
+ORDER BY (ord, cert_index) {dir}
+LIMIT $2 OFFSET $3
+"#;
+
+pub async fn updates(
+    State(state): State<AppState>,
+    Path(pool_id): Path<String>,
+    Query(params): Query<PageParams>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let pool_id = ids::normalize_pool_id(&pool_id)
+        .ok_or_else(|| ApiError::bad_request("Invalid or malformed pool id format."))?;
+    let page = Page::resolve(&params, &headers)?;
+    require_pool(&state, &pool_id).await?;
+
+    let sql = POOL_UPDATES_SQL.replace("{dir}", page.order.sql());
+    let rows = sqlx::query(&sql)
+        .bind(&pool_id)
+        .bind(page.limit)
+        .bind(page.offset)
+        .fetch_all(&state.db)
+        .await?;
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "tx_hash": r.s("tx_hash"),
+                "cert_index": r.int4("cert_index"),
+                "action": r.s("action"),
+            })
+        })
+        .collect();
+    Ok(Json(Value::Array(out)))
+}
+
+/// Extension beyond the standard pool endpoints: the parameter set each
+/// registration certificate declared. The standard `/updates` only reports that
+/// a registration happened, and no standard endpoint exposes *historical*
+/// parameters - which is what telling a re-registration's changes apart needs.
+const POOL_REGISTRATIONS_SQL: &str = r#"
+SELECT encode(t.hash, 'hex') AS tx_hash,
+  pu.cert_index::INTEGER AS cert_index,
+  pu.active_epoch_no::INTEGER AS active_epoch,
+  pu.pledge::TEXT AS pledge,
+  pu.fixed_cost::TEXT AS cost,
+  pu.margin::FLOAT8 AS margin,
+  encode(pu.vrf_key_hash, 'hex') AS vrf_key,
+  ra.view AS reward_account,
+  pmr.url AS metadata_url,
+  encode(pmr.hash, 'hex') AS metadata_hash,
+  (
+    SELECT COALESCE(json_agg(sa.view ORDER BY sa.view), '[]'::json)
+    FROM pool_owner po
+      JOIN stake_address sa ON sa.id = po.addr_id
+    WHERE po.pool_update_id = pu.id
+  ) AS owners,
+  (
+    SELECT COALESCE(json_agg(json_build_object(
+        'ipv4', pr.ipv4, 'ipv6', pr.ipv6,
+        'dns', pr.dns_name, 'srv', pr.dns_srv_name,
+        'port', pr.port
+      ) ORDER BY pr.id), '[]'::json)
+    FROM pool_relay pr
+    WHERE pr.update_id = pu.id
+  ) AS relays
+FROM pool_update pu
+  JOIN pool_hash ph ON ph.id = pu.hash_id
+  JOIN tx t ON t.id = pu.registered_tx_id
+  LEFT JOIN stake_address ra ON ra.id = pu.reward_addr_id
+  LEFT JOIN pool_metadata_ref pmr ON pmr.id = pu.meta_id
+WHERE ph.view = $1
+ORDER BY (pu.registered_tx_id, pu.cert_index) {dir}
+LIMIT $2 OFFSET $3
+"#;
+
+pub async fn registrations(
+    State(state): State<AppState>,
+    Path(pool_id): Path<String>,
+    Query(params): Query<PageParams>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let pool_id = ids::normalize_pool_id(&pool_id)
+        .ok_or_else(|| ApiError::bad_request("Invalid or malformed pool id format."))?;
+    let page = Page::resolve(&params, &headers)?;
+    require_pool(&state, &pool_id).await?;
+
+    let sql = POOL_REGISTRATIONS_SQL.replace("{dir}", page.order.sql());
+    let rows = sqlx::query(&sql)
+        .bind(&pool_id)
+        .bind(page.limit)
+        .bind(page.offset)
+        .fetch_all(&state.db)
+        .await?;
+
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "tx_hash": r.s("tx_hash"),
+                "cert_index": r.int4("cert_index"),
+                "active_epoch": r.int4("active_epoch"),
+                "pledge": r.s("pledge"),
+                "cost": r.s("cost"),
+                "margin": r.float8("margin"),
+                "vrf_key": r.s("vrf_key"),
+                "reward_account": r.s("reward_account"),
+                "metadata_url": r.s("metadata_url"),
+                "metadata_hash": r.s("metadata_hash"),
+                "owners": r.json("owners"),
+                "relays": r.json("relays"),
+            })
+        })
+        .collect();
+    Ok(Json(Value::Array(out)))
 }

@@ -393,6 +393,22 @@ impl Enricher {
         .await;
     }
 
+    /// Mark pool registrations that follow an earlier registration as updates,
+    /// attaching the parameters that changed. No-op without a backend.
+    pub async fn stamp_pool_registration_updates(
+        &self,
+        network: crate::config::Network,
+        events: &mut [crate::model::ChainEvent],
+    ) {
+        crate::pool_history::stamp_registration_updates(
+            &self.http,
+            self.backend_url.as_deref(),
+            network,
+            events,
+        )
+        .await;
+    }
+
     /// Compact drep-id → name map for the browser (loaded once per page).
     pub fn dreps_json(&self) -> Value {
         self.drep_cache.to_names_json()

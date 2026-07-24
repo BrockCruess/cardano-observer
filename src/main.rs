@@ -15,6 +15,7 @@ mod model;
 mod ogmios;
 mod parse;
 mod persist;
+mod pool_history;
 mod pools;
 mod registry;
 mod scam_tokens;

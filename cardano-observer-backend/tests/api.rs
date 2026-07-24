@@ -98,10 +98,19 @@ INSERT INTO tx (id, hash, block_id, block_index, out_sum, fee, deposit, size,
   (7, decode('{tx7}', 'hex'), 2, 5, 8000000, 200000, 0, 512, NULL, 123456789, TRUE, 0);
 
 INSERT INTO pool_update (id, hash_id, cert_index, vrf_key_hash, pledge, active_epoch_no,
-    meta_id, margin, fixed_cost, registered_tx_id) VALUES
-  (1, 1, 0, NULL, 1000000000, 501, 1, 0.03, 340000000, 2),
-  (2, 2, 1, NULL, 2000000000, 501, NULL, 0.05, 340000000, 2),
-  (3, 3, 2, NULL, 3000000000, 501, 2, 0.05, 340000000, 2);
+    meta_id, margin, fixed_cost, reward_addr_id, registered_tx_id) VALUES
+  (1, 1, 0, NULL, 1000000000, 501, 1, 0.03, 340000000, 1, 2),
+  (2, 2, 1, NULL, 2000000000, 501, NULL, 0.05, 340000000, NULL, 2),
+  (3, 3, 2, NULL, 3000000000, 501, 2, 0.05, 340000000, NULL, 2),
+  -- An *earlier* registration for pool A (tx 1), so pool A has history while
+  -- its current/latest update stays row 1 for the other pool endpoints.
+  (4, 1, 0, NULL, 2500000000, 500, 1, 0.04, 350000000, 1, 1);
+
+INSERT INTO pool_owner (id, addr_id, pool_update_id) VALUES (1, 1, 1), (2, 1, 4);
+
+INSERT INTO pool_relay (id, update_id, ipv4, ipv6, dns_name, dns_srv_name, port) VALUES
+  (1, 1, NULL, NULL, 'relay-one.example', NULL, 6000),
+  (2, 4, NULL, NULL, 'relay-two.example', NULL, 6000);
 
 INSERT INTO pool_retire (id, hash_id, cert_index, announced_tx_id, retiring_epoch) VALUES
   (1, 2, 0, 3, 490),
@@ -338,6 +347,51 @@ async fn api_endpoints() {
     assert_eq!(status, 404);
     let (status, _) = get(&app, "/pools/garbage/metadata", &[]).await;
     assert_eq!(status, 400);
+
+    // Pool lifecycle actions: registrations + retirements, oldest first.
+    let (status, body) = get(&app, &format!("/pools/{}/updates", ids.pool_a), &[]).await;
+    assert_eq!(status, 200);
+    let ups = body.as_array().unwrap();
+    assert_eq!(ups.len(), 2, "pool A registered twice");
+    assert_eq!(ups[0]["tx_hash"], "01".repeat(32)); // ascending by default
+    assert_eq!(ups[0]["action"], "registered");
+    assert_eq!(ups[0]["cert_index"], 0);
+    assert_eq!(ups[1]["tx_hash"], "02".repeat(32));
+    // Retirements appear in the same log.
+    let (_, body) = get(&app, &format!("/pools/{}/updates", ids.pool_b), &[]).await;
+    let actions: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["action"].as_str())
+        .collect();
+    assert!(actions.contains(&"deregistered"), "got {actions:?}");
+    // Unknown pool → 404, like the other per-pool endpoints.
+    let unknown = bech("pool", &[0x66; 28]);
+    let (status, _) = get(&app, &format!("/pools/{unknown}/updates"), &[]).await;
+    assert_eq!(status, 404);
+
+    // Extension: the parameters each registration declared, newest first.
+    let (status, body) = get(
+        &app,
+        &format!("/pools/{}/registrations?order=desc", ids.pool_a),
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200);
+    let regs = body.as_array().unwrap();
+    assert_eq!(regs.len(), 2);
+    assert_eq!(regs[0]["tx_hash"], "02".repeat(32));
+    assert_eq!(regs[0]["pledge"], "1000000000");
+    assert_eq!(regs[0]["cost"], "340000000");
+    assert_eq!(regs[0]["margin"], 0.03);
+    assert_eq!(regs[0]["metadata_url"], "https://example.com/pool.json");
+    assert_eq!(regs[0]["owners"][0], ids.stake);
+    assert_eq!(regs[0]["relays"][0]["dns"], "relay-one.example");
+    assert_eq!(regs[1]["pledge"], "2500000000");
+    assert_eq!(regs[1]["relays"][0]["dns"], "relay-two.example");
+    let (status, _) = get(&app, &format!("/pools/{unknown}/registrations"), &[]).await;
+    assert_eq!(status, 404);
 
     // DRep list: all rows, then the active-only filter the observer uses.
     let (status, body) = get(&app, "/governance/dreps", &[]).await;

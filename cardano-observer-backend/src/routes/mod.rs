@@ -17,6 +17,8 @@ pub fn router(state: AppState) -> Router {
         .route("/pools", get(pools::list))
         .route("/pools/extended", get(pools::extended))
         .route("/pools/{pool_id}/metadata", get(pools::metadata))
+        .route("/pools/{pool_id}/updates", get(pools::updates))
+        .route("/pools/{pool_id}/registrations", get(pools::registrations))
         .route("/governance/dreps", get(governance::dreps))
         .route(
             "/governance/dreps/{drep_id}/metadata",

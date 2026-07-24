@@ -229,7 +229,24 @@ CREATE TABLE pool_update (
   meta_id BIGINT,
   margin DOUBLE PRECISION NOT NULL,
   fixed_cost NUMERIC NOT NULL,
+  reward_addr_id BIGINT,
   registered_tx_id BIGINT NOT NULL
+);
+
+CREATE TABLE pool_owner (
+  id BIGSERIAL PRIMARY KEY,
+  addr_id BIGINT NOT NULL,
+  pool_update_id BIGINT NOT NULL
+);
+
+CREATE TABLE pool_relay (
+  id BIGSERIAL PRIMARY KEY,
+  update_id BIGINT NOT NULL,
+  ipv4 TEXT,
+  ipv6 TEXT,
+  dns_name TEXT,
+  dns_srv_name TEXT,
+  port INTEGER
 );
 
 CREATE TABLE pool_retire (
