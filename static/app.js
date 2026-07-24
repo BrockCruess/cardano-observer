@@ -325,8 +325,16 @@ function fmtQty(qtyStr, decimals) {
   if (v >= 1e9) out = (v / 1e9).toFixed(2) + "B";
   else if (v >= 1e6) out = (v / 1e6).toFixed(2) + "M";
   else if (v >= 1e4) out = nf.format(Math.round(v));
+  // Small amounts of a high-precision token (wrapped BTC and friends) round
+  // away to "0" at the usual 3-4 dp — show every decimal the token defines.
+  else if (v < 10 && decimals > 0) out = trimTrailingZeros(v.toFixed(decimals));
   else out = nf.format(+v.toFixed(Math.min(decimals || 0, 4)));
   return decorateFrac((neg ? "-" : "") + out);
+}
+
+/** Drop trailing zeros (and any bare trailing dot) from a fixed-decimal string. */
+function trimTrailingZeros(s) {
+  return s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
 }
 
 /** Format on-chain qty with known decimals. Unknown → placeholder until registry
